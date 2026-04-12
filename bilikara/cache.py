@@ -1,0 +1,848 @@
+from __future__ import annotations
+
+from datetime import datetime
+import json
+import os
+import platform
+import queue
+import re
+import shutil
+import stat
+import subprocess
+import tarfile
+import threading
+import urllib.request
+import zipfile
+from pathlib import Path
+from typing import Any, Iterator, TextIO
+
+from .config import (
+    BB_DOWN_DIR,
+    BB_DOWN_PATH_OVERRIDE,
+    BB_DOWN_RELEASE_API,
+    BB_DOWN_VERSION_FILE,
+    CACHE_DIR,
+    COOKIE,
+    FFMPEG_BUNDLED_PATH,
+    FFMPEG_RUNTIME_PATH,
+    FFMPEG_PATH_OVERRIDE,
+    FFMPEG_TOOLS_DIR,
+    FFPROBE_RUNTIME_PATH,
+    INTERNAL_VENDOR_DIR,
+    LOG_DIR,
+    MAX_CACHE_ITEMS,
+    VENDOR_DIR,
+)
+from .store import PlaylistStore
+
+MEDIA_EXTENSIONS = {".mp4", ".mkv", ".webm", ".flv", ".m4v"}
+PROGRESS_RE = re.compile(r"(\d{1,3}(?:\.\d+)?)\s*%")
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+CACHE_LIMIT_CHOICES = (1, 2, 3, 4, 5)
+CREATE_NO_WINDOW = 0x08000000
+STARTF_USESHOWWINDOW = 0x00000001
+SW_HIDE = 0
+
+
+class CacheManager:
+    def __init__(self, store: PlaylistStore, max_cache_items: int = MAX_CACHE_ITEMS) -> None:
+        self.store = store
+        self.max_cache_items = max(0, max_cache_items)
+        self.tasks: "queue.Queue[str]" = queue.Queue()
+        self.pending_ids: set[str] = set()
+        self.desired_ids: set[str] = set()
+        self.stop_event = threading.Event()
+        self.lock = threading.RLock()
+        self.binary_state = "idle"
+        self.binary_version = ""
+        self.binary_message = "等待任务"
+        self.binary_prepare_lock = threading.Lock()
+        self.ffmpeg_state = "idle"
+        self.ffmpeg_version = ""
+        self.ffmpeg_message = "等待任务"
+        self.ffmpeg_prepare_lock = threading.Lock()
+        self.active_process: subprocess.Popen[str] | None = None
+        self.active_item_id: str | None = None
+        self.log_dir = LOG_DIR / "bbdown"
+        self.worker = threading.Thread(target=self._worker_loop, daemon=True)
+        self.worker.start()
+
+    def status(self, metrics: dict[str, Any] | None = None) -> dict:
+        cache_metrics = metrics or self.cache_metrics()
+        with self.lock:
+            return {
+                "state": self.binary_state,
+                "version": self.binary_version,
+                "message": self.binary_message,
+                "max_cache_items": self.max_cache_items,
+                "cache_bytes": cache_metrics["total_bytes"],
+                "cached_items": cache_metrics["item_count"],
+            }
+
+    def ffmpeg_status(self) -> dict[str, Any]:
+        with self.lock:
+            return {
+                "state": self.ffmpeg_state,
+                "version": self.ffmpeg_version,
+                "message": self.ffmpeg_message,
+                "path": str(FFMPEG_RUNTIME_PATH),
+            }
+
+    def policy_snapshot(self, metrics: dict[str, Any] | None = None) -> dict[str, Any]:
+        cache_metrics = metrics or self.cache_metrics()
+        with self.lock:
+            return {
+                "max_cache_items": self.max_cache_items,
+                "choices": list(CACHE_LIMIT_CHOICES),
+                "clear_on_exit": True,
+                "usage_bytes": cache_metrics["total_bytes"],
+                "cached_item_count": cache_metrics["item_count"],
+            }
+
+    def enrich_snapshot(
+        self,
+        payload: dict[str, Any],
+        metrics: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        cache_metrics = metrics or self.cache_metrics()
+        item_bytes = cache_metrics["item_bytes"]
+
+        current_item = payload.get("current_item")
+        if isinstance(current_item, dict):
+            current_item["cache_size_bytes"] = int(item_bytes.get(str(current_item.get("id") or ""), 0))
+
+        playlist = payload.get("playlist")
+        if isinstance(playlist, list):
+            for item in playlist:
+                if isinstance(item, dict):
+                    item["cache_size_bytes"] = int(item_bytes.get(str(item.get("id") or ""), 0))
+        return payload
+
+    def set_max_cache_items(self, max_cache_items: int) -> int:
+        bounded = min(max(int(max_cache_items), CACHE_LIMIT_CHOICES[0]), CACHE_LIMIT_CHOICES[-1])
+        with self.lock:
+            if self.max_cache_items == bounded:
+                return bounded
+            self.max_cache_items = bounded
+        self.sync_with_playlist()
+        return bounded
+
+    def cache_metrics(self) -> dict[str, Any]:
+        item_bytes: dict[str, int] = {}
+        total_bytes = 0
+        item_count = 0
+        if not CACHE_DIR.exists():
+            return {
+                "item_bytes": item_bytes,
+                "total_bytes": total_bytes,
+                "item_count": item_count,
+            }
+
+        for child in CACHE_DIR.iterdir():
+            if not child.is_dir():
+                continue
+            size = self._path_size(child)
+            item_bytes[child.name] = size
+            total_bytes += size
+            if size > 0:
+                item_count += 1
+
+        return {
+            "item_bytes": item_bytes,
+            "total_bytes": total_bytes,
+            "item_count": item_count,
+        }
+
+    def prepare_session(self) -> None:
+        self._clear_cache_root()
+        for item in self.store.list_items():
+            self.store.update_item(
+                item.id,
+                cache_status="pending",
+                cache_progress=0.0,
+                cache_message=self._waiting_message(),
+                local_relative_path="",
+                local_media_url="",
+                persist_backup=False,
+            )
+        self.sync_with_playlist()
+
+    def prewarm_binary(self) -> None:
+        threading.Thread(target=self._prewarm_binary_worker, daemon=True).start()
+
+    def shutdown(self) -> None:
+        with self.lock:
+            if self.stop_event.is_set():
+                return
+            self.stop_event.set()
+            process = self.active_process
+        self._terminate_process(process)
+        self._clear_cache_root()
+        for item in self.store.list_items():
+            self.store.update_item(
+                item.id,
+                cache_status="pending",
+                cache_progress=0.0,
+                cache_message="缓存已在退出时清空",
+                local_relative_path="",
+                local_media_url="",
+                persist_backup=False,
+            )
+
+    def sync_with_playlist(self) -> None:
+        items = self.store.list_items()
+        desired_ids = {item.id for item in items[: self.max_cache_items]} if self.max_cache_items > 0 else set()
+        current_ids = {item.id for item in items}
+        with self.lock:
+            self.desired_ids = desired_ids
+
+        self._cleanup_orphan_cache_dirs(current_ids)
+        self._stop_active_if_not_desired(desired_ids)
+
+        for item in items:
+            if item.id in desired_ids:
+                self._ensure_item_cached(item)
+            else:
+                self._drop_item_cache(item.id, self._outside_window_message())
+
+    def enqueue(self, item_id: str) -> None:
+        with self.lock:
+            if item_id in self.pending_ids or self.stop_event.is_set():
+                return
+            self.pending_ids.add(item_id)
+        self.tasks.put(item_id)
+
+    def _worker_loop(self) -> None:
+        while not self.stop_event.is_set():
+            try:
+                item_id = self.tasks.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            try:
+                self._cache_item(item_id)
+            finally:
+                with self.lock:
+                    self.pending_ids.discard(item_id)
+                self.tasks.task_done()
+
+    def _cache_item(self, item_id: str, allow_refresh_retry: bool = True) -> None:
+        if self.stop_event.is_set() or not self._should_cache(item_id):
+            return
+        item = self.store.get_item(item_id)
+        if not item:
+            self._remove_cache_dir(item_id)
+            return
+
+        self.store.update_item(
+            item_id,
+            cache_status="queued",
+            cache_progress=0.0,
+            cache_message="等待缓存队列",
+            persist_backup=False,
+        )
+
+        try:
+            binary_path = self._ensure_bbdown()
+        except Exception as exc:  # noqa: BLE001
+            self.store.update_item(
+                item_id,
+                cache_status="failed",
+                cache_message=f"BBDown 不可用: {exc}",
+                persist_backup=False,
+            )
+            return
+
+        try:
+            ffmpeg_path = self._ensure_ffmpeg(force_refresh=False)
+        except Exception as exc:  # noqa: BLE001
+            self._append_log_line(log_path, f"[{self._log_timestamp()}] ffmpeg unavailable: {exc}")
+            self.store.update_item(
+                item_id,
+                cache_status="failed",
+                cache_message=f"FFmpeg 不可用: {exc}",
+                persist_backup=False,
+            )
+            return
+
+        if not self._should_cache(item_id):
+            return
+
+        item_dir = CACHE_DIR / item_id
+        item_dir.mkdir(parents=True, exist_ok=True)
+        log_path = self._item_log_path(item_id)
+        self.store.update_item(
+            item_id,
+            cache_status="downloading",
+            cache_message="开始缓存视频",
+            persist_backup=False,
+        )
+        self._append_log_line(log_path, "")
+        self._append_log_line(log_path, f"[{self._log_timestamp()}] start cache: {item.display_title}")
+
+        command = [
+            str(binary_path),
+            item.resolved_url,
+            "-p",
+            str(item.page),
+            "--work-dir",
+            str(item_dir),
+            "--ffmpeg-path",
+            self._bbdown_ffmpeg_path_arg(ffmpeg_path),
+            "--file-pattern",
+            "video",
+            "--skip-subtitle",
+            "--skip-cover",
+            "--skip-ai",
+        ]
+        if COOKIE:
+            command.extend(["-c", COOKIE])
+        self._append_log_line(log_path, f"[{self._log_timestamp()}] command: {json.dumps(command, ensure_ascii=False)}")
+
+        cancelled = False
+        cancel_message = "缓存已停止"
+        last_message = "缓存中"
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            errors="replace",
+            bufsize=1,
+            cwd=str(BB_DOWN_DIR),
+            env=self._tool_process_env(ffmpeg_path),
+            **self._hidden_process_kwargs(),
+        )
+        with self.lock:
+            self.active_process = process
+            self.active_item_id = item_id
+        try:
+            assert process.stdout is not None
+            for raw_line in self._iter_output_messages(process.stdout):
+                line = self._normalize_output_line(raw_line)
+                if not line:
+                    continue
+                last_message = line
+                self._append_log_line(log_path, f"[{self._log_timestamp()}] {line}")
+                progress = self._extract_progress(line)
+                changes = {"cache_message": self._display_message(line, progress)}
+                if progress is not None:
+                    changes["cache_progress"] = progress
+                self.store.update_item(item_id, persist_backup=False, **changes)
+                if self.stop_event.is_set():
+                    cancelled = True
+                    cancel_message = "缓存已停止"
+                    self._terminate_process(process)
+                    break
+                if not self._should_cache(item_id):
+                    cancelled = True
+                    cancel_message = self._outside_window_message()
+                    self._terminate_process(process)
+                    break
+            return_code = process.wait()
+        finally:
+            with self.lock:
+                if self.active_process is process:
+                    self.active_process = None
+                    self.active_item_id = None
+
+        if cancelled or self.stop_event.is_set() or not self._should_cache(item_id):
+            self._append_log_line(log_path, f"[{self._log_timestamp()}] cancelled: {cancel_message}")
+            self._drop_item_cache(item_id, cancel_message)
+            return
+
+        if return_code != 0:
+            if allow_refresh_retry and self._should_force_refresh_bbdown(last_message):
+                self._append_log_line(
+                    log_path,
+                    f"[{self._log_timestamp()}] detected stale BBDown hint, forcing refresh and retry",
+                )
+                try:
+                    self._ensure_bbdown(force_refresh=True)
+                    shutil.rmtree(item_dir, ignore_errors=True)
+                    item_dir.mkdir(parents=True, exist_ok=True)
+                    self._cache_item(item_id, allow_refresh_retry=False)
+                    return
+                except Exception as exc:  # noqa: BLE001
+                    self._append_log_line(
+                        log_path,
+                        f"[{self._log_timestamp()}] forced BBDown refresh failed: {exc}",
+                    )
+            self._append_log_line(
+                log_path,
+                f"[{self._log_timestamp()}] failed with exit code {return_code}: {last_message}",
+            )
+            self.store.update_item(
+                item_id,
+                cache_status="failed",
+                cache_message=f"缓存失败: {last_message}",
+                persist_backup=False,
+            )
+            return
+
+        media_file = self._find_media_file(item_dir)
+        if not media_file:
+            self._append_log_line(
+                log_path,
+                f"[{self._log_timestamp()}] failed: media file not found after download",
+            )
+            self.store.update_item(
+                item_id,
+                cache_status="failed",
+                cache_message="缓存完成，但没有找到可播放文件",
+                persist_backup=False,
+            )
+            return
+
+        relative_path = str(media_file.relative_to(CACHE_DIR))
+        self.store.update_item(
+            item_id,
+            cache_status="ready",
+            cache_progress=100.0,
+            cache_message="缓存已完成",
+            local_relative_path=relative_path,
+            local_media_url=self._build_media_url(relative_path),
+            persist_backup=False,
+        )
+        self._append_log_line(log_path, f"[{self._log_timestamp()}] ready: {media_file.name}")
+
+    def _ensure_bbdown(self, force_refresh: bool = False) -> Path:
+        with self.binary_prepare_lock:
+            override = Path(BB_DOWN_PATH_OVERRIDE) if BB_DOWN_PATH_OVERRIDE else None
+            if override and override.exists():
+                with self.lock:
+                    self.binary_state = "ready"
+                    self.binary_message = f"使用外部 BBDown: {override}"
+                return override
+
+            current_binary = self._local_binary_path()
+            release = self._fetch_latest_release()
+            latest_version = str(release["tag_name"])
+            version_matches = (
+                not force_refresh
+                and
+                BB_DOWN_VERSION_FILE.exists()
+                and BB_DOWN_VERSION_FILE.read_text(encoding="utf-8").strip() == latest_version
+                and current_binary.exists()
+            )
+
+            if version_matches:
+                with self.lock:
+                    self.binary_state = "ready"
+                    self.binary_version = latest_version
+                    self.binary_message = f"BBDown {latest_version} 已就绪"
+                return current_binary
+
+            with self.lock:
+                self.binary_state = "installing"
+                self.binary_message = "正在强制更新 BBDown" if force_refresh else "正在检查和更新 BBDown"
+
+            asset = self._select_asset(release)
+            tmp_archive = BB_DOWN_DIR / asset["name"]
+            urllib.request.urlretrieve(asset["browser_download_url"], tmp_archive)
+            self._extract_archive(tmp_archive, BB_DOWN_DIR)
+            tmp_archive.unlink(missing_ok=True)
+
+            if not current_binary.exists():
+                raise RuntimeError("下载完成，但未找到 BBDown 可执行文件")
+
+            current_binary.chmod(current_binary.stat().st_mode | stat.S_IEXEC)
+            BB_DOWN_VERSION_FILE.write_text(latest_version, encoding="utf-8")
+
+            with self.lock:
+                self.binary_state = "ready"
+                self.binary_version = latest_version
+                self.binary_message = f"BBDown {latest_version} 已更新"
+
+            return current_binary
+
+    def _fetch_latest_release(self) -> dict:
+        request = urllib.request.Request(
+            BB_DOWN_RELEASE_API,
+            headers={"User-Agent": "bilikara"},
+        )
+        with urllib.request.urlopen(request, timeout=20) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    def _select_asset(self, release: dict) -> dict:
+        system = platform.system().lower()
+        machine = platform.machine().lower()
+        if system == "linux" and machine in {"x86_64", "amd64"}:
+            token = "linux-x64"
+        elif system == "linux" and machine in {"aarch64", "arm64"}:
+            token = "linux-arm64"
+        elif system == "darwin" and machine in {"x86_64", "amd64"}:
+            token = "osx-x64"
+        elif system == "darwin" and machine in {"arm64", "aarch64"}:
+            token = "osx-arm64"
+        elif system == "windows" and machine in {"x86_64", "amd64"}:
+            token = "win-x64"
+        else:
+            raise RuntimeError(f"当前平台暂未适配 BBDown 自动下载: {system}/{machine}")
+
+        assets = release.get("assets") or []
+        for asset in assets:
+            name = str(asset.get("name") or "").lower()
+            if token in name and (name.endswith(".zip") or name.endswith(".tar.gz")):
+                return asset
+        raise RuntimeError(f"没有找到适合当前平台的 BBDown 安装包: {token}")
+
+    def _extract_archive(self, archive_path: Path, output_dir: Path) -> None:
+        for child in output_dir.iterdir():
+            if child.is_file() and child.name != archive_path.name:
+                child.unlink()
+            elif child.is_dir():
+                shutil.rmtree(child)
+
+        if archive_path.name.endswith(".zip"):
+            with zipfile.ZipFile(archive_path) as zf:
+                zf.extractall(output_dir)
+        elif archive_path.name.endswith(".tar.gz"):
+            with tarfile.open(archive_path, "r:gz") as tf:
+                tf.extractall(output_dir)
+        else:
+            raise RuntimeError(f"不支持的 BBDown 压缩包格式: {archive_path.name}")
+
+    def _local_binary_path(self) -> Path:
+        return BB_DOWN_DIR / ("BBDown.exe" if os.name == "nt" else "BBDown")
+
+    def _find_media_file(self, item_dir: Path) -> Path | None:
+        media_files = [
+            path
+            for path in item_dir.rglob("*")
+            if path.is_file() and path.suffix.lower() in MEDIA_EXTENSIONS
+        ]
+        if not media_files:
+            return None
+        return max(media_files, key=lambda path: path.stat().st_size)
+
+    @staticmethod
+    def _iter_output_messages(stream: TextIO) -> Iterator[str]:
+        buffer = ""
+        last_progress: int | None = None
+        last_emitted = ""
+        while True:
+            character = stream.read(1)
+            if character == "":
+                break
+            if character == "\b":
+                buffer = buffer[:-1]
+                continue
+            if character in {"\r", "\n"}:
+                stripped = buffer.strip()
+                if stripped and stripped != last_emitted:
+                    yield stripped
+                    last_emitted = stripped
+                buffer = ""
+                last_progress = None
+                continue
+            buffer += character
+            progress = CacheManager._extract_progress(CacheManager._normalize_output_line(buffer))
+            if progress is None:
+                continue
+            progress_step = int(progress)
+            if progress_step != last_progress:
+                stripped = buffer.strip()
+                if stripped and stripped != last_emitted:
+                    yield stripped
+                    last_emitted = stripped
+                last_progress = progress_step
+        stripped = buffer.strip()
+        if stripped and stripped != last_emitted:
+            yield stripped
+
+    @staticmethod
+    def _normalize_output_line(line: str) -> str:
+        return ANSI_ESCAPE_RE.sub("", line).strip()
+
+    @staticmethod
+    def _display_message(line: str, progress: float | None) -> str:
+        if progress is None:
+            return line
+        return f"缓存中 {round(progress)}%"
+
+    @staticmethod
+    def _should_force_refresh_bbdown(message: str) -> bool:
+        text = str(message or "")
+        return "升级到最新版本" in text or "最新版本后重试" in text
+
+    @staticmethod
+    def _extract_progress(line: str) -> float | None:
+        matches = PROGRESS_RE.findall(line)
+        if not matches:
+            return None
+        progress = float(matches[-1])
+        return max(0.0, min(progress, 100.0))
+
+    def _build_media_url(self, relative_path: str) -> str:
+        return f"/media/{relative_path.replace(os.sep, '/')}"
+
+    def _ensure_ffmpeg(self, force_refresh: bool = False) -> Path:
+        with self.ffmpeg_prepare_lock:
+            override = Path(FFMPEG_PATH_OVERRIDE).expanduser() if FFMPEG_PATH_OVERRIDE else None
+            if override and override.exists():
+                version = self._read_ffmpeg_version(override)
+                if not version:
+                    raise RuntimeError(f"外部 FFmpeg 不可执行: {override}")
+                with self.lock:
+                    self.ffmpeg_state = "ready"
+                    self.ffmpeg_version = version
+                    self.ffmpeg_message = f"使用外部 FFmpeg: {override}"
+                return override
+
+            with self.lock:
+                self.ffmpeg_state = "checking"
+                self.ffmpeg_message = "正在准备 FFmpeg"
+
+            source_ffmpeg, source_ffprobe = self._preferred_ffmpeg_sources()
+            runtime_ffmpeg = FFMPEG_RUNTIME_PATH
+            runtime_ffprobe = FFPROBE_RUNTIME_PATH
+
+            if source_ffmpeg:
+                FFMPEG_TOOLS_DIR.mkdir(parents=True, exist_ok=True)
+                self._sync_runtime_tool(source_ffmpeg, runtime_ffmpeg, force_refresh=force_refresh)
+                if source_ffprobe:
+                    self._sync_runtime_tool(source_ffprobe, runtime_ffprobe, force_refresh=force_refresh)
+            elif not runtime_ffmpeg.exists():
+                raise RuntimeError("未找到可用的 ffmpeg，可重新打包或设置 FFMPEG_PATH")
+
+            version = self._read_ffmpeg_version(runtime_ffmpeg)
+            if not version:
+                raise RuntimeError(f"FFmpeg 不可执行: {runtime_ffmpeg}")
+            with self.lock:
+                self.ffmpeg_state = "ready"
+                self.ffmpeg_version = version
+                self.ffmpeg_message = f"FFmpeg {version} 已就绪" if version else "FFmpeg 已就绪"
+            return runtime_ffmpeg
+
+    def _preferred_ffmpeg_sources(self) -> tuple[Path | None, Path | None]:
+        for vendor_dir in (VENDOR_DIR, INTERNAL_VENDOR_DIR):
+            ffmpeg_path = vendor_dir / ("ffmpeg.exe" if os.name == "nt" else "ffmpeg")
+            if not ffmpeg_path.exists():
+                continue
+            ffprobe_path = vendor_dir / ("ffprobe.exe" if os.name == "nt" else "ffprobe")
+            return ffmpeg_path, ffprobe_path if ffprobe_path.exists() else None
+
+        system_ffmpeg = shutil.which("ffmpeg")
+        if system_ffmpeg:
+            ffprobe = shutil.which("ffprobe")
+            return Path(system_ffmpeg), Path(ffprobe) if ffprobe else None
+        return None, None
+
+    @staticmethod
+    def _sync_runtime_tool(source: Path, target: Path, *, force_refresh: bool) -> None:
+        source_resolved = source.resolve()
+        if target.exists() and not force_refresh:
+            try:
+                if source_resolved.samefile(target):
+                    return
+            except OSError:
+                pass
+            if target.stat().st_size == source_resolved.stat().st_size:
+                return
+        shutil.copy2(source_resolved, target)
+        target.chmod(target.stat().st_mode | stat.S_IEXEC)
+
+    def _read_ffmpeg_version(self, binary_path: Path) -> str:
+        try:
+            process = subprocess.run(
+                [str(binary_path), "-version"],
+                capture_output=True,
+                text=True,
+                errors="replace",
+                check=False,
+                timeout=10,
+                **self._hidden_process_kwargs(),
+            )
+        except (OSError, subprocess.SubprocessError):
+            return ""
+
+        if process.returncode != 0:
+            return ""
+
+        first_line = (process.stdout or process.stderr or "").splitlines()
+        if not first_line:
+            return ""
+        parts = first_line[0].split()
+        if len(parts) >= 3 and parts[0].lower() == "ffmpeg" and parts[1] == "version":
+            return parts[2]
+        return ""
+
+    @staticmethod
+    def _bbdown_ffmpeg_path_arg(binary_path: Path) -> str:
+        target = binary_path if binary_path.is_dir() else binary_path.parent
+        return str(target)
+
+    @staticmethod
+    def _tool_process_env(binary_path: Path) -> dict[str, str]:
+        env = os.environ.copy()
+        path_entries = []
+        ffmpeg_dir = str(binary_path if binary_path.is_dir() else binary_path.parent)
+        if ffmpeg_dir:
+            path_entries.append(ffmpeg_dir)
+        bbdown_dir = str(BB_DOWN_DIR)
+        if bbdown_dir and bbdown_dir not in path_entries:
+            path_entries.append(bbdown_dir)
+        existing_path = env.get("PATH", "")
+        env["PATH"] = os.pathsep.join([*path_entries, existing_path]) if existing_path else os.pathsep.join(path_entries)
+        return env
+
+    @staticmethod
+    def _hidden_process_kwargs() -> dict[str, Any]:
+        if os.name != "nt":
+            return {}
+
+        kwargs: dict[str, Any] = {"creationflags": CREATE_NO_WINDOW}
+        startupinfo_cls = getattr(subprocess, "STARTUPINFO", None)
+        if startupinfo_cls is not None:
+            startupinfo = startupinfo_cls()
+            startupinfo.dwFlags |= STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = SW_HIDE
+            kwargs["startupinfo"] = startupinfo
+        return kwargs
+
+    def _item_log_path(self, item_id: str) -> Path:
+        return self.log_dir / f"{item_id}.log"
+
+    @staticmethod
+    def _log_timestamp() -> str:
+        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    def _append_log_line(self, path: Path, message: str) -> None:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(f"{message}\n")
+        except OSError:
+            return
+
+    def _cleanup_orphan_cache_dirs(self, valid_ids: set[str]) -> None:
+        for child in CACHE_DIR.iterdir():
+            if child.name not in valid_ids:
+                if child.is_dir():
+                    shutil.rmtree(child, ignore_errors=True)
+                else:
+                    child.unlink(missing_ok=True)
+
+    def _clear_cache_root(self) -> None:
+        for child in CACHE_DIR.iterdir():
+            if child.is_dir():
+                shutil.rmtree(child, ignore_errors=True)
+            else:
+                child.unlink(missing_ok=True)
+
+    def _path_size(self, path: Path) -> int:
+        if not path.exists():
+            return 0
+        if path.is_file():
+            try:
+                return path.stat().st_size
+            except OSError:
+                return 0
+
+        total = 0
+        for child in path.rglob("*"):
+            if not child.is_file():
+                continue
+            try:
+                total += child.stat().st_size
+            except OSError:
+                continue
+        return total
+
+    def _ensure_item_cached(self, item) -> None:
+        media_path = CACHE_DIR / item.local_relative_path if item.local_relative_path else None
+        if media_path and media_path.exists():
+            self.store.update_item(
+                item.id,
+                local_media_url=self._build_media_url(item.local_relative_path),
+                cache_status="ready",
+                cache_progress=100.0,
+                cache_message="缓存已完成",
+                persist_backup=False,
+            )
+            return
+
+        with self.lock:
+            already_in_flight = item.id in self.pending_ids or self.active_item_id == item.id
+        if already_in_flight:
+            return
+
+        self.store.update_item(
+            item.id,
+            cache_status="pending",
+            cache_progress=0.0,
+            cache_message="等待缓存",
+            local_relative_path="",
+            local_media_url="",
+            persist_backup=False,
+        )
+        self.enqueue(item.id)
+
+    def _drop_item_cache(self, item_id: str, message: str) -> None:
+        self._remove_cache_dir(item_id)
+        self.store.update_item(
+            item_id,
+            cache_status="pending",
+            cache_progress=0.0,
+            cache_message=message,
+            local_relative_path="",
+            local_media_url="",
+            persist_backup=False,
+        )
+
+    def _remove_cache_dir(self, item_id: str) -> None:
+        shutil.rmtree(CACHE_DIR / item_id, ignore_errors=True)
+
+    def _should_cache(self, item_id: str) -> bool:
+        with self.lock:
+            return item_id in self.desired_ids and not self.stop_event.is_set()
+
+    def _stop_active_if_not_desired(self, desired_ids: set[str]) -> None:
+        with self.lock:
+            item_id = self.active_item_id
+            process = self.active_process
+        if item_id and item_id not in desired_ids:
+            self._terminate_process(process)
+
+    def _terminate_process(self, process: subprocess.Popen[str] | None) -> None:
+        if not process or process.poll() is not None:
+            return
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+
+    def _outside_window_message(self) -> str:
+        if self.max_cache_items <= 0:
+            return "已禁用自动缓存"
+        return f"仅自动缓存前 {self.max_cache_items} 首，已释放本地缓存"
+
+    def _waiting_message(self) -> str:
+        if self.max_cache_items <= 0:
+            return "已禁用自动缓存"
+        return "等待缓存"
+
+    def _prewarm_binary_worker(self) -> None:
+        try:
+            with self.lock:
+                if self.ffmpeg_state == "idle":
+                    self.ffmpeg_state = "checking"
+                    self.ffmpeg_message = "后台准备 FFmpeg 中"
+            self._ensure_ffmpeg(force_refresh=True)
+        except Exception as exc:  # noqa: BLE001
+            with self.lock:
+                self.ffmpeg_state = "failed"
+                self.ffmpeg_message = f"FFmpeg 准备失败: {exc}"
+
+        try:
+            with self.lock:
+                if self.binary_state == "idle":
+                    self.binary_state = "checking"
+                    self.binary_message = "后台检查 BBDown 更新中"
+            self._ensure_bbdown()
+        except Exception as exc:  # noqa: BLE001
+            with self.lock:
+                self.binary_state = "failed"
+                self.binary_message = f"BBDown 检查失败: {exc}"

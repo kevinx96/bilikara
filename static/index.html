@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>bilikara host</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <section class="backup-banner hidden" id="backup-banner">
+        <div class="backup-copy">
+          <p class="backup-title">已自动载入上次备份</p>
+          <p class="backup-text" id="backup-text">共恢复 0 首歌曲。</p>
+        </div>
+        <div class="backup-actions">
+          <button type="button" id="discard-backup-button" class="banner-action">
+            清空备份
+          </button>
+          <button type="button" id="dismiss-backup-button" class="banner-close" aria-label="关闭">
+            x
+          </button>
+        </div>
+      </section>
+
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">bilibili karaoke host</p>
+          <h1>bilikara</h1>
+          <p class="designer">@VZRXS</p>
+        </div>
+        <div class="top-controls">
+          <div class="mode-control">
+            <span class="control-label">播放模式</span>
+            <div class="mode-switch" id="mode-switch">
+              <button class="mode-button active" data-mode="local">本地播放</button>
+              <button class="mode-button" data-mode="online">在线外挂</button>
+            </div>
+          </div>
+          <div class="status-chip" id="cache-settings">
+            <button type="button" class="status-chip-toggle" id="cache-settings-toggle" aria-expanded="false">
+              <span class="control-label">BBDown</span>
+              <strong id="bbdown-status">检查中</strong>
+              <p class="cache-chip-meta" id="cache-chip-meta">缓存占用 0 MB</p>
+            </button>
+            <div class="cache-panel hidden" id="cache-panel">
+              <div class="cache-panel-row">
+                <div>
+                  <p class="cache-panel-label">当前缓存占用</p>
+                  <strong class="cache-panel-value" id="cache-usage-detail">0 MB</strong>
+                </div>
+                <div class="cache-panel-side">
+                  <p class="cache-panel-hint">关闭服务后会自动清空</p>
+                  <p class="cache-panel-hint cache-panel-tool-hint" id="ffmpeg-status-hint">FFmpeg 检查中</p>
+                </div>
+              </div>
+              <div class="cache-panel-row cache-panel-row-stack">
+                <div>
+                  <p class="cache-panel-label">缓存数量</p>
+                  <p class="cache-panel-hint">调整后立即生效</p>
+                </div>
+                <div class="cache-slider-block">
+                  <strong class="cache-panel-value cache-limit-value" id="cache-limit-value">缓存 3 首</strong>
+                  <input
+                    id="cache-limit-slider"
+                    class="cache-limit-slider"
+                    type="range"
+                    min="1"
+                    max="5"
+                    step="1"
+                    value="3"
+                  />
+                  <div class="cache-limit-scale" id="cache-limit-scale">
+                    <span>1</span>
+                    <span>2</span>
+                    <span>3</span>
+                    <span>4</span>
+                    <span>5</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <main class="layout">
+        <section class="left-column">
+          <section class="player-panel">
+            <div class="panel-head">
+              <div>
+                <p class="section-tag">Now Playing</p>
+                <h2 id="current-title">还没有歌曲</h2>
+              </div>
+            </div>
+
+            <div class="player-frame" id="player-frame">
+              <div class="empty-state">
+                <p>把 B 站视频链接加入列表后，这里会开始播放。</p>
+              </div>
+            </div>
+          </section>
+
+          <section class="request-panel">
+            <div class="request-head">
+              <div>
+                <p class="section-tag">Song Request</p>
+                <h2>点歌</h2>
+              </div>
+            </div>
+
+            <form id="add-form" class="add-form compact-form">
+              <input
+                id="url-input"
+                name="url"
+                type="text"
+                placeholder="视频 URL / BV 号"
+                autocomplete="off"
+              />
+              <button type="submit">点歌</button>
+              <button type="button" id="queue-next-button" class="secondary">插队到下一首</button>
+              <p class="help-text" id="form-message"></p>
+            </form>
+          </section>
+        </section>
+
+        <aside class="queue-card list-card">
+          <div class="queue-card-head">
+            <div>
+              <p class="section-tag" id="list-tag">Queue</p>
+              <h2><span id="list-title">播放列表</span> <span class="queue-count" id="queue-count">(0首)</span></h2>
+            </div>
+            <div class="queue-toolbar">
+              <button type="button" id="clear-playlist-button" class="toolbar-button ghost">
+                清空列表
+              </button>
+              <button type="button" id="history-toggle-button" class="toolbar-button ghost">
+                历史记录
+              </button>
+            </div>
+          </div>
+          <div class="list-stage" id="list-stage">
+            <div class="list-stage-inner">
+              <section class="list-face list-face-front">
+                <section class="queue-current hidden" id="queue-current">
+                  <div class="queue-current-side">
+                    <div class="queue-current-status">
+                      <div class="queue-current-label">
+                        <span class="queue-current-indicator" id="queue-current-indicator" aria-hidden="true"></span>
+                        <p class="queue-current-tag" id="queue-current-tag">播放中</p>
+                      </div>
+                    </div>
+                    <button class="next-button queue-current-next" id="next-button">切歌</button>
+                  </div>
+                  <div class="queue-current-main">
+                    <h3 class="queue-current-title" id="queue-current-title">还没有歌曲</h3>
+                  </div>
+                </section>
+                <div id="playlist" class="playlist"></div>
+              </section>
+              <section class="list-face list-face-back">
+                <div id="history-list" class="history-list"></div>
+              </section>
+            </div>
+          </div>
+        </aside>
+      </main>
+    </div>
+
+    <template id="playlist-item-template">
+      <article class="song-item" draggable="true">
+        <div class="song-badge-column">
+          <div class="song-progress-badge">
+            <span class="song-index-label"></span>
+            <span class="song-badge-check hidden">✓</span>
+          </div>
+          <span class="song-size-label"></span>
+        </div>
+        <div class="song-main">
+          <div class="song-top-row">
+            <h3 class="song-title"></h3>
+          </div>
+          <div class="song-bottom-row">
+            <p class="song-note hidden"></p>
+            <div class="song-actions">
+              <button data-action="play-now">立即播放</button>
+              <button data-action="move-next" class="secondary">插队</button>
+              <button data-action="remove" class="icon-button action-danger" title="移除" aria-label="移除">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path
+                    d="M9 3h6l1 2h4v2H4V5h4l1-2Zm-1 6h2v8H8V9Zm6 0h2v8h-2V9ZM7 7h10l-.8 12.2A2 2 0 0 1 14.2 21H9.8a2 2 0 0 1-1.99-1.8L7 7Z"
+                    fill="currentColor"
+                  />
+                </svg>
+              </button>
+            </div>
+          </div>
+        </div>
+      </article>
+    </template>
+
+    <template id="history-item-template">
+      <article class="history-item">
+        <div class="history-main">
+          <h3 class="history-title"></h3>
+          <div class="history-meta">
+            <span class="history-time"></span>
+            <span class="history-count"></span>
+          </div>
+        </div>
+        <div class="history-actions">
+          <button data-action="history-tail">加入列表</button>
+          <button data-action="history-next" class="secondary">插队</button>
+        </div>
+      </article>
+    </template>
+
+    <div class="confirm-popover hidden" id="confirm-popover" role="dialog" aria-modal="false">
+      <p class="confirm-text" id="confirm-text">确定执行这个操作吗？</p>
+      <div class="confirm-actions">
+        <button type="button" id="confirm-cancel" class="toolbar-button">取消</button>
+        <button type="button" id="confirm-ok" class="next-button">确认</button>
+      </div>
+    </div>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>
