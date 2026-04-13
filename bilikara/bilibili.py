@@ -12,6 +12,7 @@ import time
 from .config import BILIBILI_HEADERS, COOKIE, GATCHA_UIDS, GATCHA_KEYWORDS
 from dataclasses import dataclass
 from .models import PlaylistItem
+import bilikara.config as cfg  
 
 VIDEO_PATH_RE = re.compile(r"/video/(?P<vid>(BV[0-9A-Za-z]+|av\d+))", re.IGNORECASE)
 BV_RE = re.compile(r"^(BV[0-9A-Za-z]+)$", re.IGNORECASE)
@@ -50,13 +51,14 @@ class BilibiliError(RuntimeError):
     pass
 
 
+
+
 def request_json(url: str) -> dict:
     headers = dict(BILIBILI_HEADERS)
-    if COOKIE:
-        headers["Cookie"] = COOKIE
+    if cfg.COOKIE:                          
+        headers["Cookie"] = cfg.COOKIE
     else:
         print("Warning: [bilikara] COOKIE 变量为空，API 将以游客身份访问。")
-        pass
     request = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(request, timeout=15) as response:
         return json.loads(response.read().decode("utf-8"))

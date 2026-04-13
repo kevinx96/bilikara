@@ -115,7 +115,6 @@ PORT = int(os.getenv("BILIKARA_PORT", "8080"))
 MAX_CACHE_ITEMS = max(0, int(os.getenv("BILIKARA_MAX_CACHE_ITEMS", "3")))
 # MAX_CACHE_ITEMS = min(max(0, int(os.getenv("BILIKARA_MAX_CACHE_ITEMS", "3"))), 5)  # force max=5
 COOKIE = os.getenv("BILIKARA_BILIBILI_COOKIE", "").strip()
-print(f"DEBUG: {COOKIE}")
 BB_DOWN_PATH_OVERRIDE = os.getenv("BB_DOWN_PATH", "").strip()
 FFMPEG_PATH_OVERRIDE = os.getenv("FFMPEG_PATH", "").strip()
 
