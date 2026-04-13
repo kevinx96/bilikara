@@ -49,6 +49,8 @@ class AppContext:
         self.cache_manager.prewarm_binary()
         self._closed = False
         self._server: ThreadingHTTPServer | None = None
+        self._host = HOST
+        self._port = PORT
         self._shutdown_on_last_client = False
         self._client_lock = threading.RLock()
         self._client_last_seen: dict[str, float] = {}
@@ -72,6 +74,7 @@ class AppContext:
         payload["session_flags"] = {
             "auto_restored_backup": self.auto_restored_backup,
         }
+        payload["remote_access"] = self.remote_access_snapshot()
         return payload
 
     def add_item(self, item, *, position: str) -> None:
@@ -109,6 +112,9 @@ class AppContext:
     def set_mode(self, mode: str) -> None:
         self.store.set_mode(mode)
 
+    def set_audio_variant(self, item_id: str, variant_id: str) -> bool:
+        return self.store.set_audio_variant(item_id, variant_id)
+
     def set_cache_limit(self, max_cache_items: int) -> None:
         self.cache_manager.set_max_cache_items(max_cache_items)
 
@@ -127,11 +133,27 @@ class AppContext:
     def bind_server(self, server: ThreadingHTTPServer, *, shutdown_on_last_client: bool) -> None:
         with self._client_lock:
             self._server = server
+            bound_host, bound_port = server.server_address[:2]
+            self._host = str(bound_host)
+            self._port = int(bound_port)
             self._shutdown_on_last_client = shutdown_on_last_client
             self._client_last_seen.clear()
             self._client_seen_once = False
             self._no_clients_since = None
             self._shutdown_requested = False
+
+    def remote_access_snapshot(self) -> dict[str, object]:
+        host = self._host
+        port = self._port
+        browser_host = "127.0.0.1" if host == "0.0.0.0" else host
+        local_url = f"http://{browser_host}:{port}/remote"
+        lan_urls = [f"{base}/remote" for base in _network_access_urls(host, port)]
+        preferred_url = lan_urls[0] if lan_urls else local_url
+        return {
+            "local_url": local_url,
+            "lan_urls": lan_urls,
+            "preferred_url": preferred_url,
+        }
 
     def touch_client(self, client_id: str) -> None:
         client_key = str(client_id or "").strip()
@@ -284,6 +306,15 @@ class BilikaraHandler(BaseHTTPRequestHandler):
                 CONTEXT.set_mode(mode)
                 self._write_json({"ok": True, "data": CONTEXT.snapshot()})
                 return
+            if route == "/api/player/audio-variant":
+                self._require_id(body)
+                variant_id = str(body.get("variant_id") or "").strip()
+                if not variant_id:
+                    raise ValueError("missing variant_id")
+                if not CONTEXT.set_audio_variant(body["item_id"], variant_id):
+                    raise ValueError("invalid audio variant")
+                self._write_json({"ok": True, "data": CONTEXT.snapshot()})
+                return
             if route == "/api/cache-policy":
                 max_cache_items = body.get("max_cache_items")
                 if not isinstance(max_cache_items, int):
@@ -346,7 +377,12 @@ class BilikaraHandler(BaseHTTPRequestHandler):
         self._write_json({"ok": True, "data": CONTEXT.snapshot()})
 
     def _serve_static(self, route: str) -> None:
-        relative = "index.html" if route in {"", "/"} else route.lstrip("/")
+        if route in {"", "/"}:
+            relative = "index.html"
+        elif route in {"/remote", "/remote/"}:
+            relative = "remote.html"
+        else:
+            relative = route.lstrip("/")
         static_path = (STATIC_DIR / relative).resolve()
         if not str(static_path).startswith(str(STATIC_DIR.resolve())) or not static_path.exists():
             self._write_json({"ok": False, "error": "资源不存在"}, status=HTTPStatus.NOT_FOUND)
@@ -453,6 +489,10 @@ def _serve(
     browser_host = "127.0.0.1" if host == "0.0.0.0" else host
     url = f"http://{browser_host}:{actual_port}"
     print(f"{status_label} running on {url}")
+    print(f"{status_label} mobile remote: {url}/remote")
+    for access_url in _network_access_urls(host, actual_port):
+        print(f"{status_label} LAN access: {access_url}")
+        print(f"{status_label} mobile remote (LAN): {access_url}/remote")
 
     if auto_open_browser:
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()
@@ -472,9 +512,9 @@ def run(
     port: int = PORT,
     open_browser: bool = True,
     auto_select_port: bool = True,
-    shutdown_on_last_client: bool | None = None,
+    shutdown_on_last_client: bool | None = False,
 ) -> None:
-    close_when_browser_exits = open_browser if shutdown_on_last_client is None else shutdown_on_last_client
+    close_when_browser_exits = False if shutdown_on_last_client is None else shutdown_on_last_client
     _serve(
         host=host,
         port=port,
@@ -510,3 +550,26 @@ def _find_available_port(host: str, preferred_port: int) -> int:
                 continue
             return candidate
     raise OSError(f"无法为 bilikara 找到可用端口，起始端口: {preferred_port}")
+
+
+def _network_access_urls(host: str, port: int) -> list[str]:
+    if host not in {"0.0.0.0", "::"}:
+        return []
+
+    candidates: list[str] = []
+    seen: set[str] = set()
+    try:
+        addresses = socket.getaddrinfo(socket.gethostname(), None, family=socket.AF_INET)
+    except OSError:
+        addresses = []
+
+    for entry in addresses:
+        ip = entry[4][0]
+        if ip.startswith("127."):
+            continue
+        url = f"http://{ip}:{port}"
+        if url in seen:
+            continue
+        seen.add(url)
+        candidates.append(url)
+    return candidates

@@ -6,6 +6,7 @@ const state = {
   disconnectSent: false,
   data: null,
   playerSignature: "",
+  playerContext: null,
   listView: "queue",
   cacheSettingsOpen: false,
   cacheLimitSaving: false,
@@ -13,6 +14,7 @@ const state = {
   backupBannerDismissed: false,
   backupBannerTimer: null,
   localAdvanceInFlight: false,
+  pendingPlaybackRestore: null,
   dragItemId: "",
   dragTargetId: "",
   dragTargetAfter: false,
@@ -32,6 +34,7 @@ const elements = {
   cacheLimitScale: document.getElementById("cache-limit-scale"),
   currentTitle: document.getElementById("current-title"),
   playerFrame: document.getElementById("player-frame"),
+  audioVariantBar: document.getElementById("audio-variant-bar"),
   addForm: document.getElementById("add-form"),
   urlInput: document.getElementById("url-input"),
   formMessage: document.getElementById("form-message"),
@@ -60,6 +63,11 @@ const elements = {
   confirmText: document.getElementById("confirm-text"),
   confirmCancel: document.getElementById("confirm-cancel"),
   confirmOk: document.getElementById("confirm-ok"),
+  copyRemoteUrlButton: document.getElementById("copy-remote-url-button"),
+  remoteQrImage: document.getElementById("remote-qr-image"),
+  remoteQrPlaceholder: document.getElementById("remote-qr-placeholder"),
+  remoteUrlLink: document.getElementById("remote-url-link"),
+  remoteUrlHint: document.getElementById("remote-url-hint"),
 };
 
 function setFormMessage(message, isError = false) {
@@ -141,11 +149,13 @@ function render() {
     : "还没有歌曲";
   renderListHeader(data.playlist, data.history || []);
   renderCacheSettings(data.bbdown, data.ffmpeg, data.cache_policy);
+  renderRemoteAccess(data.remote_access);
 
   document.querySelectorAll(".mode-button").forEach((button) => {
     button.classList.toggle("active", button.dataset.mode === data.playback_mode);
   });
 
+  renderAudioVariantBar(currentItem, data.playback_mode);
   renderPlayer(currentItem, data.playback_mode);
   renderQueueCurrent(currentItem);
   if (!state.dragItemId) {
@@ -174,6 +184,80 @@ function normalizeWheelDelta(event, container) {
     return event.deltaY * container.clientHeight;
   }
   return event.deltaY;
+}
+
+function renderRemoteAccess(remoteAccess) {
+  const preferredUrl = String(remoteAccess?.preferred_url || "");
+  const lanUrls = Array.isArray(remoteAccess?.lan_urls) ? remoteAccess.lan_urls : [];
+  const localUrl = String(remoteAccess?.local_url || "");
+  const displayUrl = preferredUrl || localUrl || `${window.location.origin}/remote`;
+
+  elements.remoteUrlLink.href = displayUrl;
+  elements.remoteUrlLink.textContent = displayUrl;
+
+  if (lanUrls.length > 1) {
+    elements.remoteUrlHint.textContent = `同网地址候选：${lanUrls.join(" · ")}`;
+  } else if (lanUrls.length === 1) {
+    elements.remoteUrlHint.textContent = "手机和服务端在同一个局域网内时，可直接扫码访问。";
+  } else {
+    elements.remoteUrlHint.textContent = "暂未识别到局域网地址，可手动复制当前地址访问。";
+  }
+
+  renderRemoteQr(displayUrl);
+}
+
+function renderRemoteQr(url) {
+  const normalizedUrl = String(url || "").trim();
+  if (!normalizedUrl) {
+    elements.remoteQrImage.classList.add("hidden");
+    elements.remoteQrPlaceholder.textContent = "暂无可用访问地址";
+    elements.remoteQrPlaceholder.classList.remove("hidden");
+    return;
+  }
+
+  const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=220x220&margin=0&data=${encodeURIComponent(normalizedUrl)}`;
+  if (elements.remoteQrImage.dataset.qrUrl === qrUrl) {
+    return;
+  }
+
+  elements.remoteQrImage.dataset.qrUrl = qrUrl;
+  elements.remoteQrImage.classList.add("hidden");
+  elements.remoteQrPlaceholder.textContent = "正在生成二维码...";
+  elements.remoteQrPlaceholder.classList.remove("hidden");
+  elements.remoteQrImage.onload = () => {
+    elements.remoteQrPlaceholder.classList.add("hidden");
+    elements.remoteQrImage.classList.remove("hidden");
+  };
+  elements.remoteQrImage.onerror = () => {
+    elements.remoteQrImage.classList.add("hidden");
+    elements.remoteQrPlaceholder.textContent = "二维码加载失败，请复制下方链接到手机访问。";
+    elements.remoteQrPlaceholder.classList.remove("hidden");
+  };
+  elements.remoteQrImage.src = qrUrl;
+}
+
+async function copyRemoteUrl() {
+  const url = elements.remoteUrlLink.href;
+  if (!url) {
+    setFormMessage("当前没有可复制的手机访问地址。", true);
+    return;
+  }
+
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(url);
+    } else {
+      const input = document.createElement("input");
+      input.value = url;
+      document.body.appendChild(input);
+      input.select();
+      document.execCommand("copy");
+      input.remove();
+    }
+    setFormMessage("手机访问链接已复制。");
+  } catch {
+    setFormMessage("复制失败，请手动复制页面中的链接。", true);
+  }
 }
 
 function renderListHeader(playlist, history) {
@@ -265,18 +349,97 @@ function currentStatusForItem(item) {
   return { state: "pending", label: "待缓存" };
 }
 
+function audioVariantsForItem(item) {
+  if (!item || !Array.isArray(item.audio_variants)) {
+    return [];
+  }
+  return item.audio_variants.filter((variant) => variant && variant.media_url);
+}
+
+function selectedAudioVariantForItem(item) {
+  const variants = audioVariantsForItem(item);
+  if (!variants.length) {
+    return null;
+  }
+  const selectedId = String(item.selected_audio_variant_id || "").trim();
+  return variants.find((variant) => variant.id === selectedId) || variants[0];
+}
+
+function selectedMediaUrlForItem(item) {
+  const selectedVariant = selectedAudioVariantForItem(item);
+  return selectedVariant?.media_url || item.local_media_url || "";
+}
+
+function renderAudioVariantBar(currentItem, playbackMode) {
+  if (playbackMode !== "local" || !currentItem) {
+    elements.audioVariantBar.innerHTML = "";
+    elements.audioVariantBar.classList.add("hidden");
+    return;
+  }
+
+  const variants = audioVariantsForItem(currentItem);
+  if (variants.length <= 1) {
+    elements.audioVariantBar.innerHTML = "";
+    elements.audioVariantBar.classList.add("hidden");
+    return;
+  }
+
+  const selectedVariant = selectedAudioVariantForItem(currentItem);
+  elements.audioVariantBar.innerHTML = "";
+  variants.forEach((variant) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "audio-variant-button";
+    button.textContent = variant.label || variant.id;
+    button.dataset.itemId = currentItem.id;
+    button.dataset.variantId = variant.id;
+    button.classList.toggle("active", variant.id === selectedVariant?.id);
+    elements.audioVariantBar.appendChild(button);
+  });
+  elements.audioVariantBar.classList.remove("hidden");
+}
+
 function renderPlayer(currentItem, playbackMode) {
+  const selectedMediaUrl = currentItem ? selectedMediaUrlForItem(currentItem) : "";
   const signature = [
     currentItem ? currentItem.id : "none",
     playbackMode,
-    currentItem ? currentItem.local_media_url : "",
+    selectedMediaUrl,
     currentItem ? currentItem.cache_status : "",
   ].join("|");
 
   if (signature === state.playerSignature) {
     return;
   }
+
+  const previousPlayerContext = state.playerContext;
+  if (
+    !state.pendingPlaybackRestore
+    && playbackMode === "local"
+    && currentItem
+    && selectedMediaUrl
+    && previousPlayerContext?.playbackMode === "local"
+    && previousPlayerContext.itemId === currentItem.id
+    && previousPlayerContext.mediaUrl
+    && previousPlayerContext.mediaUrl !== selectedMediaUrl
+  ) {
+    const currentVideo = elements.playerFrame.querySelector("video");
+    if (currentVideo) {
+      state.pendingPlaybackRestore = {
+        itemId: currentItem.id,
+        variantId: selectedAudioVariantForItem(currentItem)?.id || "",
+        currentTime: Number(currentVideo.currentTime || 0),
+        wasPlaying: !currentVideo.paused,
+      };
+    }
+  }
+
   state.playerSignature = signature;
+  state.playerContext = {
+    itemId: currentItem ? currentItem.id : "",
+    mediaUrl: selectedMediaUrl,
+    playbackMode,
+  };
 
   if (!currentItem) {
     elements.playerFrame.innerHTML =
@@ -298,17 +461,36 @@ function renderPlayer(currentItem, playbackMode) {
     return;
   }
 
-  if (currentItem.local_media_url) {
+  if (selectedMediaUrl) {
     elements.playerFrame.innerHTML = `
       <video
         controls
         autoplay
         preload="metadata"
-        src="${escapeHtml(currentItem.local_media_url)}"
+        src="${escapeHtml(selectedMediaUrl)}"
       ></video>
     `;
     const video = elements.playerFrame.querySelector("video");
     if (video) {
+      const pendingRestore = state.pendingPlaybackRestore;
+      if (
+        pendingRestore
+        && pendingRestore.itemId === currentItem.id
+        && pendingRestore.variantId === selectedAudioVariantForItem(currentItem)?.id
+      ) {
+        video.addEventListener("loadedmetadata", () => {
+          if (Number.isFinite(pendingRestore.currentTime)) {
+            video.currentTime = Math.min(
+              pendingRestore.currentTime,
+              Number.isFinite(video.duration) ? video.duration : pendingRestore.currentTime,
+            );
+          }
+          if (pendingRestore.wasPlaying) {
+            video.play().catch(() => {});
+          }
+          state.pendingPlaybackRestore = null;
+        }, { once: true });
+      }
       video.addEventListener("ended", async () => {
         await handleLocalPlaybackEnded();
       });
@@ -766,7 +948,7 @@ async function handleAdd(position, anchorPoint) {
   try {
     state.data = await submitAddRequest(url, position);
     elements.urlInput.value = "";
-    setFormMessage(position === "next" ? "已插队到下一首" : "已加入列表末尾");
+    setFormMessage(position === "next" ? "已顶歌到下一首" : "已加入列表末尾");
     render();
   } catch (error) {
     if (error.code === "duplicate_session_request") {
@@ -794,7 +976,7 @@ async function handleAddByUrl(url, position, anchorPoint) {
   setFormMessage("正在从历史记录加入列表...");
   try {
     state.data = await submitAddRequest(url, position);
-    setFormMessage(position === "next" ? "已从历史插队到下一首" : "已从历史加入列表");
+    setFormMessage(position === "next" ? "已从历史顶歌到下一首" : "已从历史加入列表");
     render();
   } catch (error) {
     if (error.code === "duplicate_session_request") {
@@ -930,6 +1112,10 @@ elements.queueNextButton.addEventListener("click", async (event) => {
   await handleAdd("next", point);
 });
 
+elements.copyRemoteUrlButton.addEventListener("click", async () => {
+  await copyRemoteUrl();
+});
+
 elements.discardBackupButton.addEventListener("click", async () => {
   await discardBackup();
 });
@@ -991,6 +1177,43 @@ elements.modeSwitch.addEventListener("click", async (event) => {
     state.data = await apiPost("/api/mode", { mode: button.dataset.mode });
     render();
   } catch (error) {
+    setFormMessage(error.message, true);
+  }
+});
+
+elements.audioVariantBar.addEventListener("click", async (event) => {
+  const button = event.target.closest("button[data-variant-id]");
+  if (!button || !state.data?.current_item) {
+    return;
+  }
+
+  const currentItem = state.data.current_item;
+  if (button.dataset.itemId !== currentItem.id) {
+    return;
+  }
+
+  const nextVariantId = button.dataset.variantId || "";
+  const selectedVariant = selectedAudioVariantForItem(currentItem);
+  if (!nextVariantId || nextVariantId === selectedVariant?.id) {
+    return;
+  }
+
+  const video = elements.playerFrame.querySelector("video");
+  state.pendingPlaybackRestore = {
+    itemId: currentItem.id,
+    variantId: nextVariantId,
+    currentTime: video ? Number(video.currentTime || 0) : 0,
+    wasPlaying: video ? !video.paused : true,
+  };
+  try {
+    state.data = await apiPost("/api/player/audio-variant", {
+      item_id: currentItem.id,
+      variant_id: nextVariantId,
+    });
+    state.playerSignature = "";
+    render();
+  } catch (error) {
+    state.pendingPlaybackRestore = null;
     setFormMessage(error.message, true);
   }
 });
