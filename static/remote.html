@@ -5,13 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>bilikara remote</title>
     <link rel="stylesheet" href="/remote.css" />
+    <link rel="stylesheet" href="/remote-queue.css" />
   </head>
   <body>
     <main class="remote-shell">
       <header class="hero-card">
         <p class="eyebrow">Mobile Request</p>
         <h1>bilikara 点歌台</h1>
-        <p class="hero-copy">在同一局域网里，用手机查看当前队列、浏览点歌历史，并直接继续点歌。</p>
+        <p class="hero-copy">在同一个局域网里，用手机查看当前队列、继续点歌，也可以远程控制正在播放的视频。</p>
       </header>
 
       <section class="panel now-playing-panel">
@@ -20,8 +21,17 @@
           <button type="button" id="refresh-button" class="ghost-button">刷新</button>
         </div>
         <h2 id="current-title">正在读取状态...</h2>
+        <p id="current-requester" class="requester-line hidden"></p>
         <p id="current-meta" class="muted"></p>
         <div id="audio-variant-bar" class="audio-variant-bar hidden"></div>
+        <div id="player-control-panel" class="player-control-panel hidden">
+          <div class="player-control-row">
+            <button type="button" class="ghost-button" data-control-action="seek-relative" data-delta="-15">后退 15 秒</button>
+            <button type="button" class="primary-button" data-control-action="toggle-play">播放 / 暂停</button>
+            <button type="button" class="ghost-button" data-control-action="seek-relative" data-delta="15">快进 15 秒</button>
+          </div>
+          <p id="player-control-hint" class="player-control-hint"></p>
+        </div>
       </section>
 
       <section class="panel request-panel">
@@ -29,6 +39,7 @@
           <p class="panel-tag">Song Request</p>
         </div>
         <form id="request-form" class="request-form">
+          <select id="requester-select" name="requester_name"></select>
           <textarea
             id="url-input"
             name="url"
@@ -83,11 +94,25 @@
 
     <template id="queue-item-template">
       <article class="queue-item">
-        <div class="queue-main">
-          <h3 class="queue-title"></h3>
-          <p class="queue-note"></p>
+        <div class="queue-item-head">
+          <button type="button" class="queue-drag-handle" data-drag-handle aria-label="拖动排序">
+            <span aria-hidden="true">⋮⋮</span>
+          </button>
+          <span class="queue-order" aria-hidden="true"></span>
+          <div class="queue-main">
+            <div class="queue-title-row">
+              <h3 class="queue-title"></h3>
+              <span class="queue-requester hidden"></span>
+            </div>
+            <p class="queue-note"></p>
+          </div>
+          <span class="queue-state"></span>
         </div>
-        <span class="queue-state"></span>
+        <div class="queue-actions">
+          <button type="button" data-action="play-now" class="primary-button">立即播放</button>
+          <button type="button" data-action="move-next" class="secondary-button">顶歌</button>
+          <button type="button" data-action="remove" class="ghost-button danger-button">删除</button>
+        </div>
       </article>
     </template>
 
@@ -95,6 +120,7 @@
       <article class="history-item">
         <div class="history-main">
           <h3 class="history-title"></h3>
+          <p class="history-requester hidden"></p>
           <div class="history-meta">
             <span class="history-time"></span>
             <span class="history-count"></span>
@@ -108,5 +134,6 @@
     </template>
 
     <script src="/remote.js" defer></script>
+    <script src="/remote-queue.js" defer></script>
   </body>
 </html>

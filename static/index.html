@@ -10,16 +10,12 @@
     <div class="app-shell">
       <section class="backup-banner hidden" id="backup-banner">
         <div class="backup-copy">
-          <p class="backup-title">已自动载入上次备份</p>
-          <p class="backup-text" id="backup-text">共恢复 0 首歌曲。</p>
+          <p class="backup-title">Auto Restore</p>
+          <p class="backup-text" id="backup-text">检测到上次未完成的播放列表</p>
         </div>
         <div class="backup-actions">
-          <button type="button" id="discard-backup-button" class="banner-action">
-            清空备份
-          </button>
-          <button type="button" id="dismiss-backup-button" class="banner-close" aria-label="关闭">
-            x
-          </button>
+          <button type="button" id="discard-backup-button" class="banner-action">清空备份</button>
+          <button type="button" id="dismiss-backup-button" class="banner-close" aria-label="关闭">x</button>
         </div>
       </section>
 
@@ -34,7 +30,7 @@
             <span class="control-label">播放模式</span>
             <div class="mode-switch" id="mode-switch">
               <button class="mode-button active" data-mode="local">本地播放</button>
-              <button class="mode-button" data-mode="online">在线外挂</button>
+              <button class="mode-button" data-mode="online">在线播放</button>
             </div>
           </div>
           <div class="status-chip" id="cache-settings">
@@ -96,7 +92,7 @@
 
             <div class="player-frame" id="player-frame">
               <div class="empty-state">
-                <p>把 B 站视频链接加入列表后，这里会开始播放。</p>
+                <p>把 bilibili 视频链接加入列表后，这里会开始播放。</p>
               </div>
             </div>
             <div class="audio-variant-bar hidden" id="audio-variant-bar"></div>
@@ -111,6 +107,7 @@
             </div>
 
             <form id="add-form" class="add-form compact-form">
+              <select id="requester-select" name="requester_name"></select>
               <input
                 id="url-input"
                 name="url"
@@ -124,35 +121,48 @@
             </form>
           </section>
 
+          <section class="request-panel session-users-panel">
+            <div class="request-head">
+              <div>
+                <p class="section-tag">Singer Order</p>
+                <h2>本场用户</h2>
+              </div>
+            </div>
+
+            <form id="session-user-form" class="session-user-form">
+              <input
+                id="session-user-input"
+                name="session_user"
+                type="text"
+                maxlength="24"
+                placeholder="输入用户名"
+                autocomplete="off"
+              />
+              <button type="submit">添加用户</button>
+            </form>
+            <p class="help-text">点歌会按这里的顺序轮转插入，可以用上下按钮调整顺序。</p>
+            <div id="session-user-list" class="session-user-list"></div>
+          </section>
+
           <section class="remote-panel">
             <div class="request-head remote-head">
               <div>
                 <p class="section-tag">Mobile Remote</p>
                 <h2>手机点歌入口</h2>
               </div>
-              <button type="button" id="copy-remote-url-button" class="toolbar-button">
-                复制链接
-              </button>
+              <button type="button" id="copy-remote-url-button" class="toolbar-button">复制链接</button>
             </div>
             <div class="remote-card">
               <div class="remote-qr-wrap">
-                <img
-                  id="remote-qr-image"
-                  class="remote-qr-image hidden"
-                  alt="手机访问二维码"
-                />
-                <div id="remote-qr-placeholder" class="remote-qr-placeholder">
-                  正在生成二维码...
-                </div>
+                <img id="remote-qr-image" class="remote-qr-image hidden" alt="手机访问二维码" />
+                <div id="remote-qr-placeholder" class="remote-qr-placeholder">正在生成二维码...</div>
               </div>
               <div class="remote-copy">
                 <p class="remote-copy-label">手机浏览器打开</p>
                 <a id="remote-url-link" class="remote-url-link" href="/remote" target="_blank" rel="noreferrer">
                   /remote
                 </a>
-                <p id="remote-url-hint" class="remote-url-hint">
-                  请确保手机和服务端在同一个局域网内。
-                </p>
+                <p id="remote-url-hint" class="remote-url-hint">请确保手机和服务端在同一个局域网内。</p>
               </div>
             </div>
           </section>
@@ -165,12 +175,8 @@
               <h2><span id="list-title">播放列表</span> <span class="queue-count" id="queue-count">(0首)</span></h2>
             </div>
             <div class="queue-toolbar">
-              <button type="button" id="clear-playlist-button" class="toolbar-button ghost">
-                清空列表
-              </button>
-              <button type="button" id="history-toggle-button" class="toolbar-button ghost">
-                历史记录
-              </button>
+              <button type="button" id="clear-playlist-button" class="toolbar-button ghost">清空列表</button>
+              <button type="button" id="history-toggle-button" class="toolbar-button ghost">历史记录</button>
             </div>
           </div>
           <div class="list-stage" id="list-stage">
@@ -188,6 +194,7 @@
                   </div>
                   <div class="queue-current-main">
                     <h3 class="queue-current-title" id="queue-current-title">还没有歌曲</h3>
+                    <p class="queue-current-requester hidden" id="queue-current-requester"></p>
                   </div>
                 </section>
                 <div id="playlist" class="playlist"></div>
@@ -213,6 +220,7 @@
         <div class="song-main">
           <div class="song-top-row">
             <h3 class="song-title"></h3>
+            <span class="song-requester hidden"></span>
           </div>
           <div class="song-bottom-row">
             <p class="song-note hidden"></p>
@@ -237,6 +245,7 @@
       <article class="history-item">
         <div class="history-main">
           <h3 class="history-title"></h3>
+          <p class="history-requester hidden"></p>
           <div class="history-meta">
             <span class="history-time"></span>
             <span class="history-count"></span>

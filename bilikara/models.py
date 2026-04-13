@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from .title_cleanup import clean_display_title
+
 
 @dataclass
 class PlaylistItem:
@@ -28,6 +30,8 @@ class PlaylistItem:
     owner_mid: int = 0
     owner_name: str = ""
     owner_url: str = ""
+    requester_name: str = ""
+    queue_slot_type: str = "cycle"
     cache_status: str = "pending"
     cache_progress: float = 0.0
     cache_message: str = "等待缓存"
@@ -39,6 +43,11 @@ class PlaylistItem:
 
     def to_dict(self) -> dict[str, Any]:
         data = self.serialize()
+        data["display_title"] = clean_display_title(
+            title=self.title,
+            display_title=self.display_title,
+            part_title=self.part_title,
+        )
         data["is_cached"] = bool(self.local_media_url)
         return data
 
@@ -56,16 +65,25 @@ class HistoryEntry:
     original_url: str
     resolved_url: str
     requested_at: float
+    title: str = ""
+    part_title: str = ""
     owner_mid: int = 0
     owner_name: str = ""
     owner_url: str = ""
+    requester_name: str = ""
     request_count: int = 1
 
     def serialize(self) -> dict[str, Any]:
         return asdict(self)
 
     def to_dict(self) -> dict[str, Any]:
-        return self.serialize()
+        data = self.serialize()
+        data["display_title"] = clean_display_title(
+            title=self.title,
+            display_title=self.display_title,
+            part_title=self.part_title,
+        )
+        return data
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "HistoryEntry":
@@ -89,6 +107,7 @@ class SessionPlayedEntry:
     owner_mid: int = 0
     owner_name: str = ""
     owner_url: str = ""
+    requester_name: str = ""
 
     def serialize(self) -> dict[str, Any]:
         return asdict(self)

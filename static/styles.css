@@ -38,7 +38,8 @@ body {
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }
 
@@ -157,6 +158,8 @@ p {
 .next-button,
 .status-chip-toggle,
 .song-actions button,
+.session-user-form button,
+.session-user-actions button,
 .history-actions button,
 .icon-button,
 .mode-button,
@@ -183,6 +186,7 @@ p {
 .toolbar-button,
 .next-button,
 .song-actions button,
+.session-user-form button,
 .history-actions button,
 .compact-form button {
   padding: 10px 14px;
@@ -588,13 +592,14 @@ h2 {
 
 .compact-form {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: 180px minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 10px;
   margin-top: 12px;
 }
 
-input[type="text"] {
+input[type="text"],
+select {
   width: 100%;
   height: 48px;
   border-radius: 16px;
@@ -604,13 +609,20 @@ input[type="text"] {
   outline: none;
 }
 
-input[type="text"]:focus {
+input[type="text"]:focus,
+select:focus {
   border-color: rgba(208, 90, 63, 0.45);
   box-shadow: 0 0 0 4px rgba(208, 90, 63, 0.1);
 }
 
+select:disabled {
+  opacity: 0.68;
+  cursor: not-allowed;
+}
+
 .next-button,
 .compact-form button[type="submit"],
+.session-user-form button,
 .song-actions button:first-child,
 .history-actions button:first-child {
   background: var(--accent);
@@ -622,6 +634,86 @@ input[type="text"]:focus {
   color: var(--muted);
   font-size: 13px;
   grid-column: 1 / -1;
+}
+
+.session-user-form {
+  margin-top: 12px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+}
+
+.session-user-list {
+  display: grid;
+  gap: 10px;
+}
+
+.session-user-empty {
+  padding: 18px;
+}
+
+.session-user-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 12px 14px;
+  border-radius: 18px;
+  border: 1px solid rgba(91, 66, 47, 0.1);
+  background: rgba(255, 255, 255, 0.74);
+}
+
+.session-user-main {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.session-user-order {
+  width: 30px;
+  height: 30px;
+  border-radius: 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(208, 90, 63, 0.1);
+  color: var(--accent-deep);
+  font-weight: 700;
+  font-size: 13px;
+}
+
+.session-user-name {
+  min-width: 0;
+  font-size: 15px;
+  line-height: 1.25;
+}
+
+.session-user-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.session-user-actions button {
+  border: none;
+  min-height: 34px;
+  padding: 0 12px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.82);
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.session-user-actions button.danger {
+  color: var(--red);
+  background: rgba(177, 69, 69, 0.12);
+}
+
+.session-user-actions button:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
 }
 
 .remote-panel {
@@ -775,15 +867,16 @@ input[type="text"]:focus {
 
 .queue-current {
   margin-right: 4px;
-  padding: 12px 14px;
+  padding: 18px 18px;
   border-radius: 20px;
   background:
     linear-gradient(135deg, rgba(255, 255, 255, 0.84), rgba(255, 245, 236, 0.7));
   border: 1px solid rgba(208, 90, 63, 0.12);
   display: grid;
   grid-template-columns: 68px minmax(0, 1fr);
-  gap: 12px;
+  gap: 18px;
   align-items: stretch;
+  min-height: 122px;
 }
 
 .queue-current.hidden,
@@ -794,9 +887,9 @@ input[type="text"]:focus {
 .queue-current-side {
   display: grid;
   grid-template-rows: auto auto;
-  gap: 10px;
+  gap: 12px;
   align-content: space-between;
-  width: 68px;
+  width: 92px;
 }
 
 .queue-current-indicator {
@@ -831,7 +924,7 @@ input[type="text"]:focus {
 .queue-current-status {
   display: flex;
   align-items: center;
-  min-height: 20px;
+  min-height: 28px;
 }
 
 .queue-current[data-state="caching"] .queue-current-tag,
@@ -843,34 +936,58 @@ input[type="text"]:focus {
 .queue-current-label {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
 }
 
 .queue-current-tag {
   letter-spacing: 0;
   text-transform: none;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.1;
 }
 
 .queue-current-main {
   min-width: 0;
-  display: flex;
-  align-items: center;
+  display: grid;
+  align-content: center;
+  gap: 12px;
 }
 
 .queue-current-title {
   margin-top: 0;
-  font-size: 15px;
-  line-height: 1.35;
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1.15;
   color: var(--accent-deep);
   width: 100%;
 }
 
+.queue-current-requester,
+.history-requester {
+  margin-top: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: fit-content;
+  min-height: 44px;
+  padding: 0 16px;
+  border-radius: 999px;
+  background: rgba(208, 90, 63, 0.1);
+  font-size: 16px;
+  line-height: 1;
+  color: var(--accent-deep);
+}
+
 .queue-current-next {
-  width: 68px;
-  height: 36px;
-  min-width: 68px;
-  padding: 8px 12px;
-  border-radius: 14px;
+  width: 80px;
+  height: 44px;
+  min-width: 80px;
+  padding: 0 16px;
+  border-radius: 999px;
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1;
   justify-self: start;
 }
 
@@ -989,7 +1106,10 @@ input[type="text"]:focus {
 .song-badge-column {
   display: grid;
   justify-items: center;
+  align-content: center;
+  align-self: center;
   gap: 6px;
+  min-height: 100%;
 }
 
 .song-progress-badge {
@@ -1072,6 +1192,7 @@ input[type="text"]:focus {
 }
 
 .song-size-label {
+  width: 100%;
   min-height: 12px;
   font-size: 11px;
   line-height: 1.1;
@@ -1107,34 +1228,62 @@ input[type="text"]:focus {
 
 .song-main {
   min-width: 0;
-  min-height: 72px;
+  min-height: 96px;
   display: grid;
-  align-content: space-between;
-  gap: 12px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 18px;
 }
 
 .song-top-row,
 .song-bottom-row {
   display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.song-top-row {
+  min-width: 0;
+  flex-direction: column;
   align-items: flex-start;
+  justify-content: center;
   gap: 10px;
 }
 
 .song-bottom-row {
+  min-width: 300px;
+  flex-direction: column;
+  justify-content: center;
   align-items: center;
-  justify-content: space-between;
+  gap: 10px;
 }
 
 .song-title {
   min-width: 0;
-  font-size: 14px;
-  line-height: 1.35;
+  width: 100%;
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1.2;
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
   line-clamp: 2;
   white-space: normal;
   overflow: hidden;
+}
+
+.song-requester {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 30px;
+  padding: 0 12px;
+  border-radius: 999px;
+  background: rgba(208, 90, 63, 0.1);
+  color: var(--accent-deep);
+  font-size: 13px;
+  line-height: 1;
+  white-space: nowrap;
 }
 
 .icon-button.danger {
@@ -1144,11 +1293,11 @@ input[type="text"]:focus {
 }
 
 .song-note {
-  min-width: 0;
-  flex: 1;
+  min-width: 220px;
   color: var(--muted);
   font-size: 12px;
   line-height: 1.35;
+  text-align: center;
   white-space: normal;
   overflow: hidden;
   display: -webkit-box;
@@ -1159,26 +1308,31 @@ input[type="text"]:focus {
 
 .song-actions {
   display: flex;
-  gap: 8px;
+  gap: 10px;
   align-items: center;
-  flex-shrink: 0;
-  margin-left: auto;
+  justify-content: center;
+  flex-wrap: wrap;
+  width: 100%;
+  margin-left: 0;
 }
 
 .song-actions button {
-  width: var(--action-button-width);
-  min-width: 0;
-  padding: 8px 12px;
-  height: 36px;
+  width: 112px;
+  min-width: 112px;
+  padding: 10px 14px;
+  height: 42px;
+  border-radius: 16px;
+  font-size: 15px;
+  font-weight: 600;
   display: inline-flex;
   align-items: center;
   justify-content: center;
 }
 
 .song-actions .icon-button {
-  width: 36px;
-  height: 36px;
-  min-width: 36px;
+  width: 42px;
+  height: 42px;
+  min-width: 42px;
   padding: 0;
   border-radius: 999px;
 }
@@ -1298,6 +1452,12 @@ input[type="text"]:focus {
     grid-template-columns: 1fr;
   }
 
+  .session-user-form,
+  .session-user-item,
+  .session-user-actions {
+    grid-template-columns: 1fr;
+  }
+
   .remote-card {
     grid-template-columns: 1fr;
   }
@@ -1364,10 +1524,21 @@ input[type="text"]:focus {
   .song-bottom-row {
     flex-direction: column;
     align-items: stretch;
+    min-width: 0;
+  }
+
+  .song-top-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .song-main {
+    grid-template-columns: 1fr;
+    gap: 14px;
   }
 
   .song-actions {
-    justify-content: flex-end;
+    justify-content: center;
     margin-left: 0;
   }
 

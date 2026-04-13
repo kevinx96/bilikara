@@ -32,7 +32,8 @@ body {
 }
 
 button,
-textarea {
+textarea,
+select {
   font: inherit;
 }
 
@@ -129,11 +130,88 @@ h1 {
   line-height: 1.5;
 }
 
+.requester-line,
+.history-requester {
+  margin-top: 10px;
+  font-size: 13px;
+  line-height: 1.35;
+  color: var(--accent-deep);
+}
+
 .audio-variant-bar {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
   margin-top: 14px;
+}
+
+.player-control-panel {
+  margin-top: 14px;
+  display: grid;
+  gap: 10px;
+}
+
+.player-control-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.player-control-row button {
+  min-height: 42px;
+  padding-inline: 10px;
+  transition:
+    transform 0.14s ease,
+    box-shadow 0.14s ease,
+    background 0.18s ease,
+    color 0.18s ease,
+    opacity 0.18s ease;
+}
+
+.player-control-row button:active {
+  transform: scale(0.96);
+}
+
+.player-control-row .ghost-button,
+.player-control-row .primary-button {
+  box-shadow: 0 10px 20px rgba(79, 56, 39, 0.08);
+}
+
+.player-control-row .ghost-button:active,
+.player-control-row .primary-button:active {
+  box-shadow: 0 4px 10px rgba(79, 56, 39, 0.12);
+}
+
+.player-control-row button.is-pending {
+  transform: scale(0.97);
+  box-shadow:
+    0 0 0 3px rgba(202, 91, 60, 0.14),
+    0 10px 22px rgba(79, 56, 39, 0.12);
+}
+
+.player-control-row button:disabled {
+  opacity: 0.68;
+  cursor: not-allowed;
+}
+
+.player-control-row .primary-button.is-playing {
+  background: linear-gradient(180deg, #c95839 0%, #b94b30 100%);
+  color: white;
+}
+
+.player-control-row .primary-button.is-paused {
+  background: rgba(255, 255, 255, 0.9);
+  color: var(--accent-deep);
+  box-shadow:
+    inset 0 0 0 1px rgba(202, 91, 60, 0.24),
+    0 10px 20px rgba(79, 56, 39, 0.08);
+}
+
+.player-control-hint {
+  min-height: 18px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--muted);
 }
 
 .audio-variant-button {
@@ -169,6 +247,26 @@ textarea {
 textarea:focus {
   border-color: rgba(202, 91, 60, 0.42);
   box-shadow: 0 0 0 4px rgba(202, 91, 60, 0.1);
+}
+
+select {
+  width: 100%;
+  min-height: 48px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  padding: 0 14px;
+  background: rgba(255, 255, 255, 0.84);
+  outline: none;
+}
+
+select:focus {
+  border-color: rgba(202, 91, 60, 0.42);
+  box-shadow: 0 0 0 4px rgba(202, 91, 60, 0.1);
+}
+
+select:disabled {
+  opacity: 0.68;
+  cursor: not-allowed;
 }
 
 .action-row,
@@ -319,7 +417,8 @@ textarea:focus {
 
   .action-row,
   .history-actions,
-  .view-toggle {
+  .view-toggle,
+  .player-control-row {
     grid-template-columns: 1fr;
   }
 

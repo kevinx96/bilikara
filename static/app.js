@@ -15,6 +15,8 @@ const state = {
   backupBannerTimer: null,
   localAdvanceInFlight: false,
   pendingPlaybackRestore: null,
+  lastAppliedPlayerControlSeq: 0,
+  lastReportedPlayerStatusSignature: "",
   dragItemId: "",
   dragTargetId: "",
   dragTargetAfter: false,
@@ -36,8 +38,12 @@ const elements = {
   playerFrame: document.getElementById("player-frame"),
   audioVariantBar: document.getElementById("audio-variant-bar"),
   addForm: document.getElementById("add-form"),
+  requesterSelect: document.getElementById("requester-select"),
   urlInput: document.getElementById("url-input"),
   formMessage: document.getElementById("form-message"),
+  sessionUserForm: document.getElementById("session-user-form"),
+  sessionUserInput: document.getElementById("session-user-input"),
+  sessionUserList: document.getElementById("session-user-list"),
   backupBanner: document.getElementById("backup-banner"),
   backupText: document.getElementById("backup-text"),
   discardBackupButton: document.getElementById("discard-backup-button"),
@@ -51,6 +57,7 @@ const elements = {
   queueCurrentIndicator: document.getElementById("queue-current-indicator"),
   queueCurrentTag: document.getElementById("queue-current-tag"),
   queueCurrentTitle: document.getElementById("queue-current-title"),
+  queueCurrentRequester: document.getElementById("queue-current-requester"),
   listStage: document.getElementById("list-stage"),
   modeSwitch: document.getElementById("mode-switch"),
   nextButton: document.getElementById("next-button"),
@@ -73,6 +80,15 @@ const elements = {
 function setFormMessage(message, isError = false) {
   elements.formMessage.textContent = message;
   elements.formMessage.style.color = isError ? "var(--red)" : "var(--muted)";
+}
+
+function requesterBadgeText(requesterName) {
+  const normalized = String(requesterName || "").trim();
+  return normalized ? `点歌人 ${normalized}` : "";
+}
+
+function selectedRequesterName() {
+  return String(elements.requesterSelect?.value || "").trim();
 }
 
 function createClientId() {
@@ -148,6 +164,8 @@ function render() {
     ? currentItem.display_title
     : "还没有歌曲";
   renderListHeader(data.playlist, data.history || []);
+  renderRequesterSelect(data.session_users || []);
+  renderSessionUsers(data.session_users || []);
   renderCacheSettings(data.bbdown, data.ffmpeg, data.cache_policy);
   renderRemoteAccess(data.remote_access);
 
@@ -157,6 +175,7 @@ function render() {
 
   renderAudioVariantBar(currentItem, data.playback_mode);
   renderPlayer(currentItem, data.playback_mode);
+  applyRemotePlayerControl(data.player_control_command, currentItem, data.playback_mode);
   renderQueueCurrent(currentItem);
   if (!state.dragItemId) {
     renderPlaylist(data.playlist, data.current_item, data.cache_policy);
@@ -184,6 +203,59 @@ function normalizeWheelDelta(event, container) {
     return event.deltaY * container.clientHeight;
   }
   return event.deltaY;
+}
+
+function renderRequesterSelect(sessionUsers) {
+  const users = Array.isArray(sessionUsers) ? sessionUsers : [];
+  const previousValue = selectedRequesterName();
+  elements.requesterSelect.innerHTML = "";
+
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = users.length ? "选择点歌人" : "请先添加用户";
+  elements.requesterSelect.appendChild(placeholder);
+
+  users.forEach((userName) => {
+    const option = document.createElement("option");
+    option.value = userName;
+    option.textContent = userName;
+    elements.requesterSelect.appendChild(option);
+  });
+
+  if (previousValue && users.includes(previousValue)) {
+    elements.requesterSelect.value = previousValue;
+  } else {
+    elements.requesterSelect.value = "";
+  }
+  elements.requesterSelect.disabled = users.length === 0;
+}
+
+function renderSessionUsers(sessionUsers) {
+  const users = Array.isArray(sessionUsers) ? sessionUsers : [];
+  elements.sessionUserList.innerHTML = "";
+
+  if (!users.length) {
+    elements.sessionUserList.innerHTML =
+      '<div class="queue-empty session-user-empty">先添加本场用户，服务端和客户端才能开始点歌。</div>';
+    return;
+  }
+
+  users.forEach((userName, index) => {
+    const item = document.createElement("article");
+    item.className = "session-user-item";
+    item.innerHTML = `
+      <div class="session-user-main">
+        <span class="session-user-order">${index + 1}</span>
+        <strong class="session-user-name">${escapeHtml(userName)}</strong>
+      </div>
+      <div class="session-user-actions">
+        <button type="button" data-action="move-up" data-name="${escapeHtml(userName)}" ${index === 0 ? "disabled" : ""}>上移</button>
+        <button type="button" data-action="move-down" data-name="${escapeHtml(userName)}" ${index === users.length - 1 ? "disabled" : ""}>下移</button>
+        <button type="button" data-action="remove" data-name="${escapeHtml(userName)}" class="danger">删除</button>
+      </div>
+    `;
+    elements.sessionUserList.appendChild(item);
+  });
 }
 
 function renderRemoteAccess(remoteAccess) {
@@ -327,6 +399,9 @@ function renderQueueCurrent(currentItem) {
   elements.queueCurrent.dataset.state = currentState.state;
   elements.queueCurrentTag.textContent = currentState.label;
   elements.queueCurrentTitle.textContent = currentItem.display_title;
+  const requesterText = requesterBadgeText(currentItem.requester_name);
+  elements.queueCurrentRequester.textContent = requesterText;
+  elements.queueCurrentRequester.classList.toggle("hidden", !requesterText);
 }
 
 function currentStatusForItem(item) {
@@ -472,6 +547,9 @@ function renderPlayer(currentItem, playbackMode) {
     `;
     const video = elements.playerFrame.querySelector("video");
     if (video) {
+      const reportCurrentVideoStatus = () => {
+        reportPlayerStatus(currentItem.id, video);
+      };
       const pendingRestore = state.pendingPlaybackRestore;
       if (
         pendingRestore
@@ -489,11 +567,18 @@ function renderPlayer(currentItem, playbackMode) {
             video.play().catch(() => {});
           }
           state.pendingPlaybackRestore = null;
+          reportCurrentVideoStatus();
         }, { once: true });
       }
+      video.addEventListener("loadedmetadata", reportCurrentVideoStatus);
+      video.addEventListener("play", reportCurrentVideoStatus);
+      video.addEventListener("pause", reportCurrentVideoStatus);
+      video.addEventListener("seeked", reportCurrentVideoStatus);
       video.addEventListener("ended", async () => {
+        reportCurrentVideoStatus();
         await handleLocalPlaybackEnded();
       });
+      window.setTimeout(reportCurrentVideoStatus, 0);
     }
     return;
   }
@@ -504,6 +589,81 @@ function renderPlayer(currentItem, playbackMode) {
       <p class="empty-hint">${escapeHtml(currentItem.cache_message || "正在后台缓存")}</p>
     </div>
   `;
+}
+
+function applyRemotePlayerControl(command, currentItem, playbackMode) {
+  const seq = Number(command?.seq || 0);
+  if (!Number.isInteger(seq) || seq <= state.lastAppliedPlayerControlSeq) {
+    return;
+  }
+
+  const action = String(command?.action || "");
+  const commandItemId = String(command?.item_id || "");
+
+  if (
+    playbackMode === "local"
+    && currentItem
+    && (!commandItemId || commandItemId === currentItem.id)
+  ) {
+    const video = elements.playerFrame.querySelector("video");
+    if (video) {
+      if (action === "toggle-play") {
+        if (video.paused) {
+          video.play().catch(() => {});
+        } else {
+          video.pause();
+        }
+      } else if (action === "seek-relative") {
+        const deltaSeconds = Number(command?.delta_seconds || 0);
+        if (Number.isFinite(deltaSeconds) && deltaSeconds !== 0) {
+          const duration = Number.isFinite(video.duration) ? video.duration : Number.POSITIVE_INFINITY;
+          const nextTime = Math.max(0, Number(video.currentTime || 0) + deltaSeconds);
+          video.currentTime = Number.isFinite(duration)
+            ? Math.min(nextTime, duration)
+            : nextTime;
+        }
+      }
+    }
+  }
+
+  if (!action) {
+    return;
+  }
+
+  state.lastAppliedPlayerControlSeq = seq;
+  ackRemotePlayerControl(seq);
+}
+
+async function ackRemotePlayerControl(seq) {
+  try {
+    await apiPost("/api/player/control-ack", { seq });
+  } catch {
+    // Ignore ack failures and let the next polling cycle recover.
+  }
+}
+
+function reportPlayerStatus(itemId, video) {
+  const normalizedItemId = String(itemId || "").trim();
+  if (!normalizedItemId || !video) {
+    return;
+  }
+
+  const currentTime = Number(video.currentTime || 0);
+  const signature = [
+    normalizedItemId,
+    video.paused ? "paused" : "playing",
+    Math.round(currentTime),
+  ].join("|");
+  if (signature === state.lastReportedPlayerStatusSignature) {
+    return;
+  }
+  state.lastReportedPlayerStatusSignature = signature;
+
+  apiPost("/api/player/status", {
+    item_id: normalizedItemId,
+    is_paused: video.paused,
+    current_time: currentTime,
+  }).catch(() => {});
 }
 
 function renderPlaylist(playlist, currentItem, cachePolicy) {
@@ -536,6 +696,7 @@ function renderPlaylist(playlist, currentItem, cachePolicy) {
     const readyIndicator = node.querySelector(".song-badge-check");
     const note = node.querySelector(".song-note");
     const titleNode = node.querySelector(".song-title");
+    const requesterNode = node.querySelector(".song-requester");
 
     indexLabel.textContent = String(index + 1);
 
@@ -556,6 +717,9 @@ function renderPlaylist(playlist, currentItem, cachePolicy) {
     const ownerTooltip = ownerTooltipForEntry(item);
     node.title = ownerTooltip;
     titleNode.title = ownerTooltip;
+    const requesterText = requesterBadgeText(item.requester_name);
+    requesterNode.textContent = requesterText;
+    requesterNode.classList.toggle("hidden", !requesterText);
 
     const noteText = noteForItem(item);
     note.textContent = noteText;
@@ -597,10 +761,14 @@ function renderHistory(history) {
   history.forEach((entry) => {
     const node = elements.historyTemplate.content.firstElementChild.cloneNode(true);
     const title = node.querySelector(".history-title");
+    const requester = node.querySelector(".history-requester");
     title.textContent = entry.display_title;
     const ownerTooltip = ownerTooltipForEntry(entry);
     node.title = ownerTooltip;
     title.title = ownerTooltip;
+    const requesterText = requesterBadgeText(entry.requester_name);
+    requester.textContent = requesterText;
+    requester.classList.toggle("hidden", !requesterText);
     node.querySelector(".history-time").textContent = formatHistoryTime(entry.requested_at);
     node.querySelector(".history-count").textContent = `点歌 ${entry.request_count} 次`;
     node.querySelectorAll("button").forEach((button) => {
@@ -933,12 +1101,14 @@ async function submitAddRequest(url, position, options = {}) {
   return apiPost("/api/playlist/add", {
     url,
     position,
+    requester_name: String(options.requesterName || ""),
     allow_repeat: Boolean(options.allowRepeat),
   });
 }
 
 async function handleAdd(position, anchorPoint) {
   const url = elements.urlInput.value.trim();
+  const requesterName = selectedRequesterName();
   if (!url) {
     setFormMessage("请输入 B 站视频链接或 BV 号", true);
     return;
@@ -946,7 +1116,7 @@ async function handleAdd(position, anchorPoint) {
 
   setFormMessage("正在解析视频信息并加入列表...");
   try {
-    state.data = await submitAddRequest(url, position);
+    state.data = await submitAddRequest(url, position, { requesterName });
     elements.urlInput.value = "";
     setFormMessage(position === "next" ? "已顶歌到下一首" : "已加入列表末尾");
     render();
@@ -956,6 +1126,7 @@ async function handleAdd(position, anchorPoint) {
         type: "duplicate-add",
         url,
         position,
+        requesterName,
         preserveInput: true,
         message: duplicateConfirmMessage(
           error.payload?.duplicate_item,
@@ -973,9 +1144,10 @@ async function handleAdd(position, anchorPoint) {
 }
 
 async function handleAddByUrl(url, position, anchorPoint) {
+  const requesterName = selectedRequesterName();
   setFormMessage("正在从历史记录加入列表...");
   try {
-    state.data = await submitAddRequest(url, position);
+    state.data = await submitAddRequest(url, position, { requesterName });
     setFormMessage(position === "next" ? "已从历史顶歌到下一首" : "已从历史加入列表");
     render();
   } catch (error) {
@@ -984,6 +1156,7 @@ async function handleAddByUrl(url, position, anchorPoint) {
         type: "duplicate-add",
         url,
         position,
+        requesterName,
         preserveInput: false,
         message: duplicateConfirmMessage(
           error.payload?.duplicate_item,
@@ -1017,6 +1190,86 @@ async function clearPlaylist() {
     state.data = await apiPost("/api/playlist/clear");
     closeConfirm();
     setFormMessage("播放列表已清空。");
+    render();
+  } catch (error) {
+    setFormMessage(error.message, true);
+  }
+}
+
+/*
+  const name = String(elements.sessionUserInput.value || "").trim();
+  if (!name) {
+    setFormMessage("璇疯緭鍏ョ敤鎴峰悕銆?, true);
+    return;
+  }
+  try {
+    state.data = await apiPost("/api/session-users/add", { name });
+    elements.sessionUserInput.value = "";
+    setFormMessage(`宸叉坊鍔?${name} 鍒版湰鍦篕TV 鐢ㄦ埛鍒楄〃銆?);
+    render();
+  } catch (error) {
+    setFormMessage(error.message, true);
+  }
+}
+
+async function moveSessionUser(name, index) {
+  try {
+    state.data = await apiPost("/api/session-users/reorder", { name, index });
+    setFormMessage("宸叉洿鏂扮敤鎴烽『搴忋€?);
+    render();
+  } catch (error) {
+    setFormMessage(error.message, true);
+  }
+}
+
+async function removeSessionUser(name) {
+  try {
+    state.data = await apiPost("/api/session-users/remove", { name });
+    if (elements.requesterSelect.value === name) {
+      elements.requesterSelect.value = "";
+    }
+    setFormMessage(`宸茬Щ闄?${name}銆?);
+    render();
+  } catch (error) {
+    setFormMessage(error.message, true);
+  }
+}
+
+*/
+
+async function addSessionUser() {
+  const name = String(elements.sessionUserInput.value || "").trim();
+  if (!name) {
+    setFormMessage("请输入用户名。", true);
+    return;
+  }
+  try {
+    state.data = await apiPost("/api/session-users/add", { name });
+    elements.sessionUserInput.value = "";
+    setFormMessage(`已将 ${name} 加入本场 KTV 用户列表。`);
+    render();
+  } catch (error) {
+    setFormMessage(error.message, true);
+  }
+}
+
+async function moveSessionUser(name, index) {
+  try {
+    state.data = await apiPost("/api/session-users/reorder", { name, index });
+    setFormMessage("已更新用户顺序。");
+    render();
+  } catch (error) {
+    setFormMessage(error.message, true);
+  }
+}
+
+async function removeSessionUser(name) {
+  try {
+    state.data = await apiPost("/api/session-users/remove", { name });
+    if (elements.requesterSelect.value === name) {
+      elements.requesterSelect.value = "";
+    }
+    setFormMessage(`已移除 ${name}。`);
     render();
   } catch (error) {
     setFormMessage(error.message, true);
@@ -1105,6 +1358,37 @@ elements.addForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const point = anchorPointForEvent(event.submitter || event, elements.addForm);
   await handleAdd("tail", point);
+});
+
+elements.sessionUserForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  await addSessionUser();
+});
+
+elements.sessionUserList.addEventListener("click", async (event) => {
+  const button = event.target.closest("button[data-action]");
+  if (!button || !state.data?.session_users?.length) {
+    return;
+  }
+
+  const name = String(button.dataset.name || "");
+  const users = state.data.session_users;
+  const index = users.indexOf(name);
+  if (!name || index === -1) {
+    return;
+  }
+
+  if (button.dataset.action === "move-up") {
+    await moveSessionUser(name, Math.max(0, index - 1));
+    return;
+  }
+  if (button.dataset.action === "move-down") {
+    await moveSessionUser(name, Math.min(users.length - 1, index + 1));
+    return;
+  }
+  if (button.dataset.action === "remove") {
+    await removeSessionUser(name);
+  }
 });
 
 elements.queueNextButton.addEventListener("click", async (event) => {
@@ -1274,7 +1558,10 @@ elements.confirmOk.addEventListener("click", async () => {
       return;
     }
     if (intent.type === "duplicate-add" && intent.url) {
-      state.data = await submitAddRequest(intent.url, intent.position || "tail", { allowRepeat: true });
+      state.data = await submitAddRequest(intent.url, intent.position || "tail", {
+        requesterName: intent.requesterName || selectedRequesterName(),
+        allowRepeat: true,
+      });
       closeConfirm();
       if (!intent.preserveInput) {
         elements.urlInput.value = "";

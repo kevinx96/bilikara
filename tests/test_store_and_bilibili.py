@@ -7,6 +7,7 @@ from unittest.mock import patch
 from bilikara.bilibili import VideoPage, fetch_video_item, resolve_video_reference, select_matching_pages
 from bilikara.models import PlaylistItem
 from bilikara.store import PlaylistStore
+from bilikara.title_cleanup import clean_display_title
 
 
 class PlaylistStoreTest(unittest.TestCase):
@@ -21,6 +22,8 @@ class PlaylistStoreTest(unittest.TestCase):
             backup_file=self.backup_file,
             session_archive_dir=self.session_archive_dir,
         )
+        for user_name in ["A", "B", "C", "D"]:
+            self.store.add_session_user(user_name)
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
@@ -46,87 +49,109 @@ class PlaylistStoreTest(unittest.TestCase):
             embed_url=f"https://player.bilibili.com/player.html?aid={max(numeric, 1)}",
         )
 
+    def add_item(
+        self,
+        item_id: str,
+        *,
+        requester_name: str = "A",
+        position: str = "tail",
+        song_key: str | None = None,
+    ) -> PlaylistItem:
+        item = self.make_item(item_id, song_key=song_key)
+        self.store.add_item(item, position=position, requester_name=requester_name)
+        return item
+
     def test_add_tail_and_next(self):
-        a = self.make_item("a")
-        b = self.make_item("b")
-        c = self.make_item("c")
-        self.store.add_item(a, position="tail")
-        self.store.add_item(b, position="tail")
-        self.store.add_item(c, position="next")
+        self.add_item("a", requester_name="A")
+        self.add_item("b", requester_name="B")
+        self.add_item("c", requester_name="C", position="next")
         self.assertEqual(self.store.current_item.id, "a")
         self.assertEqual([item.id for item in self.store.playlist], ["c", "b"])
 
     def test_move_to_next(self):
-        a = self.make_item("a")
-        b = self.make_item("b")
-        c = self.make_item("c")
-        self.store.add_item(a)
-        self.store.add_item(b)
-        self.store.add_item(c)
+        self.add_item("a", requester_name="A")
+        self.add_item("b", requester_name="B")
+        self.add_item("c", requester_name="C")
         self.store.move_to_next("c")
         self.assertEqual(self.store.current_item.id, "a")
         self.assertEqual([item.id for item in self.store.playlist], ["c", "b"])
 
     def test_advance(self):
-        self.store.add_item(self.make_item("a"))
-        self.store.add_item(self.make_item("b"))
+        self.add_item("a", requester_name="A")
+        self.add_item("b", requester_name="B")
         self.store.advance_to_next()
         self.assertEqual(self.store.current_item.id, "b")
         self.assertEqual([item.id for item in self.store.playlist], [])
 
     def test_play_now_pops_from_playlist(self):
-        self.store.add_item(self.make_item("a"))
-        self.store.add_item(self.make_item("b"))
-        self.store.add_item(self.make_item("c"))
+        self.add_item("a", requester_name="A")
+        self.add_item("b", requester_name="B")
+        self.add_item("c", requester_name="C")
         self.store.move_to_front("c")
         self.assertEqual(self.store.current_item.id, "c")
         self.assertEqual([item.id for item in self.store.playlist], ["b"])
 
     def test_move_item_to_index(self):
-        self.store.add_item(self.make_item("a"))
-        self.store.add_item(self.make_item("b"))
-        self.store.add_item(self.make_item("c"))
-        self.store.add_item(self.make_item("d"))
+        self.add_item("a", requester_name="A")
+        self.add_item("b", requester_name="B")
+        self.add_item("c", requester_name="C")
+        self.add_item("d", requester_name="D")
         self.assertTrue(self.store.move_item_to_index("d", 0))
         self.assertEqual([item.id for item in self.store.playlist], ["d", "b", "c"])
 
     def test_clear_playlist_keeps_current(self):
-        self.store.add_item(self.make_item("a"))
-        self.store.add_item(self.make_item("b"))
+        self.add_item("a", requester_name="A")
+        self.add_item("b", requester_name="B")
         self.store.clear_playlist()
         self.assertEqual(self.store.current_item.id, "a")
         self.assertEqual(self.store.playlist, [])
 
+    def test_snapshot_uses_cleaned_display_titles(self):
+        item = self.make_item("a")
+        item.title = "\u3010meta | noise\u3011Song Name"
+        item.part_title = "on_vocal"
+        item.display_title = f"{item.title} - {item.part_title}"
+        self.store.add_item(item, requester_name="A")
+
+        snapshot = self.store.snapshot()
+        self.assertEqual(snapshot["current_item"]["display_title"], "Song Name")
+        self.assertEqual(snapshot["history"][0]["display_title"], "Song Name")
+        self.assertEqual(snapshot["current_item"]["requester_name"], "A")
+
     def test_history_updates_and_moves_latest_duplicate_to_top(self):
-        self.store.add_item(self.make_item("a", song_key="song-a"))
-        self.store.add_item(self.make_item("b", song_key="song-b"))
-        self.store.add_item(self.make_item("c", song_key="song-a"))
+        self.add_item("a", requester_name="A", song_key="song-a")
+        self.add_item("b", requester_name="B", song_key="song-b")
+        self.add_item("c", requester_name="C", song_key="song-a")
         self.assertEqual(len(self.store.history), 2)
         self.assertEqual(self.store.history[0].display_title, "title-c - P1")
         self.assertEqual(self.store.history[0].request_count, 2)
         self.assertEqual(self.store.history[1].display_title, "title-b - P1")
+        self.assertEqual(self.store.history[0].requester_name, "C")
         self.assertTrue(hasattr(self.store.history[0], "owner_name"))
 
     def test_session_history_updates_for_duplicate_request_in_current_run(self):
-        self.store.add_item(self.make_item("a", song_key="song-a"))
-        self.store.add_item(self.make_item("b", song_key="song-a"))
+        self.add_item("a", requester_name="A", song_key="song-a")
+        self.add_item("b", requester_name="B", song_key="song-a")
         self.assertEqual(len(self.store.session_history), 1)
         self.assertEqual(self.store.session_history[0].display_title, "title-b - P1")
         self.assertEqual(self.store.session_history[0].request_count, 2)
+        self.assertEqual(self.store.session_history[0].requester_name, "B")
 
     def test_session_history_does_not_restore_from_state_file(self):
-        self.store.add_item(self.make_item("a", song_key="song-a"))
+        self.add_item("a", requester_name="A", song_key="song-a")
+        self.store.move_session_user_to_index("C", 1)
         restored_store = PlaylistStore(
             state_file=self.state_file,
             backup_file=self.backup_file,
             session_archive_dir=self.session_archive_dir,
         )
         self.assertEqual(restored_store.session_history, [])
+        self.assertEqual(restored_store.session_users[:4], ["A", "C", "B", "D"])
         self.assertIsNone(restored_store.session_request_for_item(self.make_item("z", song_key="song-a")))
 
     def test_session_played_archive_tracks_items_that_become_current(self):
-        self.store.add_item(self.make_item("a", song_key="song-a"))
-        self.store.add_item(self.make_item("b", song_key="song-b"))
+        self.add_item("a", requester_name="A", song_key="song-a")
+        self.add_item("b", requester_name="B", song_key="song-b")
 
         payload = json.loads(self.store.session_played_file.read_text(encoding="utf-8"))
         self.assertRegex(self.store.session_played_file.name, r"^played-\d{4}-\d{2}-\d{2}_")
@@ -137,9 +162,10 @@ class PlaylistStoreTest(unittest.TestCase):
         payload = json.loads(self.store.session_played_file.read_text(encoding="utf-8"))
         self.assertEqual([entry["item_id"] for entry in payload["items"]], ["a", "b"])
         self.assertEqual(payload["items"][1]["display_title"], "title-b - P1")
+        self.assertEqual(payload["items"][1]["requester_name"], "B")
 
     def test_session_played_archive_does_not_restore_into_new_run(self):
-        self.store.add_item(self.make_item("a", song_key="song-a"))
+        self.add_item("a", requester_name="A", song_key="song-a")
 
         restored_store = PlaylistStore(
             state_file=self.state_file,
@@ -153,8 +179,8 @@ class PlaylistStoreTest(unittest.TestCase):
         first = self.make_item("a", song_key="song-a")
         second = self.make_item("b", song_key="song-b")
         duplicate = self.make_item("c", song_key="song-a")
-        self.store.add_item(first)
-        self.store.add_item(second)
+        self.store.add_item(first, requester_name="A")
+        self.store.add_item(second, requester_name="B")
         found = self.store.active_duplicate_for_item(duplicate)
         self.assertIsNotNone(found)
         self.assertEqual(found.id, "a")
@@ -162,32 +188,29 @@ class PlaylistStoreTest(unittest.TestCase):
     def test_missing_owner_urls_collects_entries_without_owner_name(self):
         item = self.make_item("a", song_key="song-a")
         item.owner_name = ""
-        self.store.add_item(item)
-        self.assertEqual(
-            self.store.missing_owner_urls(),
-            [item.resolved_url],
-        )
+        self.store.add_item(item, requester_name="A")
+        self.assertEqual(self.store.missing_owner_urls(), [item.resolved_url])
 
     def test_update_owner_info_for_url_updates_playlist_and_history(self):
         item = self.make_item("a", song_key="song-a")
         item.owner_name = ""
         item.owner_mid = 0
         item.owner_url = ""
-        self.store.add_item(item)
+        self.store.add_item(item, requester_name="A")
 
         changed = self.store.update_owner_info_for_url(
             item.resolved_url,
             owner_mid=114514,
-            owner_name="示例UP",
+            owner_name="example-up",
             owner_url="https://space.bilibili.com/114514",
         )
 
         self.assertTrue(changed)
-        self.assertEqual(self.store.current_item.owner_name, "示例UP")
-        self.assertEqual(self.store.history[0].owner_name, "示例UP")
+        self.assertEqual(self.store.current_item.owner_name, "example-up")
+        self.assertEqual(self.store.history[0].owner_name, "example-up")
 
     def test_history_restores_from_state_file(self):
-        self.store.add_item(self.make_item("a", song_key="song-a"))
+        self.add_item("a", requester_name="A", song_key="song-a")
         restored_store = PlaylistStore(
             state_file=self.state_file,
             backup_file=self.backup_file,
@@ -196,15 +219,17 @@ class PlaylistStoreTest(unittest.TestCase):
         self.assertEqual(len(restored_store.history), 1)
         self.assertEqual(restored_store.history[0].display_title, "title-a - P1")
         self.assertEqual(restored_store.history[0].request_count, 1)
+        self.assertEqual(restored_store.history[0].requester_name, "A")
 
     def test_restore_from_backup(self):
         item = self.make_item("a")
         item.cache_status = "ready"
         item.cache_progress = 100.0
-        item.cache_message = "缓存已完成"
+        item.cache_message = "cached"
         item.local_relative_path = "a/video.mp4"
         item.local_media_url = "/media/a/video.mp4"
-        self.store.add_item(item)
+        self.store.move_session_user_to_index("D", 1)
+        self.store.add_item(item, requester_name="A")
         self.store.set_mode("local")
 
         restored_store = PlaylistStore(
@@ -222,15 +247,73 @@ class PlaylistStoreTest(unittest.TestCase):
         self.assertEqual(restored_item.cache_status, "pending")
         self.assertEqual(restored_item.local_relative_path, "")
         self.assertEqual(restored_item.local_media_url, "")
+        self.assertEqual(restored_item.requester_name, "A")
+        self.assertEqual(restored_store.session_users[:4], ["A", "D", "B", "C"])
 
     def test_discard_backup(self):
-        self.store.add_item(self.make_item("a"))
+        self.add_item("a", requester_name="A")
         self.assertTrue(self.backup_file.exists())
         self.assertTrue(self.store.discard_backup())
         self.assertFalse(self.store.backup_summary()["available"])
 
+    def test_add_requires_existing_session_user_selection(self):
+        isolated_store = PlaylistStore(
+            state_file=self.state_file.parent / "isolated-state.json",
+            backup_file=self.state_file.parent / "isolated-backup.json",
+            session_archive_dir=self.session_archive_dir,
+        )
+        with self.assertRaises(ValueError):
+            isolated_store.add_item(self.make_item("solo"), requester_name="A")
+
+    def test_tail_queue_cycles_by_session_user_order(self):
+        self.store.move_session_user_to_index("C", 1)
+        self.add_item("a1", requester_name="A")
+        self.add_item("a2", requester_name="A")
+        self.add_item("b1", requester_name="B")
+        self.add_item("c1", requester_name="C")
+        self.assertEqual([item.id for item in self.store.playlist], ["c1", "b1", "a2"])
+
+    def test_reordering_session_users_rebuilds_cycle_queue(self):
+        self.add_item("a1", requester_name="A")
+        self.add_item("a2", requester_name="A")
+        self.add_item("b1", requester_name="B")
+        self.add_item("c1", requester_name="C")
+        self.assertEqual([item.id for item in self.store.playlist], ["b1", "c1", "a2"])
+
+        self.store.move_session_user_to_index("C", 1)
+        self.assertEqual(self.store.session_users[:3], ["A", "C", "B"])
+        self.assertEqual([item.id for item in self.store.playlist], ["c1", "b1", "a2"])
+
+    def test_current_item_does_not_consume_waiting_queue_turn(self):
+        self.store = PlaylistStore(
+            state_file=self.state_file.parent / "current-state.json",
+            backup_file=self.state_file.parent / "current-backup.json",
+            session_archive_dir=self.session_archive_dir,
+        )
+        for user_name in ["凛夜", "kevin", "VZRXS"]:
+            self.store.add_session_user(user_name)
+
+        current = self.make_item("current")
+        self.store.add_item(current, requester_name="VZRXS")
+        self.store.add_item(self.make_item("a1"), requester_name="凛夜")
+        self.store.add_item(self.make_item("b1"), requester_name="kevin")
+        self.store.add_item(self.make_item("c1"), requester_name="VZRXS")
+
+        self.assertEqual(
+            [(item.id, item.requester_name) for item in self.store.playlist],
+            [("a1", "凛夜"), ("b1", "kevin"), ("c1", "VZRXS")],
+        )
+
 
 class BilibiliParserTest(unittest.TestCase):
+    def test_clean_display_title_removes_brackets_and_part_suffix(self):
+        cleaned = clean_display_title(
+            title="\u3010pure k | nico karaoke | troupe\u3011Song Name",
+            display_title="\u3010pure k | nico karaoke | troupe\u3011Song Name - on_vocal",
+            part_title="on_vocal",
+        )
+        self.assertEqual(cleaned, "Song Name")
+
     def test_resolve_bv_input(self):
         reference = resolve_video_reference("BV1xx411c7mD")
         self.assertEqual(reference.bvid, "BV1xx411c7mD")
@@ -266,15 +349,15 @@ class BilibiliParserTest(unittest.TestCase):
             "data": {
                 "aid": 123,
                 "bvid": "BV1xx411c7mD",
-                "title": "示例视频",
+                "title": "example video",
                 "pic": "https://example.com/cover.jpg",
                 "owner": {
                     "mid": 114514,
-                    "name": "示例UP",
+                    "name": "example-up",
                 },
                 "pages": [
-                    {"cid": 456, "page": 1, "part": "第一段"},
-                    {"cid": 789, "page": 2, "part": "第二段"},
+                    {"cid": 456, "page": 1, "part": "part-1"},
+                    {"cid": 789, "page": 2, "part": "part-2"},
                 ],
             },
         }
@@ -284,9 +367,9 @@ class BilibiliParserTest(unittest.TestCase):
         self.assertEqual(item.video_page, 2)
         self.assertEqual(item.selected_pages, [1, 2])
         self.assertEqual(item.selected_cids, [456, 789])
-        self.assertEqual(item.display_title, "示例视频 - 第二段")
+        self.assertEqual(item.display_title, "example video - part-2")
         self.assertEqual(item.owner_mid, 114514)
-        self.assertEqual(item.owner_name, "示例UP")
+        self.assertEqual(item.owner_name, "example-up")
         self.assertEqual(item.owner_url, "https://space.bilibili.com/114514")
 
 

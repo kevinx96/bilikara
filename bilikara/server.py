@@ -63,6 +63,12 @@ class AppContext:
         self._client_watchdog.start()
         self._owner_enrichment = threading.Thread(target=self._owner_enrichment_loop, daemon=True)
         self._owner_enrichment.start()
+        self._player_control_lock = threading.RLock()
+        self._player_control_seq = 0
+        self._player_control_ack_seq = 0
+        self._player_control_command: dict[str, object] | None = None
+        self._player_status_lock = threading.RLock()
+        self._player_status: dict[str, object] | None = None
 
     def snapshot(self) -> dict:
         payload = self.store.snapshot()
@@ -75,10 +81,12 @@ class AppContext:
             "auto_restored_backup": self.auto_restored_backup,
         }
         payload["remote_access"] = self.remote_access_snapshot()
+        payload["player_control_command"] = self.player_control_command_snapshot()
+        payload["player_status"] = self.player_status_snapshot(payload.get("current_item"))
         return payload
 
-    def add_item(self, item, *, position: str) -> None:
-        self.store.add_item(item, position=position)
+    def add_item(self, item, *, position: str, requester_name: str) -> None:
+        self.store.add_item(item, position=position, requester_name=requester_name)
         self.cache_manager.sync_with_playlist()
 
     def advance_to_next(self) -> None:
@@ -115,8 +123,78 @@ class AppContext:
     def set_audio_variant(self, item_id: str, variant_id: str) -> bool:
         return self.store.set_audio_variant(item_id, variant_id)
 
+    def add_session_user(self, name: str) -> None:
+        self.store.add_session_user(name)
+
+    def remove_session_user(self, name: str) -> None:
+        self.store.remove_session_user(name)
+
+    def move_session_user_to_index(self, name: str, index: int) -> None:
+        self.store.move_session_user_to_index(name, index)
+
     def set_cache_limit(self, max_cache_items: int) -> None:
         self.cache_manager.set_max_cache_items(max_cache_items)
+
+    def issue_player_control(
+        self,
+        *,
+        action: str,
+        item_id: str = "",
+        delta_seconds: int = 0,
+    ) -> dict[str, object]:
+        with self._player_control_lock:
+            self._player_control_seq += 1
+            self._player_control_command = {
+                "seq": self._player_control_seq,
+                "action": action,
+                "item_id": item_id,
+                "delta_seconds": delta_seconds,
+                "issued_at": time.time(),
+            }
+            return dict(self._player_control_command)
+
+    def ack_player_control(self, seq: int) -> None:
+        with self._player_control_lock:
+            self._player_control_ack_seq = max(self._player_control_ack_seq, int(seq))
+
+    def player_control_command_snapshot(self) -> dict[str, object] | None:
+        with self._player_control_lock:
+            if not self._player_control_command:
+                return None
+            if int(self._player_control_command.get("seq") or 0) <= self._player_control_ack_seq:
+                return None
+            return dict(self._player_control_command)
+
+    def update_player_status(
+        self,
+        *,
+        item_id: str,
+        is_paused: bool,
+        current_time: float = 0.0,
+    ) -> None:
+        normalized_item_id = str(item_id or "").strip()
+        if not normalized_item_id:
+            return
+        with self._player_status_lock:
+            self._player_status = {
+                "item_id": normalized_item_id,
+                "is_paused": bool(is_paused),
+                "current_time": max(0.0, float(current_time or 0.0)),
+                "updated_at": time.time(),
+            }
+
+    def player_status_snapshot(self, current_item_payload: object) -> dict[str, object] | None:
+        current_item_id = ""
+        if isinstance(current_item_payload, dict):
+            current_item_id = str(current_item_payload.get("id") or "").strip()
+        if not current_item_id:
+            return None
+        with self._player_status_lock:
+            if not self._player_status:
+                return None
+            if str(self._player_status.get("item_id") or "").strip() != current_item_id:
+                return None
+            return dict(self._player_status)
 
     def restore_backup(self) -> bool:
         restored = self.store.restore_backup()
@@ -273,6 +351,28 @@ class BilikaraHandler(BaseHTTPRequestHandler):
                 CONTEXT.clear_playlist()
                 self._write_json({"ok": True, "data": CONTEXT.snapshot()})
                 return
+            if route == "/api/session-users/add":
+                name = str(body.get("name") or "").strip()
+                CONTEXT.add_session_user(name)
+                self._write_json({"ok": True, "data": CONTEXT.snapshot()})
+                return
+            if route == "/api/session-users/remove":
+                name = str(body.get("name") or "").strip()
+                if not name:
+                    raise ValueError("missing name")
+                CONTEXT.remove_session_user(name)
+                self._write_json({"ok": True, "data": CONTEXT.snapshot()})
+                return
+            if route == "/api/session-users/reorder":
+                name = str(body.get("name") or "").strip()
+                index = body.get("index")
+                if not name:
+                    raise ValueError("missing name")
+                if not isinstance(index, int):
+                    raise ValueError("index must be an integer")
+                CONTEXT.move_session_user_to_index(name, index)
+                self._write_json({"ok": True, "data": CONTEXT.snapshot()})
+                return
             if route == "/api/playlist/move":
                 self._require_id(body)
                 direction = str(body.get("direction") or "")
@@ -314,6 +414,45 @@ class BilikaraHandler(BaseHTTPRequestHandler):
                 if not CONTEXT.set_audio_variant(body["item_id"], variant_id):
                     raise ValueError("invalid audio variant")
                 self._write_json({"ok": True, "data": CONTEXT.snapshot()})
+                return
+            if route == "/api/player/control":
+                action = str(body.get("action") or "").strip()
+                item_id = str(body.get("item_id") or "").strip()
+                if action not in {"toggle-play", "seek-relative"}:
+                    raise ValueError("invalid player control action")
+                delta_seconds = int(body.get("delta_seconds") or 0)
+                if action == "seek-relative" and delta_seconds == 0:
+                    raise ValueError("missing delta_seconds")
+                if action == "seek-relative" and abs(delta_seconds) > 300:
+                    raise ValueError("delta_seconds too large")
+                CONTEXT.issue_player_control(
+                    action=action,
+                    item_id=item_id,
+                    delta_seconds=delta_seconds,
+                )
+                self._write_json({"ok": True, "data": CONTEXT.snapshot()})
+                return
+            if route == "/api/player/control-ack":
+                seq = body.get("seq")
+                if not isinstance(seq, int):
+                    raise ValueError("seq must be an integer")
+                CONTEXT.ack_player_control(seq)
+                self._write_json({"ok": True})
+                return
+            if route == "/api/player/status":
+                item_id = str(body.get("item_id") or "").strip()
+                if not item_id:
+                    raise ValueError("missing item_id")
+                is_paused = body.get("is_paused")
+                if not isinstance(is_paused, bool):
+                    raise ValueError("is_paused must be boolean")
+                current_time = float(body.get("current_time") or 0.0)
+                CONTEXT.update_player_status(
+                    item_id=item_id,
+                    is_paused=is_paused,
+                    current_time=current_time,
+                )
+                self._write_json({"ok": True})
                 return
             if route == "/api/cache-policy":
                 max_cache_items = body.get("max_cache_items")
@@ -367,13 +506,14 @@ class BilikaraHandler(BaseHTTPRequestHandler):
     def _handle_add(self, body: dict) -> None:
         url = str(body.get("url") or "").strip()
         position = str(body.get("position") or "tail")
+        requester_name = str(body.get("requester_name") or "").strip()
         allow_repeat = bool(body.get("allow_repeat"))
         item = fetch_video_item(url)
         existing_session_entry = CONTEXT.store.session_request_for_item(item)
         active_duplicate = CONTEXT.store.active_duplicate_for_item(item)
         if (existing_session_entry or active_duplicate) and not allow_repeat:
             raise DuplicateSessionRequestError(item, existing_session_entry, active_duplicate)
-        CONTEXT.add_item(item, position=position)
+        CONTEXT.add_item(item, position=position, requester_name=requester_name)
         self._write_json({"ok": True, "data": CONTEXT.snapshot()})
 
     def _serve_static(self, route: str) -> None:
