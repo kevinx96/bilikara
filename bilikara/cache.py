@@ -1220,8 +1220,32 @@ class CacheManager:
                 return override
 
             current_binary = self._local_binary_path()
-            release = self._fetch_latest_release()
-            latest_version = str(release["tag_name"])
+            local_version = ""
+            if BB_DOWN_VERSION_FILE.exists():
+                local_version = BB_DOWN_VERSION_FILE.read_text(encoding="utf-8").strip()
+
+            release: dict[str, Any] | None = None
+            latest_version = ""
+            release_error: Exception | None = None
+            try:
+                release = self._fetch_latest_release()
+                latest_version = str(release["tag_name"])
+            except Exception as exc:  # noqa: BLE001
+                release_error = exc
+
+            if release is None:
+                if current_binary.exists() and not force_refresh:
+                    current_binary.chmod(current_binary.stat().st_mode | stat.S_IEXEC)
+                    with self.lock:
+                        self.binary_state = "ready"
+                        self.binary_version = local_version
+                        if local_version:
+                            self.binary_message = f"BBDown {local_version} 已就绪（未检查更新）"
+                        else:
+                            self.binary_message = "BBDown 已就绪（未检查更新）"
+                    return current_binary
+                raise RuntimeError(f"无法检查 BBDown 最新版本: {release_error}")
+
             version_matches = (
                 not force_refresh
                 and

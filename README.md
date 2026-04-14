@@ -33,7 +33,7 @@
 
 带 tag 的版本通过 GitHub Actions 打包，在 Releases 下载对应平台的压缩包，直接运行可执行文件。
 
-**NOTE:** Windows 打包版默认会优先尝试绑定当前探测到的局域网 IPv4；如果探测不到，会回退到 `0.0.0.0`。如果希望手动指定监听地址，可通过 `BILIKARA_HOST` 覆盖。
+**NOTE:** Windows 打包版默认会优先尝试绑定当前探测到的局域网 IPv4，并尝试过滤出物理网卡；如果探测不到，会回退到 `0.0.0.0`。如果希望手动指定监听地址，可通过 `BILIKARA_HOST` 覆盖。
 
 **脚本启动**
 
@@ -88,7 +88,7 @@ python start_bilikara.py
 
 - 前端使用原生 HTML/CSS/JS，无需 Node 构建
 - 后端使用 Python 标准库 HTTP 服务
-- 本地缓存优先通过 GitHub Release 自动下载最新 `BBDown`
+- 本地缓存会优先使用本地已有的 `BBDown`，并在可联网时通过 GitHub Release 后台检查更新
 - 启动后会后台静默检查 `BBDown` 是否需要更新
 - 启动后也会后台准备 `FFmpeg`，并把可用版本同步到应用目录内的 `runtime/tools/bbdown/`
 - Windows 打包版会以隐藏进程方式调用 `BBDown`，避免点歌时弹出命令行窗口
@@ -105,7 +105,7 @@ python start_bilikara.py
 ## 注意
 
 - 在线外挂播放器的清晰度能力受 B 站嵌入播放器本身限制，不适合作为高清主播放方案，为本地缓存不可用时的 fallback 方案
-- 本地缓存依赖运行环境能访问 B 站和 GitHub Release (下载 BBDown)
+- 本地缓存依赖运行环境能访问 B 站；首次自动下载或更新 `BBDown` 时还需要能访问 GitHub Release
 - 音画延迟补偿、音量控制、静音、远程暂停 / 跳转 / 切换音轨等能力仅在“本地播放模式”下可用；在线外挂模式仍受嵌入播放器限制
 - `FFmpeg` 状态会显示在右上角 `BBDown` 展开面板中，方便定位“BBDown 已就绪但混流失败”这类问题
 - 如果 Windows 打包版出现启动异常或页面打不开，可先尝试 `python build_bundle.py --console`，或设置 `BILIKARA_STARTUP_LOG=1` 收集启动日志
