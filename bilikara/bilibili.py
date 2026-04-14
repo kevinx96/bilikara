@@ -200,10 +200,21 @@ def _fetch_gatcha_videos_for_uid(
 
 
 def refresh_gatcha_cache() -> dict:
-    cache_payload = {"uids": {}, "updated_at": time.time()}
+    with _GATCHA_CACHE_LOCK:
+        cache_payload = _load_gatcha_cache()
+
+    if not isinstance(cache_payload, dict):
+        cache_payload = {"uids": {}, "updated_at": 0}
+    if not isinstance(cache_payload.get("uids"), dict):
+        cache_payload["uids"] = {}
+
+    cache_payload["updated_at"] = time.time()
     for raw_mid in GATCHA_UIDS:
         mid = str(raw_mid).strip()
         if not mid:
+            continue
+        existing_entries = cache_payload["uids"].get(mid, [])
+        if isinstance(existing_entries, list) and any(isinstance(entry, dict) for entry in existing_entries):
             continue
         cache_payload["uids"][mid] = []
         with _GATCHA_CACHE_LOCK:
@@ -248,6 +259,25 @@ def _local_gatcha_candidates() -> list[dict]:
             continue
         candidates.extend(entry for entry in entries if isinstance(entry, dict))
     return candidates
+
+
+def _local_gatcha_candidates_by_uid() -> dict[str, list[dict]]:
+    with _GATCHA_CACHE_LOCK:
+        cache_payload = _load_gatcha_cache()
+
+    grouped_candidates: dict[str, list[dict]] = {}
+    uid_payload = cache_payload.get("uids") or {}
+    for raw_mid in GATCHA_UIDS:
+        mid = str(raw_mid).strip()
+        if not mid:
+            continue
+        entries = uid_payload.get(mid, [])
+        if not isinstance(entries, list):
+            continue
+        valid_entries = [entry for entry in entries if isinstance(entry, dict)]
+        if valid_entries:
+            grouped_candidates[mid] = valid_entries
+    return grouped_candidates
 
 
 def search_gatcha_cache(query: str, *, limit: int = 30) -> list[dict]:
@@ -564,16 +594,7 @@ def get_wbi_keys() -> tuple[str, str]:
     
     if not wbi_img:
         raise BilibiliError("接口未返回 WBI 密钥信息，请检查 COOKIE 是否有效或 IP 是否被风控")
-    
-    img_url = wbi_img.get("img_url")
-    sub_url = wbi_img.get("sub_url")
-    
-    if not img_url or not sub_url:
-        raise BilibiliError("WBI 密钥 URL 格式不正确")
 
-    img_key = img_url.split("/")[-1].split(".")[0]
-    sub_key = sub_url.split("/")[-1].split(".")[0]
-    return img_key, sub_key
 def get_cached_wbi_keys():
     curr_time = time.time()
     if _WBI_CACHE["keys"] and (curr_time - _WBI_CACHE["last_update"] < 600):
@@ -583,13 +604,16 @@ def get_cached_wbi_keys():
     _WBI_CACHE["keys"] = keys
     _WBI_CACHE["last_update"] = curr_time
     return keys
-def fetch_gatcha_candidate() -> dict | None:
-    candidates = _local_gatcha_candidates()
-    if not candidates:
-        raise BilibiliError("请填写gatcha所需cookie")
 
-    chosen = random.choice(candidates)
+def fetch_gatcha_candidate() -> dict | None:
+    candidates_by_uid = _local_gatcha_candidates_by_uid()
+    if not candidates_by_uid:
+        raise BilibiliError("Please provide the cookie required for gatcha")
+
+    chosen_mid = random.choice(list(candidates_by_uid.keys()))
+    chosen = random.choice(candidates_by_uid[chosen_mid])
     return {
+        "mid": chosen_mid,
         "bvid": str(chosen.get("bvid") or ""),
         "title": str(chosen.get("title") or ""),
         "url": str(chosen.get("url") or ""),
