@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
@@ -144,29 +144,65 @@
             <div id="session-user-list" class="session-user-list"></div>
           </section>
 
-          <section class="remote-panel">
-            <div class="request-head remote-head">
-              <div>
-                <p class="section-tag">Mobile Remote</p>
-                <h2>手机点歌入口</h2>
+          <div class="bottom-grid">
+            <section class="remote-panel">
+              <div class="request-head remote-head">
+                <div>
+                  <p class="section-tag">Mobile Remote</p>
+                  <h2>手机点歌入口</h2>
+                </div>
+                <button type="button" id="copy-remote-url-button" class="toolbar-button">
+                  复制链接
+                </button>
               </div>
-              <button type="button" id="copy-remote-url-button" class="toolbar-button">复制链接</button>
-            </div>
-            <div class="remote-card">
-              <div class="remote-qr-wrap">
-                <img id="remote-qr-image" class="remote-qr-image hidden" alt="手机访问二维码" />
-                <div id="remote-qr-placeholder" class="remote-qr-placeholder">正在生成二维码...</div>
+              <div class="remote-card">
+                <div class="remote-qr-wrap">
+                  <img
+                    id="remote-qr-image"
+                    class="remote-qr-image hidden"
+                    alt="手机访问二维码"
+                  />
+                  <div id="remote-qr-placeholder" class="remote-qr-placeholder">
+                    正在生成二维码...
+                  </div>
+                </div>
+                <div class="remote-copy">
+                  <p class="remote-copy-label">手机浏览器打开</p>
+                  <a id="remote-url-link" class="remote-url-link" href="/remote" target="_blank" rel="noreferrer">
+                    /remote
+                  </a>
+                  <p id="remote-url-hint" class="remote-url-hint">
+                    请确保手机和服务端在同一个局域网内。
+                  </p>
+                </div>
               </div>
-              <div class="remote-copy">
-                <p class="remote-copy-label">手机浏览器打开</p>
-                <a id="remote-url-link" class="remote-url-link" href="/remote" target="_blank" rel="noreferrer">
-                  /remote
-                </a>
-                <p id="remote-url-hint" class="remote-url-hint">请确保手机和服务端在同一个局域网内。</p>
+            </section>
+            
+            <section class="gatcha-panel">
+              <div class="request-head">
+                <div>
+                 <p class="section-tag">gatcha Draw</p>
+                 <h2>试试运气</h2>
+                </div>
               </div>
-            </div>
-          </section>
-        </section>
+      
+              <div id="gatcha-init-view" class="gatcha-content">
+                <div class="gatcha-icon">🎲</div>
+                <p class="gatcha-desc">从关注的投稿中随机抽取一首歌曲</p>
+                <button type="button" id="gatcha-button" class="next-button gatcha-main-btn">试试运气(cd15s)</button>
+              </div>
+
+              <div id="gatcha-result-view" class="gatcha-content hidden">
+                <p class="gatcha-label">运气不错，抽到了：</p>
+                <h3 id="gatcha-candidate-title">歌曲标题加载中...</h3>
+                <div class="gatcha-actions">
+                  <button type="button" id="gatcha-confirm-button" class="next-button">确定点歌</button>
+                  <button type="button" id="gatcha-retry-button" class="toolbar-button">重新再来</button>
+                </div>
+              </div>
+            </section>
+          </div>
+        </section> 
 
         <aside class="queue-card list-card">
           <div class="queue-card-head">
@@ -224,8 +260,51 @@
           </div>
         </aside>
       </main>
+
+      <section class="list-card sub-card search-sub-card">
+        <div class="search-card">
+          <div class="search-sub-card-head">
+            <div>
+              <p class="section-tag">Local Search</p>
+              <h2>搜索</h2>
+            </div>
+          </div>
+          <form id="search-form" class="search-inputs">
+            <div class="input-group">
+              <label>Title</label>
+              <input type="text" id="search-query" placeholder="Search in cached titles" autocomplete="off">
+            </div>
+            <button type="submit" id="search-button" class="next-button">搜索</button>
+          </form>
+          <div id="search-results" class="search-results hidden"></div>
+        </div>
+      </section>
+
+      <section class="list-card sub-card cookie-sub-card">
+        <div class="cookie-config-bar">
+          <div class="cookie-sub-card-head">
+            <div>
+              <p class="section-tag">Cookie Config</p>
+              <h2>Cookie</h2>
+            </div>
+          </div>
+          <div class="cookie-inputs">
+            <div class="input-group">
+              <label>SESSDATA</label>
+              <input type="text" id="cookie-sessdata" placeholder="从浏览器获取的 SESSDATA">
+            </div>
+            <div class="input-group">
+              <label>bili_jct</label>
+              <input type="text" id="cookie-jct" placeholder="从浏览器获取的 bili_jct">
+            </div>
+            <button type="button" id="save-cookie-button" class="next-button">更新配置</button>
+          </div>
+          <p class="cookie-hint">配置将实时保存到后端，用于解决“试试运气”时的 412/101 错误。</p>
+        </div>
+      </section>
     </div>
 
+    <!-- Templates -->
     <template id="playlist-item-template">
       <article class="song-item" draggable="true">
         <div class="song-badge-column">

@@ -1,22 +1,41 @@
 from __future__ import annotations
 
 import json
+import threading
 import re
 import urllib.parse
 import urllib.request
 import uuid
 import re
+import random
+import hashlib
+import time
+from .config import BILIBILI_HEADERS, COOKIE, GATCHA_UIDS, GATCHA_KEYWORDS
 from dataclasses import dataclass
-
-from .config import BILIBILI_HEADERS
 from .models import PlaylistItem
+import bilikara.config as cfg  
 
 VIDEO_PATH_RE = re.compile(r"/video/(?P<vid>(BV[0-9A-Za-z]+|av\d+))", re.IGNORECASE)
 BV_RE = re.compile(r"^(BV[0-9A-Za-z]+)$", re.IGNORECASE)
 AV_RE = re.compile(r"^(av\d+)$", re.IGNORECASE)
 SHORT_HOSTS = {"b23.tv", "bili2233.cn"}
 DURATION_TOLERANCE_SECONDS = 3
-
+WBI_MIXIN_TABLE = [
+    46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49,
+    33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13, 37, 48, 7, 16, 24, 55, 40,
+    61, 26, 17, 0, 1, 60, 51, 30, 4, 22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11,
+    36, 20, 34, 44, 52
+]
+_WBI_CACHE = {
+    "keys": None,
+    "last_update": 0
+}
+_GATCHA_CACHE_LOCK = threading.Lock()
+_GATCHA_REFRESH_LOCK = threading.Lock()
+_GATCHA_REQUEST_LOCK = threading.Lock()
+_GATCHA_LAST_REQUEST_AT = 0.0
+_GATCHA_CACHE_FILE = cfg.DATA_DIR / "gatcha_cache.json"
+GATCHA_RETRY_DELAY_SECONDS = 3
 
 @dataclass
 class VideoReference:
@@ -39,11 +58,231 @@ class BilibiliError(RuntimeError):
     pass
 
 
+def _load_gatcha_cache() -> dict:
+    if not _GATCHA_CACHE_FILE.exists():
+        return {"uids": {}, "updated_at": 0}
+    try:
+        with _GATCHA_CACHE_FILE.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return {"uids": {}, "updated_at": 0}
+
+    if not isinstance(payload, dict):
+        return {"uids": {}, "updated_at": 0}
+    uids = payload.get("uids")
+    if not isinstance(uids, dict):
+        uids = {}
+    return {
+        "uids": uids,
+        "updated_at": float(payload.get("updated_at") or 0),
+    }
+
+
+def _save_gatcha_cache(cache_payload: dict) -> None:
+    cfg.DATA_DIR.mkdir(parents=True, exist_ok=True)
+    temp_path = _GATCHA_CACHE_FILE.with_suffix(".tmp")
+    with temp_path.open("w", encoding="utf-8") as handle:
+        json.dump(cache_payload, handle, ensure_ascii=False, indent=2)
+    temp_path.replace(_GATCHA_CACHE_FILE)
+
+
+def _wait_for_gatcha_request_slot() -> None:
+    global _GATCHA_LAST_REQUEST_AT
+
+    with _GATCHA_REQUEST_LOCK:
+        now = time.monotonic()
+        elapsed = now - _GATCHA_LAST_REQUEST_AT
+        if elapsed < GATCHA_RETRY_DELAY_SECONDS:
+            time.sleep(GATCHA_RETRY_DELAY_SECONDS - elapsed)
+        _GATCHA_LAST_REQUEST_AT = time.monotonic()
+
+
+def _matches_gatcha_keywords(title: str) -> bool:
+    normalized_title = str(title or "")
+    if not GATCHA_KEYWORDS:
+        return True
+    return any(keyword and keyword in normalized_title for keyword in GATCHA_KEYWORDS)
+
+
+def _extract_gatcha_entries(mid: str, payload: dict) -> list[dict]:
+    vlist = payload.get("data", {}).get("list", {}).get("vlist", [])
+    entries: list[dict] = []
+    for video in vlist:
+        if not isinstance(video, dict):
+            continue
+        bvid = str(video.get("bvid") or "").strip()
+        title = str(video.get("title") or "").strip()
+        if not bvid or not title or not _matches_gatcha_keywords(title):
+            continue
+        entries.append(
+            {
+                "mid": str(mid),
+                "bvid": bvid,
+                "title": title,
+                "url": f"https://www.bilibili.com/video/{bvid}",
+            }
+        )
+    return entries
+
+
+def _request_gatcha_page(mid: str, page_number: int, page_size: int = 50) -> dict:
+    try:
+        img_key, sub_key = get_cached_wbi_keys()
+    except Exception as exc:
+        raise BilibiliError(f"WBI keys failed: {exc}") from exc
+
+    params = {
+        "mid": str(mid),
+        "ps": max(1, int(page_size)),
+        "tid": 0,
+        "pn": max(1, int(page_number)),
+        "order": "pubdate",
+        "platform": "web",
+    }
+    signed_params = enc_wbi(params, img_key, sub_key)
+    query_string = urllib.parse.urlencode(signed_params)
+    url = f"https://api.bilibili.com/x/space/wbi/arc/search?{query_string}"
+    _wait_for_gatcha_request_slot()
+    # print(f"[debug] gatcha fetch cookie: {cfg.COOKIE}")
+
+    try:
+        payload = request_json(url)
+        code = int(payload.get("code") or 0)
+        if code == 412:
+            raise BilibiliError(str(payload.get("message") or "412 Precondition Failed"))
+        if code != 0:
+            raise BilibiliError(str(payload.get("message") or "API request failed"))
+        # print(f"[debug] gatcha fetch success: mid={mid}, page={page_number}")
+        return payload
+    except Exception as exc:  # noqa: BLE001
+        # print(f"[debug] gatcha fetch error: {exc}; cookie: {cfg.COOKIE}")
+        raise
+
+
+def _fetch_gatcha_videos_for_uid(
+    mid: str,
+    *,
+    on_progress: callable | None = None,
+) -> list[dict]:
+    page_size = 50
+    page_number = 1
+    all_entries: list[dict] = []
+    seen_bvids: set[str] = set()
+
+    while True:
+        while True:
+            try:
+                payload = _request_gatcha_page(mid, page_number, page_size)
+                break
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    # f"[debug] gatcha page retry scheduled: mid={mid}, page={page_number}, "
+                    # f"cached_entries={len(all_entries)}, error={exc}"
+                )
+                time.sleep(GATCHA_RETRY_DELAY_SECONDS)
+        data = payload.get("data", {}) if isinstance(payload, dict) else {}
+        page_entries = _extract_gatcha_entries(str(mid), payload)
+        for entry in page_entries:
+            bvid = str(entry.get("bvid") or "").strip()
+            if not bvid or bvid in seen_bvids:
+                continue
+            seen_bvids.add(bvid)
+            all_entries.append(entry)
+        if on_progress is not None:
+            on_progress(list(all_entries))
+
+        vlist = data.get("list", {}).get("vlist", [])
+        if not isinstance(vlist, list) or len(vlist) < page_size:
+            break
+        page_number += 1
+
+    return all_entries
+
+
+def refresh_gatcha_cache() -> dict:
+    cache_payload = {"uids": {}, "updated_at": time.time()}
+    for raw_mid in GATCHA_UIDS:
+        mid = str(raw_mid).strip()
+        if not mid:
+            continue
+        cache_payload["uids"][mid] = []
+        with _GATCHA_CACHE_LOCK:
+            _save_gatcha_cache(cache_payload)
+
+        def _save_mid_progress(entries: list[dict]) -> None:
+            cache_payload["uids"][mid] = entries
+            cache_payload["updated_at"] = time.time()
+            with _GATCHA_CACHE_LOCK:
+                _save_gatcha_cache(cache_payload)
+
+        cache_payload["uids"][mid] = _fetch_gatcha_videos_for_uid(mid, on_progress=_save_mid_progress)
+        cache_payload["updated_at"] = time.time()
+        with _GATCHA_CACHE_LOCK:
+            _save_gatcha_cache(cache_payload)
+    return cache_payload
+
+
+def refresh_gatcha_cache_in_background() -> None:
+    def _worker() -> None:
+        if not _GATCHA_REFRESH_LOCK.acquire(blocking=False):
+            return
+        try:
+            refresh_gatcha_cache()
+        except Exception:
+            return
+        finally:
+            _GATCHA_REFRESH_LOCK.release()
+
+    threading.Thread(target=_worker, daemon=True, name="gatcha-cache-refresh").start()
+
+
+def _local_gatcha_candidates() -> list[dict]:
+    with _GATCHA_CACHE_LOCK:
+        cache_payload = _load_gatcha_cache()
+
+    candidates: list[dict] = []
+    uid_payload = cache_payload.get("uids") or {}
+    for raw_mid in GATCHA_UIDS:
+        entries = uid_payload.get(str(raw_mid), [])
+        if not isinstance(entries, list):
+            continue
+        candidates.extend(entry for entry in entries if isinstance(entry, dict))
+    return candidates
+
+
+def search_gatcha_cache(query: str, *, limit: int = 30) -> list[dict]:
+    normalized_query = str(query or "").strip().lower()
+    if not normalized_query:
+        return []
+
+    results: list[dict] = []
+    for entry in _local_gatcha_candidates():
+        title = str(entry.get("title") or "")
+        if normalized_query not in title.lower():
+            continue
+        results.append(
+            {
+                "bvid": str(entry.get("bvid") or ""),
+                "title": title,
+                "url": str(entry.get("url") or ""),
+            }
+        )
+        if len(results) >= max(1, int(limit)):
+            break
+    return results
+
+
+
+
 def request_json(url: str) -> dict:
-    request = urllib.request.Request(url, headers=BILIBILI_HEADERS)
+    headers = dict(BILIBILI_HEADERS)
+    if cfg.COOKIE:                          
+        headers["Cookie"] = cfg.COOKIE
+    else:
+        print("Warning: [bilikara] COOKIE 变量为空，API 将以游客身份访问。")
+    request = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(request, timeout=15) as response:
         return json.loads(response.read().decode("utf-8"))
-
 
 def resolve_video_reference(raw_input: str) -> VideoReference:
     cleaned = raw_input.strip()
@@ -291,3 +530,67 @@ def _fetch_view_data(reference: VideoReference) -> dict:
         message = payload.get("message") or "获取视频信息失败"
         raise BilibiliError(message)
     return payload["data"]
+def get_mixin_key(orig: str) -> str:
+    return ''.join([orig[i] for i in WBI_MIXIN_TABLE])[:32]
+
+def enc_wbi(params: dict, img_key: str, sub_key: str) -> dict:
+    mixin_key = get_mixin_key(img_key + sub_key)
+    curr_time = int(time.time())
+    params['wts'] = curr_time  
+    params = dict(sorted(params.items()))
+    params = {
+        k: ''.join([c for c in str(v) if c not in "!'()*"])
+        for k, v in params.items()
+    }
+    query = urllib.parse.urlencode(params)
+    w_rid = hashlib.md5((query + mixin_key).encode()).hexdigest()
+    params['w_rid'] = w_rid
+    return params
+
+def get_wbi_keys() -> tuple[str, str]:
+    nav_url = "https://api.bilibili.com/x/web-interface/nav"
+    try:
+        resp = request_json(nav_url)
+    except Exception as e:
+        raise BilibiliError(f"请求 nav 接口网络异常: {e}")
+
+    if resp.get("code") != 0:
+        msg = resp.get("message", "未知错误")
+        code = resp.get("code", "unknown")
+        raise BilibiliError(f"B 站接口返回错误: [{code}] {msg}")
+    
+    data = resp.get("data", {})
+    wbi_img = data.get("wbi_img")
+    
+    if not wbi_img:
+        raise BilibiliError("接口未返回 WBI 密钥信息，请检查 COOKIE 是否有效或 IP 是否被风控")
+    
+    img_url = wbi_img.get("img_url")
+    sub_url = wbi_img.get("sub_url")
+    
+    if not img_url or not sub_url:
+        raise BilibiliError("WBI 密钥 URL 格式不正确")
+
+    img_key = img_url.split("/")[-1].split(".")[0]
+    sub_key = sub_url.split("/")[-1].split(".")[0]
+    return img_key, sub_key
+def get_cached_wbi_keys():
+    curr_time = time.time()
+    if _WBI_CACHE["keys"] and (curr_time - _WBI_CACHE["last_update"] < 600):
+        return _WBI_CACHE["keys"]
+    
+    keys = get_wbi_keys()
+    _WBI_CACHE["keys"] = keys
+    _WBI_CACHE["last_update"] = curr_time
+    return keys
+def fetch_gatcha_candidate() -> dict | None:
+    candidates = _local_gatcha_candidates()
+    if not candidates:
+        raise BilibiliError("请填写gatcha所需cookie")
+
+    chosen = random.choice(candidates)
+    return {
+        "bvid": str(chosen.get("bvid") or ""),
+        "title": str(chosen.get("title") or ""),
+        "url": str(chosen.get("url") or ""),
+    }

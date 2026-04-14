@@ -23,6 +23,7 @@ const state = {
   dragTargetAfter: false,
   confirmIntent: null,
   retryActivityById: {},
+  gatchaCandidate: null,
 };
 
 const elements = {
@@ -78,6 +79,19 @@ const elements = {
   remoteQrPlaceholder: document.getElementById("remote-qr-placeholder"),
   remoteUrlLink: document.getElementById("remote-url-link"),
   remoteUrlHint: document.getElementById("remote-url-hint"),
+  gatchaButton: document.getElementById("gatcha-button"),
+  gatchaConfirmButton: document.getElementById("gatcha-confirm-button"),
+  gatchaRetryButton: document.getElementById("gatcha-retry-button"),
+  gatchaInitView: document.getElementById("gatcha-init-view"),
+  gatchaResultView: document.getElementById("gatcha-result-view"),
+  gatchaCandidateTitle: document.getElementById("gatcha-candidate-title"),
+  searchForm: document.getElementById("search-form"),
+  searchQuery: document.getElementById("search-query"),
+  searchButton: document.getElementById("search-button"),
+  searchResults: document.getElementById("search-results"),
+  cookieSessdata: document.getElementById("cookie-sessdata"),
+  cookieJct: document.getElementById("cookie-jct"),
+  saveCookieButton: document.getElementById("save-cookie-button"),
 };
 
 function setFormMessage(message, isError = false) {
@@ -135,6 +149,83 @@ async function fetchState() {
   }
   state.data = payload.data;
   render();
+}
+
+async function searchGatchaCache(query) {
+  const normalizedQuery = String(query || "").trim();
+  const response = await fetch(`/api/gatcha/search?q=${encodeURIComponent(normalizedQuery)}`, {
+    headers: clientHeaders(),
+  });
+  const payload = await response.json();
+  if (!response.ok || !payload.ok) {
+    throw new Error(payload.error || "Search failed");
+  }
+  return Array.isArray(payload.data?.items) ? payload.data.items : [];
+}
+
+function hideSearchResults() {
+  elements.searchResults.innerHTML = "";
+  elements.searchResults.classList.add("hidden");
+}
+
+function renderSearchResults(items) {
+  elements.searchResults.innerHTML = "";
+  elements.searchResults.classList.remove("hidden");
+
+  if (!items.length) {
+    const empty = document.createElement("div");
+    empty.className = "search-empty";
+    empty.textContent = "No cached matches found.";
+    elements.searchResults.appendChild(empty);
+    return;
+  }
+
+  items.forEach((item) => {
+    const row = document.createElement("div");
+    row.className = "search-result-item";
+
+    const meta = document.createElement("div");
+    meta.className = "search-result-meta";
+
+    const title = document.createElement("div");
+    title.className = "search-result-title";
+    title.textContent = String(item.title || "");
+
+    const url = document.createElement("div");
+    url.className = "search-result-url";
+    url.textContent = String(item.bvid || "");
+
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "next-button";
+    button.dataset.url = String(item.url || "");
+    button.textContent = "Add";
+
+    meta.append(title, url);
+    row.append(meta, button);
+    elements.searchResults.appendChild(row);
+  });
+}
+
+async function handleGatchaDraw() {
+  setFormMessage("正在连接 B 站寻找幸运投稿...");
+  try {
+    const response = await fetch("/api/gatcha/candidate", { headers: clientHeaders() });
+    const payload = await response.json();
+    if (!response.ok || !payload.ok) {
+      throw new Error(payload.error || "获取幸运歌曲失败");
+    }
+
+    state.gatchaCandidate = payload.data;
+    elements.gatchaCandidateTitle.textContent = state.gatchaCandidate.title;
+    
+    // 切换界面
+    elements.gatchaInitView.classList.add("hidden");
+    elements.gatchaResultView.classList.remove("hidden");
+    setFormMessage("运气不错！抽中了这首。");
+  } catch (error) {
+    setFormMessage(error.message, true);
+  }
 }
 
 function disconnectClient() {
@@ -227,6 +318,8 @@ function renderRequesterSelect(sessionUsers) {
 
   if (previousValue && users.includes(previousValue)) {
     elements.requesterSelect.value = previousValue;
+  } else if (users.length) {
+    elements.requesterSelect.value = users[0];
   } else {
     elements.requesterSelect.value = "";
   }
@@ -1230,6 +1323,12 @@ async function submitAddRequest(url, position, options = {}) {
 async function handleAdd(position, anchorPoint) {
   const url = elements.urlInput.value.trim();
   const requesterName = selectedRequesterName();
+  console.log({
+    selectValue: elements.requesterSelect?.value,
+    selectOptions: [...(elements.requesterSelect?.options || [])].map((o) => o.value),
+    selectedRequesterName: selectedRequesterName(),
+    sessionUsers: state.data?.session_users,
+  });
   if (!url) {
     setFormMessage("请输入 B 站视频链接或 BV 号", true);
     return;
@@ -1480,6 +1579,50 @@ elements.addForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const point = anchorPointForEvent(event.submitter || event, elements.addForm);
   await handleAdd("tail", point);
+});
+
+elements.searchForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const query = String(elements.searchQuery.value || "").trim();
+  if (!query) {
+    hideSearchResults();
+    setFormMessage("Please enter a search keyword.", true);
+    return;
+  }
+
+  elements.searchButton.disabled = true;
+  setFormMessage("Searching local cache...");
+  try {
+    const items = await searchGatchaCache(query);
+    renderSearchResults(items);
+    setFormMessage(items.length ? `Found ${items.length} cached result(s).` : "No cached matches found.");
+  } catch (error) {
+    hideSearchResults();
+    setFormMessage(error.message, true);
+  } finally {
+    elements.searchButton.disabled = false;
+  }
+});
+
+elements.searchResults.addEventListener("click", async (event) => {
+  const button = event.target.closest("button[data-url]");
+  if (!button) {
+    return;
+  }
+
+  const url = String(button.dataset.url || "").trim();
+  if (!url) {
+    return;
+  }
+
+  button.disabled = true;
+  try {
+    await handleAddByUrl(url, "tail", anchorPointForEvent(event, button));
+    hideSearchResults();
+    elements.searchQuery.value = "";
+  } finally {
+    button.disabled = false;
+  }
 });
 
 elements.sessionUserForm.addEventListener("submit", async (event) => {
@@ -1867,6 +2010,69 @@ elements.listStage.addEventListener("wheel", (event) => {
   event.preventDefault();
   list.scrollTop = clampedScrollTop;
 }, { passive: false });
+
+elements.gatchaButton.addEventListener("click", handleGatchaDraw);
+elements.gatchaRetryButton.addEventListener("click", handleGatchaDraw);
+
+elements.gatchaConfirmButton.addEventListener("click", async () => {
+  if (!state.gatchaCandidate) return;
+
+  const url = state.gatchaCandidate.url;
+  const requesterName = selectedRequesterName();
+  setFormMessage("Nozomi power注入！");
+  try {
+    state.data = await submitAddRequest(url, "tail", { requesterName });
+    setFormMessage(`点歌成功：${state.gatchaCandidate.title}`);
+    
+
+    state.gatchaCandidate = null;
+    elements.gatchaResultView.classList.add("hidden");
+    elements.gatchaInitView.classList.remove("hidden");
+    render();
+  } catch (error) {
+    if (error.code === "duplicate_session_request") {
+      const point = anchorPointForEvent({}, elements.gatchaConfirmButton);
+      openConfirm({
+        type: "duplicate-add",
+        url,
+        position: "tail",
+        preserveInput: false,
+        message: duplicateConfirmMessage(
+          error.payload?.duplicate_item,
+          error.payload?.session_entry,
+          error.payload?.active_item,
+        ),
+        x: point.x,
+        y: point.y,
+      });
+      return;
+    }
+    setFormMessage(error.message, true);
+  }
+});
+
+elements.saveCookieButton.addEventListener("click", async () => {
+  const sessdata = elements.cookieSessdata.value.trim();
+  const jct = elements.cookieJct.value.trim();
+
+  if (!sessdata || !jct) {
+    setFormMessage("请填写完整的 SESSDATA 和 bili_jct", true);
+    return;
+  }
+
+  setFormMessage("正在更新 Cookie 配置...");
+  try {
+    const result = await apiPost("/api/config/cookie", {
+      sessdata: sessdata,
+      bili_jct: jct
+    });
+    setFormMessage("Cookie 已更新,正在拉取稿件信息(第一次拉取稿件数量会影响拉取时间)");
+    elements.cookieSessdata.value = "";
+    elements.cookieJct.value = "";
+  } catch (error) {
+    setFormMessage(error.message, true);
+  }
+});
 
 async function startPolling() {
   try {

@@ -11,9 +11,17 @@ import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
-from .bilibili import BilibiliError, fetch_owner_info, fetch_video_item
+from .bilibili import (
+    BilibiliError,
+    fetch_gatcha_candidate,
+    fetch_owner_info,
+    fetch_video_item,
+    refresh_gatcha_cache,
+    refresh_gatcha_cache_in_background,
+    search_gatcha_cache,
+)
 from .cache import CacheManager
 from .config import (
     BACKUP_FILE,
@@ -359,6 +367,24 @@ class BilikaraHandler(BaseHTTPRequestHandler):
         if route == "/api/state":
             self._write_json({"ok": True, "data": CONTEXT.snapshot()})
             return
+        if route == "/api/gatcha/candidate":
+            try:
+                candidate = fetch_gatcha_candidate()
+                if not candidate:
+                    self._write_json({"ok": False, "error": "没找到符合条件的歌曲，再试一次吧"})
+                else:
+                    self._write_json({"ok": True, "data": candidate})
+            except Exception as e:
+                self._write_json({"ok": False, "error": str(e)})
+            return
+        if route == "/api/gatcha/search":
+            query = parse_qs(urlparse(self.path).query).get("q", [""])[0]
+            try:
+                results = search_gatcha_cache(query)
+                self._write_json({"ok": True, "data": {"items": results}})
+            except Exception as e:
+                self._write_json({"ok": False, "error": str(e)})
+            return
         if route.startswith("/media/"):
             self._serve_media(route)
             return
@@ -512,6 +538,20 @@ class BilikaraHandler(BaseHTTPRequestHandler):
             if route == "/api/client/disconnect":
                 CONTEXT.disconnect_client(str(body.get("client_id") or ""))
                 self._write_json({"ok": True})
+                return
+            if route == "/api/config/cookie":
+                sessdata = str(body.get("sessdata", "")).strip()
+                jct = str(body.get("bili_jct", "")).strip()
+                if not sessdata or not jct:
+                    raise ValueError("缺少必要的 Cookie 字段")
+                import bilikara.config as cfg
+                new_cookie_string = f"SESSDATA={sessdata}; bili_jct={jct}"
+                cfg.COOKIE = new_cookie_string
+                # print(f"[debug] cookie updated: {new_cookie_string}")
+                from .bilibili import BILIBILI_HEADERS
+                BILIBILI_HEADERS["Cookie"] = new_cookie_string
+                refresh_gatcha_cache_in_background()
+                self._write_json({"ok": True, "message": "配置已实时生效"})
                 return
             self._write_json(
                 {"ok": False, "error": f"未知接口: {route}"},
