@@ -2066,7 +2066,7 @@ elements.saveCookieButton.addEventListener("click", async () => {
       sessdata: sessdata,
       bili_jct: jct
     });
-    setFormMessage("Cookie 已更新，试试运气功能现已可用。");
+    setFormMessage("Cookie 已更新,正在拉取稿件信息(第一次拉取稿件数量会影响拉取时间)");
     elements.cookieSessdata.value = "";
     elements.cookieJct.value = "";
   } catch (error) {

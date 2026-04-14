@@ -18,6 +18,7 @@ from .bilibili import (
     fetch_gatcha_candidate,
     fetch_owner_info,
     fetch_video_item,
+    refresh_gatcha_cache,
     refresh_gatcha_cache_in_background,
     search_gatcha_cache,
 )
@@ -546,6 +547,7 @@ class BilikaraHandler(BaseHTTPRequestHandler):
                 import bilikara.config as cfg
                 new_cookie_string = f"SESSDATA={sessdata}; bili_jct={jct}"
                 cfg.COOKIE = new_cookie_string
+                print(f"[debug] cookie updated: {new_cookie_string}")
                 from .bilibili import BILIBILI_HEADERS
                 BILIBILI_HEADERS["Cookie"] = new_cookie_string
                 refresh_gatcha_cache_in_background()

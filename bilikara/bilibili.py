@@ -32,6 +32,8 @@ _WBI_CACHE = {
 }
 _GATCHA_CACHE_LOCK = threading.Lock()
 _GATCHA_REFRESH_LOCK = threading.Lock()
+_GATCHA_REQUEST_LOCK = threading.Lock()
+_GATCHA_LAST_REQUEST_AT = 0.0
 _GATCHA_CACHE_FILE = cfg.DATA_DIR / "gatcha_cache.json"
 GATCHA_RETRY_DELAY_SECONDS = 3
 
@@ -84,6 +86,17 @@ def _save_gatcha_cache(cache_payload: dict) -> None:
     temp_path.replace(_GATCHA_CACHE_FILE)
 
 
+def _wait_for_gatcha_request_slot() -> None:
+    global _GATCHA_LAST_REQUEST_AT
+
+    with _GATCHA_REQUEST_LOCK:
+        now = time.monotonic()
+        elapsed = now - _GATCHA_LAST_REQUEST_AT
+        if elapsed < GATCHA_RETRY_DELAY_SECONDS:
+            time.sleep(GATCHA_RETRY_DELAY_SECONDS - elapsed)
+        _GATCHA_LAST_REQUEST_AT = time.monotonic()
+
+
 def _matches_gatcha_keywords(title: str) -> bool:
     normalized_title = str(title or "")
     if not GATCHA_KEYWORDS:
@@ -112,7 +125,7 @@ def _extract_gatcha_entries(mid: str, payload: dict) -> list[dict]:
     return entries
 
 
-def _fetch_gatcha_videos_for_uid(mid: str) -> list[dict]:
+def _request_gatcha_page(mid: str, page_number: int, page_size: int = 50) -> dict:
     try:
         img_key, sub_key = get_cached_wbi_keys()
     except Exception as exc:
@@ -120,33 +133,70 @@ def _fetch_gatcha_videos_for_uid(mid: str) -> list[dict]:
 
     params = {
         "mid": str(mid),
-        "ps": 50,
+        "ps": max(1, int(page_size)),
         "tid": 0,
-        "pn": 1,
+        "pn": max(1, int(page_number)),
         "order": "pubdate",
         "platform": "web",
     }
     signed_params = enc_wbi(params, img_key, sub_key)
     query_string = urllib.parse.urlencode(signed_params)
     url = f"https://api.bilibili.com/x/space/wbi/arc/search?{query_string}"
+    _wait_for_gatcha_request_slot()
+    # print(f"[debug] gatcha fetch cookie: {cfg.COOKIE}")
 
-    last_error: Exception | None = None
-    for attempt in range(2):
-        try:
-            payload = request_json(url)
-            code = int(payload.get("code") or 0)
-            if code == 412:
-                raise BilibiliError(str(payload.get("message") or "412 Precondition Failed"))
-            if code != 0:
-                raise BilibiliError(str(payload.get("message") or "API request failed"))
-            return _extract_gatcha_entries(str(mid), payload)
-        except Exception as exc:  # noqa: BLE001
-            last_error = exc
-            if "412" not in str(exc) or attempt == 1:
+    try:
+        payload = request_json(url)
+        code = int(payload.get("code") or 0)
+        if code == 412:
+            raise BilibiliError(str(payload.get("message") or "412 Precondition Failed"))
+        if code != 0:
+            raise BilibiliError(str(payload.get("message") or "API request failed"))
+        # print(f"[debug] gatcha fetch success: mid={mid}, page={page_number}")
+        return payload
+    except Exception as exc:  # noqa: BLE001
+        # print(f"[debug] gatcha fetch error: {exc}; cookie: {cfg.COOKIE}")
+        raise
+
+
+def _fetch_gatcha_videos_for_uid(
+    mid: str,
+    *,
+    on_progress: callable | None = None,
+) -> list[dict]:
+    page_size = 50
+    page_number = 1
+    all_entries: list[dict] = []
+    seen_bvids: set[str] = set()
+
+    while True:
+        while True:
+            try:
+                payload = _request_gatcha_page(mid, page_number, page_size)
                 break
-            time.sleep(GATCHA_RETRY_DELAY_SECONDS)
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    # f"[debug] gatcha page retry scheduled: mid={mid}, page={page_number}, "
+                    # f"cached_entries={len(all_entries)}, error={exc}"
+                )
+                time.sleep(GATCHA_RETRY_DELAY_SECONDS)
+        data = payload.get("data", {}) if isinstance(payload, dict) else {}
+        page_entries = _extract_gatcha_entries(str(mid), payload)
+        for entry in page_entries:
+            bvid = str(entry.get("bvid") or "").strip()
+            if not bvid or bvid in seen_bvids:
+                continue
+            seen_bvids.add(bvid)
+            all_entries.append(entry)
+        if on_progress is not None:
+            on_progress(list(all_entries))
 
-    raise BilibiliError(f"failed to refresh gatcha uid {mid}: {last_error}")
+        vlist = data.get("list", {}).get("vlist", [])
+        if not isinstance(vlist, list) or len(vlist) < page_size:
+            break
+        page_number += 1
+
+    return all_entries
 
 
 def refresh_gatcha_cache() -> dict:
@@ -155,10 +205,20 @@ def refresh_gatcha_cache() -> dict:
         mid = str(raw_mid).strip()
         if not mid:
             continue
-        cache_payload["uids"][mid] = _fetch_gatcha_videos_for_uid(mid)
+        cache_payload["uids"][mid] = []
+        with _GATCHA_CACHE_LOCK:
+            _save_gatcha_cache(cache_payload)
 
-    with _GATCHA_CACHE_LOCK:
-        _save_gatcha_cache(cache_payload)
+        def _save_mid_progress(entries: list[dict]) -> None:
+            cache_payload["uids"][mid] = entries
+            cache_payload["updated_at"] = time.time()
+            with _GATCHA_CACHE_LOCK:
+                _save_gatcha_cache(cache_payload)
+
+        cache_payload["uids"][mid] = _fetch_gatcha_videos_for_uid(mid, on_progress=_save_mid_progress)
+        cache_payload["updated_at"] = time.time()
+        with _GATCHA_CACHE_LOCK:
+            _save_gatcha_cache(cache_payload)
     return cache_payload
 
 
