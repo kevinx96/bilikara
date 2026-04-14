@@ -185,6 +185,8 @@ class CacheManager:
                 cache_message=self._waiting_message(),
                 local_relative_path="",
                 local_media_url="",
+                video_relative_path="",
+                video_media_url="",
                 audio_variants=[],
                 selected_audio_variant_id="",
                 persist_backup=False,
@@ -214,6 +216,8 @@ class CacheManager:
                 cache_message="缓存已在退出时清空",
                 local_relative_path="",
                 local_media_url="",
+                video_relative_path="",
+                video_media_url="",
                 audio_variants=[],
                 selected_audio_variant_id="",
                 persist_backup=False,
@@ -246,6 +250,8 @@ class CacheManager:
             cache_message="准备重新下载",
             local_relative_path="",
             local_media_url="",
+            video_relative_path="",
+            video_media_url="",
             audio_variants=[],
             selected_audio_variant_id="",
             persist_backup=False,
@@ -406,6 +412,8 @@ class CacheManager:
             cache_message=self._ready_message(item),
             local_relative_path=relative_path,
             local_media_url=self._build_media_url(relative_path),
+            video_relative_path=cache_result["video_relative_path"],
+            video_media_url=cache_result["video_media_url"],
             audio_variants=cache_result["audio_variants"],
             selected_audio_variant_id=cache_result["selected_audio_variant_id"],
             persist_backup=False,
@@ -877,14 +885,22 @@ class CacheManager:
             video_file=video_file,
             audio_files=audio_files,
         )
-        audio_variants = [
-            {
-                "id": variant_id,
-                "label": label,
-                "media_url": self._build_media_url(str(path.relative_to(CACHE_DIR))),
-            }
-            for variant_id, label, path in variant_files
-        ]
+        audio_variants = []
+        for index, (variant_id, label, path) in enumerate(variant_files):
+            raw_audio_file = audio_files[index][0] if index < len(audio_files) else None
+            raw_audio_url = (
+                self._build_media_url(str(raw_audio_file.relative_to(CACHE_DIR)))
+                if raw_audio_file is not None
+                else ""
+            )
+            audio_variants.append(
+                {
+                    "id": variant_id,
+                    "label": label,
+                    "media_url": self._build_media_url(str(path.relative_to(CACHE_DIR))),
+                    "audio_url": raw_audio_url,
+                }
+            )
         existing_variant_id = str(item.selected_audio_variant_id or "").strip()
         allowed_variant_ids = {
             str(variant.get("id") or "").strip()
@@ -898,6 +914,8 @@ class CacheManager:
         )
         return {
             "media_file": output_file,
+            "video_relative_path": str(video_file.relative_to(CACHE_DIR)),
+            "video_media_url": self._build_media_url(str(video_file.relative_to(CACHE_DIR))),
             "audio_variants": audio_variants,
             "selected_audio_variant_id": selected_audio_variant_id,
         }
@@ -1378,6 +1396,7 @@ class CacheManager:
             self.store.update_item(
                 item.id,
                 local_media_url=self._build_media_url(item.local_relative_path),
+                video_media_url=self._build_media_url(item.video_relative_path) if item.video_relative_path else "",
                 audio_variants=item.audio_variants,
                 selected_audio_variant_id=item.selected_audio_variant_id,
                 cache_status="ready",
@@ -1399,6 +1418,8 @@ class CacheManager:
             cache_message="等待缓存",
             local_relative_path="",
             local_media_url="",
+            video_relative_path="",
+            video_media_url="",
             audio_variants=[],
             selected_audio_variant_id="",
             persist_backup=False,
@@ -1415,6 +1436,8 @@ class CacheManager:
             cache_message=message,
             local_relative_path="",
             local_media_url="",
+            video_relative_path="",
+            video_media_url="",
             audio_variants=[],
             selected_audio_variant_id="",
             persist_backup=False,

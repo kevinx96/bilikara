@@ -121,6 +121,9 @@ class AppContext:
     def set_mode(self, mode: str) -> None:
         self.store.set_mode(mode)
 
+    def set_av_offset_ms(self, offset_ms: int) -> int:
+        return self.store.set_av_offset_ms(offset_ms)
+
     def set_audio_variant(self, item_id: str, variant_id: str) -> bool:
         return self.store.set_audio_variant(item_id, variant_id)
 
@@ -438,6 +441,13 @@ class BilikaraHandler(BaseHTTPRequestHandler):
                 if mode not in {"online", "local"}:
                     raise ValueError("mode 必须是 online 或 local")
                 CONTEXT.set_mode(mode)
+                self._write_json({"ok": True, "data": CONTEXT.snapshot()})
+                return
+            if route == "/api/player/av-offset":
+                offset_ms = body.get("offset_ms")
+                if not isinstance(offset_ms, int):
+                    raise ValueError("offset_ms must be an integer")
+                CONTEXT.set_av_offset_ms(offset_ms)
                 self._write_json({"ok": True, "data": CONTEXT.snapshot()})
                 return
             if route == "/api/cache/retry":

@@ -31,6 +31,18 @@ class PlaylistStoreTest(unittest.TestCase):
     def test_default_mode_is_local(self):
         self.assertEqual(self.store.playback_mode, "local")
 
+    def test_av_offset_persists_in_state_file(self):
+        self.store.set_av_offset_ms(230)
+
+        restored_store = PlaylistStore(
+            state_file=self.state_file,
+            backup_file=self.backup_file,
+            session_archive_dir=self.session_archive_dir,
+        )
+
+        self.assertEqual(self.store.snapshot()["player_settings"]["av_offset_ms"], 230)
+        self.assertEqual(restored_store.av_offset_ms, 230)
+
     def make_item(self, item_id: str, *, song_key: str | None = None) -> PlaylistItem:
         key = song_key or item_id
         numeric = sum(ord(char) for char in key)
@@ -239,9 +251,12 @@ class PlaylistStoreTest(unittest.TestCase):
         item.cache_message = "cached"
         item.local_relative_path = "a/video.mp4"
         item.local_media_url = "/media/a/video.mp4"
+        item.video_relative_path = "a/video-only.m4s"
+        item.video_media_url = "/media/a/video-only.m4s"
         self.store.move_session_user_to_index("D", 1)
         self.store.add_item(item, requester_name="A")
         self.store.set_mode("local")
+        self.store.set_av_offset_ms(180)
 
         restored_store = PlaylistStore(
             state_file=self.state_file,
@@ -252,12 +267,15 @@ class PlaylistStoreTest(unittest.TestCase):
         self.assertTrue(restored_store.backup_summary()["available"])
         self.assertTrue(restored_store.restore_backup())
         self.assertEqual(restored_store.playback_mode, "local")
+        self.assertEqual(restored_store.av_offset_ms, 180)
         self.assertEqual(restored_store.current_item.id, "a")
         self.assertEqual([entry.id for entry in restored_store.playlist], [])
         restored_item = restored_store.current_item
         self.assertEqual(restored_item.cache_status, "pending")
         self.assertEqual(restored_item.local_relative_path, "")
         self.assertEqual(restored_item.local_media_url, "")
+        self.assertEqual(restored_item.video_relative_path, "")
+        self.assertEqual(restored_item.video_media_url, "")
         self.assertEqual(restored_item.requester_name, "A")
         self.assertEqual(restored_store.session_users[:4], ["A", "D", "B", "C"])
 

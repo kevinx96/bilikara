@@ -37,6 +37,8 @@ class PlaylistItem:
     cache_message: str = "等待缓存"
     local_relative_path: str = ""
     local_media_url: str = ""
+    video_relative_path: str = ""
+    video_media_url: str = ""
 
     def serialize(self) -> dict[str, Any]:
         return asdict(self)

@@ -548,11 +548,75 @@ h2 {
   display: block;
 }
 
+.player-frame audio {
+  display: none;
+}
+
 .audio-variant-bar {
   margin-top: 12px;
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.av-sync-panel {
+  margin-top: 14px;
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 14px 16px;
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.62);
+  border: 1px solid rgba(208, 90, 63, 0.12);
+}
+
+.av-sync-copy {
+  display: grid;
+  gap: 6px;
+}
+
+.av-sync-hint {
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+
+.av-sync-controls {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.av-sync-input-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 42px;
+  padding: 0 14px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.82);
+  border: 1px solid rgba(87, 63, 43, 0.08);
+  color: var(--muted);
+}
+
+.av-sync-input-wrap input[type="number"] {
+  width: 104px;
+  height: auto;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--ink);
+  text-align: right;
+  box-shadow: none;
+}
+
+.av-sync-input-wrap input[type="number"]:focus {
+  border: none;
+  box-shadow: none;
 }
 
 .audio-variant-button {
@@ -1510,6 +1574,15 @@ select:disabled {
 
   .remote-card {
     grid-template-columns: 1fr;
+  }
+
+  .av-sync-panel,
+  .av-sync-controls {
+    width: 100%;
+  }
+
+  .av-sync-controls {
+    justify-content: flex-start;
   }
 
   .remote-qr-wrap {
