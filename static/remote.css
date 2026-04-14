@@ -223,6 +223,26 @@ h1 {
   color: var(--accent-deep);
 }
 
+#remote-av-sync-panel .remote-setting-controls {
+  justify-content: space-between;
+}
+
+#remote-volume-panel .remote-setting-controls {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+}
+
+#remote-volume-panel .remote-mute-button {
+  min-width: 88px;
+}
+
+#remote-volume-panel .remote-volume-slider {
+  width: 100%;
+  min-width: 0;
+}
+
 .player-control-row {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -505,5 +525,84 @@ select:disabled {
 
   .queue-state {
     justify-self: start;
+  }
+
+  .remote-setting-panel {
+    padding: 14px 12px;
+  }
+
+  .remote-setting-copy {
+    gap: 8px;
+  }
+
+  .remote-setting-copy .muted {
+    line-height: 1.55;
+  }
+
+  #remote-av-sync-panel .remote-setting-controls {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-areas:
+      "neg200 neg50"
+      "input input"
+      "pos50 pos200";
+    gap: 12px;
+    align-items: stretch;
+  }
+
+  #remote-av-sync-panel .remote-step-button {
+    width: 100%;
+    min-height: 48px;
+    padding-inline: 12px;
+  }
+
+  #remote-av-sync-panel .remote-input-wrap {
+    grid-area: input;
+    width: 100%;
+    min-height: 48px;
+    justify-content: center;
+    padding: 0 16px;
+  }
+
+  #remote-av-sync-panel .remote-input-wrap input[type="number"] {
+    width: min(120px, 100%);
+    font-size: 18px;
+  }
+
+  #remote-av-sync-panel [data-av-step="-200"] {
+    grid-area: neg200;
+  }
+
+  #remote-av-sync-panel [data-av-step="-50"] {
+    grid-area: neg50;
+  }
+
+  #remote-av-sync-panel [data-av-step="50"] {
+    grid-area: pos50;
+  }
+
+  #remote-av-sync-panel [data-av-step="200"] {
+    grid-area: pos200;
+  }
+
+  #remote-volume-panel .remote-setting-controls {
+    grid-template-columns: 1fr;
+    gap: 14px;
+    align-items: stretch;
+  }
+
+  #remote-volume-panel .remote-mute-button {
+    width: 100%;
+    min-height: 48px;
+  }
+
+  #remote-volume-panel .remote-volume-slider {
+    width: 100%;
+  }
+
+  #remote-volume-panel .remote-volume-value {
+    min-width: 0;
+    text-align: left;
+    font-size: 16px;
   }
 }
