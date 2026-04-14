@@ -112,6 +112,25 @@
                 <button type="button" class="toolbar-button ghost av-sync-step-button" data-step="200">+200ms</button>
               </div>
             </section>
+            <section class="volume-panel" id="volume-panel">
+              <div class="volume-copy">
+                <p class="section-tag">播放音量</p>
+                <p class="volume-hint">直接控制服务端当前本地播放的音量。</p>
+              </div>
+              <div class="volume-controls">
+                <button type="button" class="toolbar-button ghost volume-mute-button" id="volume-mute-button">静音</button>
+                <input
+                  id="volume-slider"
+                  class="volume-slider"
+                  type="range"
+                  min="0"
+                  max="100"
+                  step="1"
+                  value="100"
+                />
+                <strong class="volume-value" id="volume-value">100%</strong>
+              </div>
+            </section>
           </section>
 
           <section class="request-panel">

@@ -60,6 +60,10 @@ const elements = {
   audioVariantBar: document.getElementById("audio-variant-bar"),
   avSyncPanel: document.getElementById("av-sync-panel"),
   avOffsetInput: document.getElementById("av-offset-input"),
+  volumePanel: document.getElementById("volume-panel"),
+  volumeMuteButton: document.getElementById("volume-mute-button"),
+  volumeSlider: document.getElementById("volume-slider"),
+  volumeValue: document.getElementById("volume-value"),
   addForm: document.getElementById("add-form"),
   requesterSelect: document.getElementById("requester-select"),
   urlInput: document.getElementById("url-input"),
@@ -258,6 +262,7 @@ function render() {
 
   renderAudioVariantBar(currentItem, data.playback_mode);
   renderAvSyncControls(data.playback_mode, data.player_settings);
+  renderVolumeControls(data.playback_mode);
   renderPlayer(currentItem, data.playback_mode);
   applyRemotePlayerControl(data.player_control_command, currentItem, data.playback_mode);
   renderQueueCurrent(currentItem);
@@ -656,8 +661,7 @@ function captureLocalPlayerPreferences() {
       state.localPlayerVolume = Math.max(0, Math.min(1, volume));
     }
     state.localPlayerMuted = Boolean(mediaWithVolume.muted);
-    writeLocalPreference(storageKeys.playerVolume, state.localPlayerVolume);
-    writeLocalPreference(storageKeys.playerMuted, state.localPlayerMuted);
+    persistLocalVolumePreferences();
   }
   if (primaryVideo) {
     state.localShouldBePlaying = !primaryVideo.paused;
@@ -682,10 +686,10 @@ function syncSplitPlayerVolumeFromVideo(video, audio) {
     ? Math.max(0, Math.min(1, Number(video.volume)))
     : state.localPlayerVolume;
   state.localPlayerMuted = Boolean(video.muted);
-  writeLocalPreference(storageKeys.playerVolume, state.localPlayerVolume);
-  writeLocalPreference(storageKeys.playerMuted, state.localPlayerMuted);
+  persistLocalVolumePreferences();
   audio.volume = state.localPlayerVolume;
   audio.muted = state.localPlayerMuted;
+  renderVolumeControls(state.data?.playback_mode || "local");
 }
 
 function syncSplitPlayer(video, audio, offsetSeconds, forceSeek = false) {
@@ -727,6 +731,63 @@ function syncMountedLocalPlayer(forceSeek = false) {
     return;
   }
   syncSplitPlayer(video, audio, currentAvOffsetSeconds(), forceSeek);
+}
+
+function applyStoredVolumeToSinglePlayer(video) {
+  if (!video) {
+    return;
+  }
+  video.volume = state.localPlayerVolume;
+  video.muted = state.localPlayerMuted;
+}
+
+function applyStoredVolumeToMountedPlayer() {
+  const { video, audio } = activeLocalPlayerElements();
+  if (video && audio) {
+    applyStoredVolumeToSplitPlayer(video, audio);
+    return;
+  }
+  applyStoredVolumeToSinglePlayer(activePrimaryVideoElement());
+}
+
+function volumePercentText() {
+  return `${Math.round(state.localPlayerVolume * 100)}%`;
+}
+
+function renderVolumeControls(playbackMode) {
+  if (!elements.volumePanel || !elements.volumeSlider || !elements.volumeMuteButton || !elements.volumeValue) {
+    return;
+  }
+
+  const isLocalMode = playbackMode === "local";
+  elements.volumePanel.classList.toggle("hidden", !isLocalMode);
+  elements.volumeSlider.value = String(Math.round(state.localPlayerVolume * 100));
+  elements.volumeValue.textContent = volumePercentText();
+  elements.volumeMuteButton.textContent = state.localPlayerMuted ? "取消静音" : "静音";
+  elements.volumeMuteButton.classList.toggle("is-muted", state.localPlayerMuted);
+}
+
+function persistLocalVolumePreferences() {
+  writeLocalPreference(storageKeys.playerVolume, state.localPlayerVolume);
+  writeLocalPreference(storageKeys.playerMuted, state.localPlayerMuted);
+}
+
+function setLocalPlayerVolume(nextVolume, { unmute = true } = {}) {
+  const normalizedVolume = Math.max(0, Math.min(1, Number(nextVolume || 0)));
+  state.localPlayerVolume = normalizedVolume;
+  if (unmute && normalizedVolume > 0) {
+    state.localPlayerMuted = false;
+  }
+  persistLocalVolumePreferences();
+  applyStoredVolumeToMountedPlayer();
+  renderVolumeControls(state.data?.playback_mode || "local");
+}
+
+function toggleLocalPlayerMute() {
+  state.localPlayerMuted = !state.localPlayerMuted;
+  persistLocalVolumePreferences();
+  applyStoredVolumeToMountedPlayer();
+  renderVolumeControls(state.data?.playback_mode || "local");
 }
 
 function audioVariantSwitchLocked() {
@@ -1058,8 +1119,8 @@ function renderPlayer(currentItem, playbackMode) {
           ? Math.max(0, Math.min(1, Number(video.volume)))
           : state.localPlayerVolume;
         state.localPlayerMuted = Boolean(video.muted);
-        writeLocalPreference(storageKeys.playerVolume, state.localPlayerVolume);
-        writeLocalPreference(storageKeys.playerMuted, state.localPlayerMuted);
+        persistLocalVolumePreferences();
+        renderVolumeControls(state.data?.playback_mode || "local");
       });
       video.addEventListener("ended", async () => {
         state.localShouldBePlaying = false;
@@ -2051,6 +2112,14 @@ elements.avOffsetInput?.addEventListener("keydown", async (event) => {
   }
   event.preventDefault();
   await setAvOffset(event.target.value);
+});
+
+elements.volumeSlider?.addEventListener("input", (event) => {
+  setLocalPlayerVolume(Number(event.target.value || "0") / 100);
+});
+
+elements.volumeMuteButton?.addEventListener("click", () => {
+  toggleLocalPlayerMute();
 });
 
 elements.clearPlaylistButton.addEventListener("click", (event) => {
