@@ -1536,11 +1536,23 @@ select:disabled {
   height: 100%;
 }
 .cookie-config-bar {
-  margin-bottom: 20px;
-  padding: 16px;
-  border-radius: 20px;
-  background: rgba(255, 255, 255, 0.4);
-  border: 1px dashed var(--line);
+  display: grid;
+  gap: 14px;
+}
+
+.sub-card {
+  margin-top: 20px;
+}
+
+.cookie-sub-card {
+  padding: 16px 20px;
+}
+
+.cookie-sub-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
 }
 
 .cookie-inputs {
@@ -1569,6 +1581,21 @@ select:disabled {
   border: 1px solid var(--line);
   padding: 0 12px;
   font-size: 13px;
+}
+
+.cookie-sub-card .next-button {
+  flex: 0 0 auto;
+}
+
+@media (max-width: 760px) {
+  .cookie-inputs {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .cookie-sub-card .next-button {
+    width: 100%;
+  }
 }
 
 

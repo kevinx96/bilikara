@@ -8,21 +8,6 @@
   </head>
   <body>
     <div class="app-shell">
-      <section class="cookie-config-bar">
-        <div class="cookie-inputs">
-          <div class="input-group">
-            <label>SESSDATA</label>
-            <input type="text" id="cookie-sessdata" placeholder="从浏览器获取的 SESSDATA">
-          </div>
-          <div class="input-group">
-            <label>bili_jct</label>
-            <input type="text" id="cookie-jct" placeholder="从浏览器获取的 bili_jct">
-          </div>
-          <button type="button" id="save-cookie-button" class="next-button">更新配置</button>
-        </div>
-        <p class="cookie-hint">配置将实时保存到后端，用于解决“试试运气”时的 412/101 错误。</p>
-      </section>
-
       <section class="backup-banner hidden" id="backup-banner">
         <div class="backup-copy">
           <p class="backup-title">Auto Restore</p>
@@ -275,6 +260,29 @@
           </div>
         </aside>
       </main>
+
+      <section class="list-card sub-card cookie-sub-card">
+        <div class="cookie-config-bar">
+          <div class="cookie-sub-card-head">
+            <div>
+              <p class="section-tag">Cookie Config</p>
+              <h2>Cookie</h2>
+            </div>
+          </div>
+          <div class="cookie-inputs">
+            <div class="input-group">
+              <label>SESSDATA</label>
+              <input type="text" id="cookie-sessdata" placeholder="从浏览器获取的 SESSDATA">
+            </div>
+            <div class="input-group">
+              <label>bili_jct</label>
+              <input type="text" id="cookie-jct" placeholder="从浏览器获取的 bili_jct">
+            </div>
+            <button type="button" id="save-cookie-button" class="next-button">更新配置</button>
+          </div>
+          <p class="cookie-hint">配置将实时保存到后端，用于解决“试试运气”时的 412/101 错误。</p>
+        </div>
+      </section>
     </div>
 
     <!-- Templates -->
