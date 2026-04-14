@@ -861,7 +861,7 @@ class CacheManager:
         if COOKIE:
             command.extend(["-c", COOKIE])
 
-        label = "视频轨" if stream_kind == "video" else "audio stream"
+        label = "视频轨" if stream_kind == "video" else "音轨"
         stage_label = f"下载{label} P{page}"
         self._run_item_command(
             item.id,
