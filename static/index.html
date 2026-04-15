@@ -97,6 +97,14 @@
                   <div class="cache-panel-tool-list">
                     <p id="bbdown-status-row">
                       <span>BBDown</span>
+                      <button
+                        type="button"
+                        class="bbdown-login-badge is-unknown"
+                        id="bbdown-login-button"
+                      >
+                        <span class="bbdown-login-label">未登录</span>
+                        <span class="bbdown-login-hover-label">退出</span>
+                      </button>
                       <span
                         class="tool-status-indicator is-loading cache-panel-tool-indicator"
                         id="bbdown-panel-status-indicator"
@@ -138,6 +146,21 @@
                     <span>5</span>
                   </div>
                 </div>
+              </div>
+              <div class="bbdown-login-panel hidden" id="bbdown-login-panel">
+                <div class="bbdown-login-copy">
+                  <p class="cache-panel-label">BBDown 登录</p>
+                  <!-- <p class="cache-panel-hint">使用哔哩哔哩 App 扫码后，BBDown 会生成本地 BBDown.data。</p> -->
+                </div>
+                <div class="bbdown-login-qr">
+                  <img id="bbdown-login-qr-image" class="bbdown-login-qr-image hidden" alt="BBDown 登录二维码" />
+                  <pre id="bbdown-login-qr-text" class="bbdown-login-qr-text hidden"></pre>
+                  <p id="bbdown-login-message" class="bbdown-login-message">正在准备二维码...</p>
+                </div>
+                <!-- NOTE: Not implemented -->
+                <!-- <button type="button" class="toolbar-button bbdown-login-refresh" id="bbdown-login-refresh">
+                  重新生成二维码 -->
+                </button>
               </div>
               <div class="cache-panel-row cache-panel-mode-row">
                 <div>

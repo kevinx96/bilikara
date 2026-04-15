@@ -542,10 +542,115 @@ h2 {
   color: var(--muted);
 }
 
+.bbdown-login-badge {
+  border: none;
+  cursor: pointer;
+  border-radius: 999px;
+  padding: 3px 8px;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.2;
+  transition:
+    background 180ms ease,
+    color 180ms ease;
+}
+
+.bbdown-login-badge.is-unlogged,
+.bbdown-login-badge.is-unknown {
+  background: rgba(109, 98, 88, 0.12);
+  color: var(--muted);
+}
+
+.bbdown-login-badge.is-logged {
+  background: rgba(43, 123, 96, 0.14);
+  color: var(--green);
+}
+
+.bbdown-login-badge.is-logged:hover,
+.bbdown-login-badge.is-logged:focus-visible {
+  background: rgba(177, 69, 69, 0.14);
+  color: var(--red);
+}
+
+.bbdown-login-hover-label {
+  display: none;
+}
+
+.bbdown-login-badge.is-logged:hover .bbdown-login-label,
+.bbdown-login-badge.is-logged:focus-visible .bbdown-login-label {
+  display: none;
+}
+
+.bbdown-login-badge.is-logged:hover .bbdown-login-hover-label,
+.bbdown-login-badge.is-logged:focus-visible .bbdown-login-hover-label {
+  display: inline;
+}
+
 .cache-panel-tool-indicator {
   width: 18px;
   height: 18px;
   flex-basis: 18px;
+}
+
+.bbdown-login-panel {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.58);
+  border: 1px solid rgba(87, 63, 43, 0.08);
+}
+
+.bbdown-login-panel.hidden {
+  display: none;
+}
+
+.bbdown-login-qr {
+  display: grid;
+  place-items: center;
+  min-height: 132px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.72);
+  overflow: hidden;
+}
+
+.bbdown-login-qr-image {
+  width: min(168px, 100%);
+  height: auto;
+  display: block;
+}
+
+.bbdown-login-qr-image.hidden,
+.bbdown-login-qr-text.hidden {
+  display: none;
+}
+
+.bbdown-login-qr-text {
+  margin: 0;
+  max-width: 100%;
+  overflow: auto;
+  font-size: 6px;
+  line-height: 0.82;
+  color: var(--ink);
+  background: white;
+}
+
+.bbdown-login-message {
+  padding: 8px;
+  text-align: center;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--muted);
+}
+
+.bbdown-login-message.is-error {
+  color: var(--red);
+}
+
+.bbdown-login-refresh {
+  justify-self: end;
+  padding: 7px 10px;
+  font-size: 12px;
 }
 
 .cache-panel-row-stack {

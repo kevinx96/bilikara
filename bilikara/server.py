@@ -570,6 +570,14 @@ class BilikaraHandler(BaseHTTPRequestHandler):
                 CONTEXT.disconnect_client(str(body.get("client_id") or ""))
                 self._write_json({"ok": True})
                 return
+            if route == "/api/bbdown/login/start":
+                CONTEXT.cache_manager.start_bbdown_login()
+                self._write_json({"ok": True, "data": CONTEXT.snapshot()})
+                return
+            if route == "/api/bbdown/logout":
+                CONTEXT.cache_manager.logout_bbdown()
+                self._write_json({"ok": True, "data": CONTEXT.snapshot()})
+                return
             if route == "/api/config/cookie":
                 sessdata = str(body.get("sessdata", "")).strip()
                 jct = str(body.get("bili_jct", "")).strip()

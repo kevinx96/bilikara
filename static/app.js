@@ -54,6 +54,7 @@ const state = {
   gatchaCandidate: null,
   gatchaCooldownUntil: 0,
   gatchaCooldownTimer: null,
+  bbdownLoginRequesting: false,
   layoutMode: "full",
 };
 
@@ -68,6 +69,12 @@ const elements = {
   cachePanel: document.getElementById("cache-panel"),
   cacheUsageDetail: document.getElementById("cache-usage-detail"),
   bbdownStatusRow: document.getElementById("bbdown-status-row"),
+  bbdownLoginButton: document.getElementById("bbdown-login-button"),
+  bbdownLoginPanel: document.getElementById("bbdown-login-panel"),
+  bbdownLoginQrImage: document.getElementById("bbdown-login-qr-image"),
+  bbdownLoginQrText: document.getElementById("bbdown-login-qr-text"),
+  bbdownLoginMessage: document.getElementById("bbdown-login-message"),
+  bbdownLoginRefresh: document.getElementById("bbdown-login-refresh"),
   ffmpegStatusRow: document.getElementById("ffmpeg-status-row"),
   bbdownPanelStatusIndicator: document.getElementById("bbdown-panel-status-indicator"),
   ffmpegPanelStatusIndicator: document.getElementById("ffmpeg-panel-status-indicator"),
@@ -878,6 +885,7 @@ function renderCacheSettings(bbdown, ffmpeg, cachePolicy) {
   elements.cacheUsageDetail.textContent = formatCacheUsage(cachePolicy);
   syncToolIndicator(elements.bbdownPanelStatusIndicator, bbdown?.state);
   syncToolIndicator(elements.ffmpegPanelStatusIndicator, ffmpeg?.state);
+  renderBBDownLogin(bbdown?.login || { logged_in: Boolean(bbdown?.logged_in) });
   if (elements.bbdownStatusRow) {
     elements.bbdownStatusRow.title = `BBDown ${formatBBDownHint(bbdown)}`;
   }
@@ -887,6 +895,69 @@ function renderCacheSettings(bbdown, ffmpeg, cachePolicy) {
 
   renderCacheSlider(cachePolicy);
   syncCachePanelVisibility();
+}
+
+function renderBBDownLogin(login) {
+  const loggedIn = Boolean(login?.logged_in);
+  if (elements.bbdownLoginButton) {
+    elements.bbdownLoginButton.classList.toggle("is-logged", loggedIn);
+    elements.bbdownLoginButton.classList.toggle("is-unlogged", !loggedIn);
+    elements.bbdownLoginButton.classList.remove("is-unknown");
+    const label = elements.bbdownLoginButton.querySelector(".bbdown-login-label");
+    if (label) {
+      label.textContent = loggedIn ? "已登录" : "未登录";
+    }
+    elements.bbdownLoginButton.title = loggedIn ? "点击退出 BBDown 登录" : "点击生成 BBDown 登录二维码";
+  }
+
+  elements.bbdownLoginPanel?.classList.toggle("hidden", loggedIn);
+  if (loggedIn) {
+    return;
+  }
+
+  const qrImage = String(login?.qr_image || "");
+  const qrText = String(login?.qr_text || "");
+  if (elements.bbdownLoginQrImage) {
+    elements.bbdownLoginQrImage.classList.toggle("hidden", !qrImage);
+    if (qrImage && elements.bbdownLoginQrImage.src !== qrImage) {
+      elements.bbdownLoginQrImage.src = qrImage;
+    }
+  }
+  if (elements.bbdownLoginQrText) {
+    elements.bbdownLoginQrText.classList.toggle("hidden", Boolean(qrImage) || !qrText);
+    elements.bbdownLoginQrText.textContent = qrText;
+  }
+  if (elements.bbdownLoginMessage) {
+    elements.bbdownLoginMessage.textContent = login?.message || "正在准备二维码...";
+    elements.bbdownLoginMessage.classList.toggle("is-error", login?.state === "failed");
+  }
+  maybeStartBBDownLogin(login);
+}
+
+function maybeStartBBDownLogin(login) {
+  if (!state.cacheSettingsOpen || state.bbdownLoginRequesting || login?.logged_in) {
+    return;
+  }
+  const loginState = String(login?.state || "idle");
+  if (loginState === "starting" || loginState === "waiting") {
+    return;
+  }
+  if (loginState !== "idle") {
+    return;
+  }
+  startBBDownLogin();
+}
+
+async function startBBDownLogin() {
+  state.bbdownLoginRequesting = true;
+  try {
+    state.data = await apiPost("/api/bbdown/login/start");
+    render();
+  } catch (error) {
+    setFormMessage(error.message, true);
+  } finally {
+    state.bbdownLoginRequesting = false;
+  }
 }
 
 function syncToolIndicator(indicator, state) {
@@ -953,6 +1024,7 @@ function renderCacheSlider(cachePolicy) {
 function syncCachePanelVisibility() {
   elements.cacheSettingsToggle.setAttribute("aria-expanded", String(state.cacheSettingsOpen));
   elements.cachePanel.classList.toggle("hidden", !state.cacheSettingsOpen);
+  maybeStartBBDownLogin(state.data?.bbdown?.login);
 }
 
 function renderQueueCurrent(currentItem) {
@@ -2717,6 +2789,24 @@ elements.dismissBackupButton.addEventListener("blur", () => {
 elements.cacheSettingsToggle.addEventListener("click", () => {
   state.cacheSettingsOpen = !state.cacheSettingsOpen;
   syncCachePanelVisibility();
+});
+
+elements.bbdownLoginButton?.addEventListener("click", async () => {
+  const loggedIn = Boolean(state.data?.bbdown?.login?.logged_in || state.data?.bbdown?.logged_in);
+  if (!loggedIn) {
+    await startBBDownLogin();
+    return;
+  }
+  try {
+    state.data = await apiPost("/api/bbdown/logout");
+    render();
+  } catch (error) {
+    setFormMessage(error.message, true);
+  }
+});
+
+elements.bbdownLoginRefresh?.addEventListener("click", async () => {
+  await startBBDownLogin();
 });
 
 elements.cacheLimitSlider.addEventListener("input", (event) => {
