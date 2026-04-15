@@ -78,6 +78,30 @@ p {
   z-index: 400;
 }
 
+.app-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 22px;
+  transform: translateX(-50%);
+  max-width: min(520px, calc(100vw - 32px));
+  padding: 11px 16px;
+  border-radius: 999px;
+  background: rgba(255, 251, 245, 0.94);
+  border: 1px solid rgba(87, 63, 43, 0.12);
+  box-shadow: 0 16px 42px rgba(88, 56, 30, 0.16);
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.4;
+  text-align: center;
+  z-index: 420;
+  backdrop-filter: blur(14px);
+}
+
+.app-toast.is-error {
+  color: var(--red);
+  border-color: rgba(177, 69, 69, 0.22);
+}
+
 .backup-banner.hidden {
   display: none;
 }
@@ -2560,6 +2584,17 @@ select:disabled {
 
 .search-results.hidden {
   display: none;
+}
+
+.search-message {
+  min-height: 18px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.search-message.is-error {
+  color: var(--red);
 }
 
 .search-results {

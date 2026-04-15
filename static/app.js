@@ -59,6 +59,7 @@ const state = {
   gatchaCooldownTimer: null,
   gatchaCookieVisible: false,
   bbdownLoginRequesting: false,
+  appToastTimer: null,
   layoutMode: "full",
 };
 
@@ -100,6 +101,7 @@ const elements = {
   requesterSelect: document.getElementById("requester-select"),
   urlInput: document.getElementById("url-input"),
   formMessage: document.getElementById("form-message"),
+  appToast: document.getElementById("app-toast"),
   sessionUserForm: document.getElementById("session-user-form"),
   sessionUserInput: document.getElementById("session-user-input"),
   sessionUserList: document.getElementById("session-user-list"),
@@ -167,6 +169,7 @@ const elements = {
   searchForm: document.getElementById("search-form"),
   searchQuery: document.getElementById("search-query"),
   searchButton: document.getElementById("search-button"),
+  searchMessage: document.getElementById("search-message"),
   searchResults: document.getElementById("search-results"),
   cookieSessdata: document.getElementById("cookie-sessdata"),
   cookieJct: document.getElementById("cookie-jct"),
@@ -177,6 +180,33 @@ const elements = {
 function setFormMessage(message, isError = false) {
   elements.formMessage.textContent = message;
   elements.formMessage.style.color = isError ? "var(--red)" : "var(--muted)";
+}
+
+function setSearchMessage(message, isError = false) {
+  if (!elements.searchMessage) {
+    return;
+  }
+  elements.searchMessage.textContent = message || "";
+  elements.searchMessage.classList.toggle("is-error", Boolean(isError));
+}
+
+function setAppMessage(message, isError = false) {
+  if (!elements.appToast) {
+    return;
+  }
+  if (state.appToastTimer) {
+    window.clearTimeout(state.appToastTimer);
+    state.appToastTimer = null;
+  }
+  elements.appToast.textContent = message || "";
+  elements.appToast.classList.toggle("is-error", Boolean(isError));
+  elements.appToast.classList.toggle("hidden", !message);
+  if (message) {
+    state.appToastTimer = window.setTimeout(() => {
+      elements.appToast.classList.add("hidden");
+      state.appToastTimer = null;
+    }, isError ? 5200 : 3200);
+  }
 }
 
 function requesterBadgeText(requesterName) {
@@ -885,7 +915,7 @@ function renderRemoteQr(url, targets = []) {
 async function copyRemoteUrl() {
   const url = elements.remoteUrlLink.href;
   if (!url) {
-    setFormMessage("当前没有可复制的手机访问地址。", true);
+    setAppMessage("当前没有可复制的手机访问地址。", true);
     return;
   }
 
@@ -900,9 +930,9 @@ async function copyRemoteUrl() {
       document.execCommand("copy");
       input.remove();
     }
-    setFormMessage("手机访问链接已复制。");
+    setAppMessage("手机访问链接已复制。");
   } catch {
-    setFormMessage("复制失败，请手动复制页面中的链接。", true);
+    setAppMessage("复制失败，请手动复制页面中的链接。", true);
   }
 }
 
@@ -1004,7 +1034,7 @@ async function startBBDownLogin(options = {}) {
     });
     render();
   } catch (error) {
-    setFormMessage(error.message, true);
+    setAppMessage(error.message, true);
   } finally {
     state.bbdownLoginRequesting = false;
   }
@@ -1445,7 +1475,7 @@ async function setLocalPlayerVolume(nextVolume, { unmute = true } = {}) {
     persistLocalVolumePreferences();
     applyStoredVolumeToMountedPlayer();
     renderVolumeControls(state.data?.playback_mode || "local");
-    setFormMessage(error.message, true);
+    setAppMessage(error.message, true);
   }
 }
 
@@ -1467,7 +1497,7 @@ async function toggleLocalPlayerMute() {
     persistLocalVolumePreferences();
     applyStoredVolumeToMountedPlayer();
     renderVolumeControls(state.data?.playback_mode || "local");
-    setFormMessage(error.message, true);
+    setAppMessage(error.message, true);
   }
 }
 
@@ -2746,10 +2776,10 @@ async function discardBackup() {
     state.data = await apiPost("/api/backup/discard");
     dismissBackupBanner();
     closeConfirm();
-    setFormMessage("已清空本地备份。");
+    setAppMessage("已清空本地备份。");
     render();
   } catch (error) {
-    setFormMessage(error.message, true);
+    setAppMessage(error.message, true);
   }
 }
 
@@ -2757,10 +2787,10 @@ async function clearPlaylist() {
   try {
     state.data = await apiPost("/api/playlist/clear");
     closeConfirm();
-    setFormMessage("播放列表已清空。");
+    setAppMessage("播放列表已清空。");
     render();
   } catch (error) {
-    setFormMessage(error.message, true);
+    setAppMessage(error.message, true);
   }
 }
 
@@ -2808,26 +2838,26 @@ async function removeSessionUser(name) {
 async function addSessionUser() {
   const name = String(elements.sessionUserInput.value || "").trim();
   if (!name) {
-    setFormMessage("请输入用户名。", true);
+    setAppMessage("请输入用户名。", true);
     return;
   }
   try {
     state.data = await apiPost("/api/session-users/add", { name });
     elements.sessionUserInput.value = "";
-    setFormMessage(`已将 ${name} 加入本场 KTV 用户列表。`);
+    setAppMessage(`已将 ${name} 加入本场 KTV 用户列表。`);
     render();
   } catch (error) {
-    setFormMessage(error.message, true);
+    setAppMessage(error.message, true);
   }
 }
 
 async function moveSessionUser(name, index) {
   try {
     state.data = await apiPost("/api/session-users/reorder", { name, index });
-    setFormMessage("已更新用户顺序。");
+    setAppMessage("已更新用户顺序。");
     render();
   } catch (error) {
-    setFormMessage(error.message, true);
+    setAppMessage(error.message, true);
   }
 }
 
@@ -2837,10 +2867,10 @@ async function removeSessionUser(name) {
     if (elements.requesterSelect.value === name) {
       elements.requesterSelect.value = "";
     }
-    setFormMessage(`已移除 ${name}。`);
+    setAppMessage(`已移除 ${name}。`);
     render();
   } catch (error) {
-    setFormMessage(error.message, true);
+    setAppMessage(error.message, true);
   }
 }
 
@@ -2853,7 +2883,7 @@ async function handleLocalPlaybackEnded() {
     state.data = await apiPost("/api/player/next");
     render();
   } catch (error) {
-    setFormMessage(error.message, true);
+    setAppMessage(error.message, true);
   } finally {
     state.localAdvanceInFlight = false;
   }
@@ -2878,10 +2908,10 @@ async function setCacheLimit(maxCacheItems) {
   renderCacheSlider(state.data?.cache_policy);
   try {
     state.data = await apiPost("/api/cache-policy", { max_cache_items: maxCacheItems });
-    setFormMessage(`自动缓存窗口已调整为缓存 ${maxCacheItems} 首。`);
+    setAppMessage(`自动缓存窗口已调整为缓存 ${maxCacheItems} 首。`);
     render();
   } catch (error) {
-    setFormMessage(error.message, true);
+    setAppMessage(error.message, true);
     render();
   } finally {
     state.cacheLimitSaving = false;
@@ -2913,7 +2943,7 @@ async function setAvOffset(offsetMs) {
     writeLocalPreference(storageKeys.avOffsetMs, boundedOffsetMs);
     render();
   } catch (error) {
-    setFormMessage(error.message, true);
+    setAppMessage(error.message, true);
     render();
   } finally {
     state.avOffsetSaving = false;
@@ -2949,7 +2979,7 @@ async function handlePlaylistAction(button) {
     state.data = await apiPost(target[0], target[1]);
     render();
   } catch (error) {
-    setFormMessage(error.message, true);
+    setAppMessage(error.message, true);
   }
 }
 
@@ -2964,19 +2994,19 @@ elements.searchForm.addEventListener("submit", async (event) => {
   const query = String(elements.searchQuery.value || "").trim();
   if (!query) {
     hideSearchResults();
-    setFormMessage("Please enter a search keyword.", true);
+    setSearchMessage("请输入搜索关键词。", true);
     return;
   }
 
   elements.searchButton.disabled = true;
-  setFormMessage("Searching local cache...");
+  setSearchMessage("Searching local cache...");
   try {
     const items = await searchGatchaCache(query);
     renderSearchResults(items);
-    setFormMessage(items.length ? `Found ${items.length} cached result(s).` : "No cached matches found.");
+    setSearchMessage(items.length ? `搜索到 ${items.length} 条缓存结果。` : "缓存中未找到结果。");
   } catch (error) {
     hideSearchResults();
-    setFormMessage(error.message, true);
+    setSearchMessage(error.message, true);
   } finally {
     elements.searchButton.disabled = false;
   }
@@ -2997,6 +3027,7 @@ elements.searchResults.addEventListener("click", async (event) => {
   try {
     await handleAddByUrl(url, "tail", anchorPointForEvent(event, button));
     hideSearchResults();
+    setSearchMessage("");
     elements.searchQuery.value = "";
   } finally {
     button.disabled = false;
@@ -3094,7 +3125,7 @@ elements.bbdownLoginButton?.addEventListener("click", async () => {
     state.data = await apiPost("/api/bbdown/logout");
     render();
   } catch (error) {
-    setFormMessage(error.message, true);
+    setAppMessage(error.message, true);
   }
 });
 
@@ -3192,7 +3223,7 @@ elements.nextButton.addEventListener("click", async () => {
     state.data = await apiPost("/api/player/next");
     render();
   } catch (error) {
-    setFormMessage(error.message, true);
+    setAppMessage(error.message, true);
   }
 });
 
@@ -3203,10 +3234,10 @@ elements.queueCurrentRetry.addEventListener("click", async () => {
   }
   try {
     state.data = await apiPost("/api/cache/retry", { item_id: itemId });
-    setFormMessage("已重新开始缓存。");
+    setAppMessage("已重新开始缓存。");
     render();
   } catch (error) {
-    setFormMessage(error.message, true);
+    setAppMessage(error.message, true);
   }
 });
 
@@ -3220,7 +3251,7 @@ elements.modeSwitch?.addEventListener("click", async (event) => {
     state.data = await apiPost("/api/mode", { mode: nextMode });
     render();
   } catch (error) {
-    setFormMessage(error.message, true);
+    setAppMessage(error.message, true);
   }
 });
 
@@ -3263,7 +3294,7 @@ elements.audioVariantBar.addEventListener("click", async (event) => {
         selectedVideoPage: page,
         selectedAudioPages: [page],
       });
-      setFormMessage("已将分P加入下载列表");
+      setAppMessage("已将分P加入下载列表");
       render();
     } catch (error) {
       if (error.code === "duplicate_session_request") {
@@ -3286,7 +3317,7 @@ elements.audioVariantBar.addEventListener("click", async (event) => {
         });
         return;
       }
-      setFormMessage(error.message, true);
+      setAppMessage(error.message, true);
     }
     return;
   }
@@ -3320,7 +3351,7 @@ elements.audioVariantBar.addEventListener("click", async (event) => {
     render();
   } catch (error) {
     state.pendingPlaybackRestore = null;
-    setFormMessage(error.message, true);
+    setAppMessage(error.message, true);
   } finally {
     state.audioVariantSwitchInFlight = false;
     scheduleAudioVariantSwitchUnlock();
@@ -3394,7 +3425,7 @@ elements.confirmOk.addEventListener("click", async () => {
     if (intent.type === "remove-item" && intent.itemId) {
       state.data = await apiPost("/api/playlist/remove", { item_id: intent.itemId });
       closeConfirm();
-      setFormMessage("已移除这首歌。");
+      setAppMessage("已移除这首歌。");
       render();
       return;
     }
@@ -3415,7 +3446,11 @@ elements.confirmOk.addEventListener("click", async () => {
       render();
     }
   } catch (error) {
-    setFormMessage(error.message, true);
+    if (intent?.type === "duplicate-add") {
+      setFormMessage(error.message, true);
+    } else {
+      setAppMessage(error.message, true);
+    }
   }
 });
 
@@ -3568,7 +3603,7 @@ elements.playlist.addEventListener("drop", async (event) => {
   try {
     await reorderPlaylist(draggedId, targetIndex);
   } catch (error) {
-    setFormMessage(error.message, true);
+    setAppMessage(error.message, true);
   }
 });
 
@@ -3676,7 +3711,7 @@ async function startPolling() {
   try {
     await fetchState();
   } catch (error) {
-    setFormMessage(error.message, true);
+    setAppMessage(error.message, true);
   }
   window.setInterval(async () => {
     try {
