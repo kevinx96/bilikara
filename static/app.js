@@ -921,6 +921,8 @@ function renderBBDownLogin(login) {
     elements.bbdownLoginQrImage.classList.toggle("hidden", !qrImage);
     if (qrImage && elements.bbdownLoginQrImage.src !== qrImage) {
       elements.bbdownLoginQrImage.src = qrImage;
+    } else if (!qrImage) {
+      elements.bbdownLoginQrImage.removeAttribute("src");
     }
   }
   if (elements.bbdownLoginQrText) {
@@ -934,24 +936,27 @@ function renderBBDownLogin(login) {
   maybeStartBBDownLogin(login);
 }
 
-function maybeStartBBDownLogin(login) {
+function maybeStartBBDownLogin(login, options = {}) {
   if (!state.cacheSettingsOpen || state.bbdownLoginRequesting || login?.logged_in) {
     return;
   }
+  const force = Boolean(options.force);
   const loginState = String(login?.state || "idle");
-  if (loginState === "starting" || loginState === "waiting") {
+  if (!force && (loginState === "starting" || loginState === "waiting")) {
     return;
   }
-  if (loginState !== "idle") {
+  if (!force && loginState !== "idle") {
     return;
   }
-  startBBDownLogin();
+  startBBDownLogin({ force });
 }
 
-async function startBBDownLogin() {
+async function startBBDownLogin(options = {}) {
   state.bbdownLoginRequesting = true;
   try {
-    state.data = await apiPost("/api/bbdown/login/start");
+    state.data = await apiPost("/api/bbdown/login/start", {
+      force: Boolean(options.force),
+    });
     render();
   } catch (error) {
     setFormMessage(error.message, true);
@@ -1021,10 +1026,12 @@ function renderCacheSlider(cachePolicy) {
   });
 }
 
-function syncCachePanelVisibility() {
+function syncCachePanelVisibility(options = {}) {
   elements.cacheSettingsToggle.setAttribute("aria-expanded", String(state.cacheSettingsOpen));
   elements.cachePanel.classList.toggle("hidden", !state.cacheSettingsOpen);
-  maybeStartBBDownLogin(state.data?.bbdown?.login);
+  maybeStartBBDownLogin(state.data?.bbdown?.login, {
+    force: Boolean(options.forceLoginRefresh),
+  });
 }
 
 function renderQueueCurrent(currentItem) {
@@ -2788,13 +2795,13 @@ elements.dismissBackupButton.addEventListener("blur", () => {
 
 elements.cacheSettingsToggle.addEventListener("click", () => {
   state.cacheSettingsOpen = !state.cacheSettingsOpen;
-  syncCachePanelVisibility();
+  syncCachePanelVisibility({ forceLoginRefresh: state.cacheSettingsOpen });
 });
 
 elements.bbdownLoginButton?.addEventListener("click", async () => {
   const loggedIn = Boolean(state.data?.bbdown?.login?.logged_in || state.data?.bbdown?.logged_in);
   if (!loggedIn) {
-    await startBBDownLogin();
+    await startBBDownLogin({ force: true });
     return;
   }
   try {
@@ -2806,7 +2813,7 @@ elements.bbdownLoginButton?.addEventListener("click", async () => {
 });
 
 elements.bbdownLoginRefresh?.addEventListener("click", async () => {
-  await startBBDownLogin();
+  await startBBDownLogin({ force: true });
 });
 
 elements.cacheLimitSlider.addEventListener("input", (event) => {

@@ -649,7 +649,7 @@ class BilikaraHandler(BaseHTTPRequestHandler):
                 self._write_json({"ok": True})
                 return
             if route == "/api/bbdown/login/start":
-                CONTEXT.cache_manager.start_bbdown_login()
+                CONTEXT.cache_manager.start_bbdown_login(force_refresh_qr=bool(body.get("force")))
                 self._write_json({"ok": True, "data": CONTEXT.snapshot()})
                 return
             if route == "/api/bbdown/logout":

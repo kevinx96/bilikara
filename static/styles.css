@@ -543,6 +543,9 @@ h2 {
 }
 
 .bbdown-login-badge {
+  display: inline-grid;
+  place-items: center;
+  min-width: 52px;
   border: none;
   cursor: pointer;
   border-radius: 999px;
@@ -553,6 +556,10 @@ h2 {
   transition:
     background 180ms ease,
     color 180ms ease;
+}
+
+.bbdown-login-badge span {
+  grid-area: 1 / 1;
 }
 
 .bbdown-login-badge.is-unlogged,
@@ -573,17 +580,18 @@ h2 {
 }
 
 .bbdown-login-hover-label {
-  display: none;
+  opacity: 0;
+  pointer-events: none;
 }
 
 .bbdown-login-badge.is-logged:hover .bbdown-login-label,
 .bbdown-login-badge.is-logged:focus-visible .bbdown-login-label {
-  display: none;
+  opacity: 0;
 }
 
 .bbdown-login-badge.is-logged:hover .bbdown-login-hover-label,
 .bbdown-login-badge.is-logged:focus-visible .bbdown-login-hover-label {
-  display: inline;
+  opacity: 1;
 }
 
 .cache-panel-tool-indicator {

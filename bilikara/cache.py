@@ -129,16 +129,22 @@ class CacheManager:
                 "qr_image": "" if logged_in else self.bbdown_login_qr_image,
             }
 
-    def start_bbdown_login(self) -> dict[str, Any]:
+    def start_bbdown_login(self, *, force_refresh_qr: bool = False) -> dict[str, Any]:
         if self._bbdown_data_path().exists():
             return self.bbdown_login_status()
+        process_to_stop: subprocess.Popen[str] | None = None
         with self.lock:
-            if self.bbdown_login_process and self.bbdown_login_process.poll() is None:
+            if self.bbdown_login_process and self.bbdown_login_process.poll() is None and not force_refresh_qr:
                 return self.bbdown_login_status()
+            if self.bbdown_login_process and self.bbdown_login_process.poll() is None:
+                process_to_stop = self.bbdown_login_process
+                self.bbdown_login_process = None
             self.bbdown_login_state = "starting"
             self.bbdown_login_message = "正在启动 BBDown 登录"
             # self.bbdown_login_qr_text = ""
             self.bbdown_login_qr_image = ""
+        self._terminate_process(process_to_stop)
+        self._remove_bbdown_qr_image()
         threading.Thread(target=self._bbdown_login_worker, daemon=True).start()
         return self.bbdown_login_status()
 
@@ -147,6 +153,7 @@ class CacheManager:
             process = self.bbdown_login_process
             self.bbdown_login_process = None
         self._terminate_process(process)
+        self._remove_bbdown_qr_image()
         try:
             self._bbdown_data_path().unlink(missing_ok=True)
         except OSError as exc:
@@ -1575,6 +1582,16 @@ class CacheManager:
     def _bbdown_data_path() -> Path:
         return BB_DOWN_DIR / "BBDown.data"
 
+    @staticmethod
+    def _bbdown_qr_image_path() -> Path:
+        return BB_DOWN_DIR / "qrcode.png"
+
+    def _remove_bbdown_qr_image(self) -> None:
+        try:
+            self._bbdown_qr_image_path().unlink(missing_ok=True)
+        except OSError:
+            pass
+
     # @staticmethod
     # def _extract_terminal_qr_text(output: str) -> str:
     #     lines = [ANSI_ESCAPE_RE.sub("", line).rstrip() for line in str(output or "").splitlines()]
@@ -1797,6 +1814,7 @@ class CacheManager:
 
     def _bbdown_login_worker(self) -> None:
             try:
+                self._remove_bbdown_qr_image()
                 binary_path = self._ensure_bbdown()
             except Exception as exc:  # noqa: BLE001
                 with self.lock:
@@ -1840,19 +1858,20 @@ class CacheManager:
                     output_lines.append(line)
                     del output_lines[:-80]
                     
-                    qr_image_path = os.path.join(str(BB_DOWN_DIR), "qrcode.png")
+                    qr_image_path = self._bbdown_qr_image_path()
                     qr_image = "" 
                     
-                    if os.path.exists(qr_image_path) and os.path.getsize(qr_image_path) > 0:
-                        try:
-                            with open(qr_image_path, "rb") as image_file:
+                    try:
+                        if qr_image_path.stat().st_size > 0:
+                            with qr_image_path.open("rb") as image_file:
                                 encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
                                 qr_image = f"data:image/png;base64,{encoded_string}"
-                        except Exception:
-                            pass
+                    except Exception:
+                        pass
                     
                     with self.lock:
-                        self.bbdown_login_qr_image = qr_image
+                        if self.bbdown_login_process is process:
+                            self.bbdown_login_qr_image = qr_image
                     
                     if self._bbdown_data_path().exists():
                         break
@@ -1866,13 +1885,15 @@ class CacheManager:
                     except subprocess.TimeoutExpired:
                         return_code = None
                 with self.lock:
-                    if self.bbdown_login_process is process:
+                    is_current_process = self.bbdown_login_process is process
+                    if is_current_process:
                         self.bbdown_login_process = None
                     if self._bbdown_data_path().exists():
+                        self._remove_bbdown_qr_image()
                         self.bbdown_login_state = "logged_in"
                         self.bbdown_login_message = "BBDown 已登录"
                         self.bbdown_login_qr_image = ""
-                    elif self.bbdown_login_state not in {"failed", "idle"} and return_code not in (None, 0):
+                    elif is_current_process and self.bbdown_login_state not in {"failed", "idle"} and return_code not in (None, 0):
                         self.bbdown_login_state = "failed"
                         self.bbdown_login_message = "BBDown 登录失败，请重试"
 

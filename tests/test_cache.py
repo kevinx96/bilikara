@@ -272,6 +272,22 @@ class CacheManagerPolicyTest(unittest.TestCase):
         first_path = env["PATH"].split(os.pathsep)[0]
         self.assertEqual(first_path, str(ffmpeg_path.parent))
 
+    def test_start_bbdown_login_removes_stale_qr_image(self):
+        bbdown_dir = Path(self.temp_dir.name) / "tools" / "bbdown"
+        bbdown_dir.mkdir(parents=True, exist_ok=True)
+        qr_path = bbdown_dir / "qrcode.png"
+        qr_path.write_bytes(b"old-qr")
+
+        with patch("bilikara.cache.CACHE_DIR", self.cache_dir), patch("bilikara.cache.BB_DOWN_DIR", bbdown_dir):
+            manager = CacheManager(self.store, max_cache_items=3)
+            try:
+                with patch("bilikara.cache.threading.Thread") as thread_mock:
+                    manager.start_bbdown_login(force_refresh_qr=True)
+                    self.assertFalse(qr_path.exists())
+                    thread_mock.assert_called_once()
+            finally:
+                manager.shutdown()
+
     def test_ensure_ffmpeg_rejects_non_executable_binary(self):
         vendor_dir = Path(self.temp_dir.name) / "vendor"
         tools_dir = Path(self.temp_dir.name) / "tools" / "bbdown"
