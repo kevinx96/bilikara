@@ -82,6 +82,18 @@ function setFormMessage(message, isError = false) {
   elements.formMessage.classList.toggle("error", isError);
 }
 
+function duplicateConfirmMessage(duplicateItem, sessionEntry, activeItem) {
+  const title = duplicateItem?.display_title || activeItem?.display_title || sessionEntry?.display_title || "这首歌";
+  const count = Number(sessionEntry?.request_count || 0);
+  if (activeItem && count > 0) {
+    return `《${title}》当前列表里已经有了，而且本次已点过 ${count} 次，仍要继续点歌吗？`;
+  }
+  if (activeItem) {
+    return `《${title}》当前列表里已经有了，仍要继续点歌吗？`;
+  }
+  return `《${title}》本次已经点过 ${count || 1} 次，仍要继续点歌吗？`;
+}
+
 async function apiPost(url, payload = {}) {
   const response = await fetch(url, {
     method: "POST",
@@ -97,6 +109,45 @@ async function apiPost(url, payload = {}) {
     throw error;
   }
   return data.data;
+}
+
+async function submitAddRequest(url, position, options = {}) {
+  return apiPost("/api/playlist/add", {
+    url,
+    position,
+    requester_name: String(options.requesterName || ""),
+    allow_repeat: Boolean(options.allowRepeat),
+  });
+}
+
+async function submitAddRequestWithDuplicateConfirm(url, position, requesterName) {
+  try {
+    return {
+      cancelled: false,
+      data: await submitAddRequest(url, position, { requesterName }),
+    };
+  } catch (error) {
+    if (error.code !== "duplicate_session_request") {
+      throw error;
+    }
+    const confirmed = window.confirm(
+      duplicateConfirmMessage(
+        error.payload?.duplicate_item,
+        error.payload?.session_entry,
+        error.payload?.active_item,
+      ),
+    );
+    if (!confirmed) {
+      return { cancelled: true, data: null };
+    }
+    return {
+      cancelled: false,
+      data: await submitAddRequest(url, position, {
+        requesterName,
+        allowRepeat: true,
+      }),
+    };
+  }
 }
 
 async function fetchState() {
@@ -328,6 +379,14 @@ function currentRemoteMuted(playerSettings) {
   return Boolean(playerSettings?.is_muted);
 }
 
+function setRangeFillPercent(input, percent) {
+  if (!input) {
+    return;
+  }
+  const normalizedPercent = Math.max(0, Math.min(100, Number(percent || 0)));
+  input.style.setProperty("--range-fill-percent", `${normalizedPercent}%`);
+}
+
 function renderRemoteAvSyncControls(playbackMode, playerSettings) {
   if (!elements.remoteAvSyncPanel || !elements.remoteAvOffsetInput) {
     return;
@@ -346,6 +405,7 @@ function renderRemoteVolumeControls(playbackMode, playerSettings) {
   const volumePercent = currentRemoteVolumePercent(playerSettings);
   const isMuted = currentRemoteMuted(playerSettings);
   elements.remoteVolumeSlider.value = String(volumePercent);
+  setRangeFillPercent(elements.remoteVolumeSlider, volumePercent);
   elements.remoteVolumeValue.textContent = `${Math.round(volumePercent)}%`;
   elements.remoteVolumeMuteButton.textContent = isMuted ? "取消静音" : "静音";
   elements.remoteVolumeMuteButton.classList.toggle("is-muted", isMuted);
@@ -416,8 +476,12 @@ function renderPlayerControls(currentItem, playbackMode) {
   elements.playerControlPanel.classList.remove("hidden");
 
   elements.playerControlPanel.querySelectorAll("button[data-control-action]").forEach((button) => {
-    const isPending = button.dataset.controlAction === state.playerControlPendingAction;
-    button.disabled = !canControl || Boolean(state.playerControlPendingAction);
+    const action = button.dataset.controlAction || "";
+    const isPending = action === state.playerControlPendingAction;
+    const disabled = action === "next-track"
+      ? Boolean(state.playerControlPendingAction)
+      : !canControl || Boolean(state.playerControlPendingAction);
+    button.disabled = disabled;
     button.classList.toggle("is-pending", isPending);
   });
 
@@ -436,8 +500,8 @@ function renderPlayerControls(currentItem, playbackMode) {
     return;
   }
   elements.playerControlHint.textContent = isPaused
-    ? "当前已暂停，可以恢复播放或前后跳转。"
-    : "当前正在播放，可以暂停或前后跳转。";
+    ? "当前已暂停，可以恢复播放、前后跳转，或直接切歌。"
+    : "当前正在播放，可以暂停、前后跳转，或直接切歌。";
 }
 
 function renderListHeader(playlist, history) {
@@ -574,7 +638,12 @@ async function submitRequest(position) {
   state.submitting = true;
   setFormMessage(position === "next" ? "正在顶歌..." : "正在加入队列...");
   try {
-    state.data = await apiPost("/api/playlist/add", { url, position, requester_name: requesterName });
+    const result = await submitAddRequestWithDuplicateConfirm(url, position, requesterName);
+    if (result.cancelled) {
+      setFormMessage("已取消重复点歌。");
+      return;
+    }
+    state.data = result.data;
     elements.urlInput.value = "";
     setFormMessage(position === "next" ? "已经顶歌到下一首。" : "已经加入播放队列。");
     render();
@@ -598,7 +667,12 @@ async function handleAddByHistory(url, position) {
   state.submitting = true;
   setFormMessage(position === "next" ? "正在从历史记录顶歌..." : "正在从历史记录加入队列...");
   try {
-    state.data = await apiPost("/api/playlist/add", { url, position, requester_name: requesterName });
+    const result = await submitAddRequestWithDuplicateConfirm(url, position, requesterName);
+    if (result.cancelled) {
+      setFormMessage("已取消重复点歌。");
+      return;
+    }
+    state.data = result.data;
     setFormMessage(position === "next" ? "已从历史记录顶歌到下一首。" : "已从历史记录加入队列。");
     render();
   } catch (error) {
@@ -621,7 +695,12 @@ async function addByUrl(url, position = "tail") {
   state.submitting = true;
   setFormMessage("Adding selected song...");
   try {
-    state.data = await apiPost("/api/playlist/add", { url, position, requester_name: requesterName });
+    const result = await submitAddRequestWithDuplicateConfirm(url, position, requesterName);
+    if (result.cancelled) {
+      setFormMessage("已取消重复点歌。");
+      return;
+    }
+    state.data = result.data;
     hideSearchResults();
     elements.searchQuery.value = "";
     state.gatchaCandidate = null;
@@ -668,6 +747,24 @@ async function sendPlayerControl(action, deltaSeconds = 0) {
       delta_seconds: deltaSeconds,
     });
     setFormMessage(message);
+    render();
+  } catch (error) {
+    setFormMessage(error.message, true);
+    await fetchState().catch(() => {});
+  }
+  state.playerControlPendingAction = "";
+  renderPlayerControls(state.data?.current_item, state.data?.playback_mode);
+}
+
+async function sendPlayerNext() {
+  if (!state.data?.current_item) {
+    return;
+  }
+  try {
+    state.playerControlPendingAction = "next-track";
+    renderPlayerControls(state.data?.current_item, state.data?.playback_mode);
+    state.data = await apiPost("/api/player/next");
+    setFormMessage("已切到下一首。");
     render();
   } catch (error) {
     setFormMessage(error.message, true);
@@ -774,6 +871,7 @@ elements.remoteAvOffsetInput?.addEventListener("keydown", async (event) => {
 });
 
 elements.remoteVolumeSlider?.addEventListener("input", async (event) => {
+  setRangeFillPercent(event.target, event.target.value);
   await setRemoteVolumeSettings({
     volumePercent: event.target.value,
     isMuted: currentRemoteMuted(state.data?.player_settings),
@@ -839,6 +937,10 @@ elements.playerControlPanel.addEventListener("click", async (event) => {
     return;
   }
   const action = button.dataset.controlAction || "";
+  if (action === "next-track") {
+    await sendPlayerNext();
+    return;
+  }
   const deltaSeconds = Number(button.dataset.delta || "0");
   await sendPlayerControl(action, deltaSeconds);
 });

@@ -4,6 +4,7 @@ const stalledRetrySeconds = 5;
 const localPlayerSyncIntervalMs = 120;
 const audioVariantSwitchDebounceMs = 350;
 const maxAvOffsetMs = 5000;
+const playerClickDelayMs = 220;
 const storageKeys = {
   playerVolume: "bilikara.player.volume",
   playerMuted: "bilikara.player.muted",
@@ -37,6 +38,7 @@ const state = {
   pendingPlaybackRestore: null,
   lastAppliedPlayerControlSeq: 0,
   lastReportedPlayerStatusSignature: "",
+  playerFrameClickTimer: null,
   dragItemId: "",
   dragTargetId: "",
   dragTargetAfter: false,
@@ -57,7 +59,9 @@ const elements = {
   cacheLimitSlider: document.getElementById("cache-limit-slider"),
   cacheLimitScale: document.getElementById("cache-limit-scale"),
   currentTitle: document.getElementById("current-title"),
+  playerPanel: document.querySelector(".player-panel"),
   playerFrame: document.getElementById("player-frame"),
+  playerFullscreenButton: document.getElementById("player-fullscreen-button"),
   audioVariantBar: document.getElementById("audio-variant-bar"),
   avSyncPanel: document.getElementById("av-sync-panel"),
   avOffsetInput: document.getElementById("av-offset-input"),
@@ -138,6 +142,138 @@ function createClientId() {
     return window.crypto.randomUUID();
   }
   return `client-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function fullscreenElement() {
+  return document.fullscreenElement || document.webkitFullscreenElement || null;
+}
+
+function isPlayerPanelFullscreen() {
+  return fullscreenElement() === elements.playerPanel;
+}
+
+function supportsPlayerFullscreen() {
+  return Boolean(
+    elements.playerPanel
+    && (
+      typeof elements.playerPanel.requestFullscreen === "function"
+      || typeof elements.playerPanel.webkitRequestFullscreen === "function"
+    )
+    && (
+      typeof document.exitFullscreen === "function"
+      || typeof document.webkitExitFullscreen === "function"
+    ),
+  );
+}
+
+function canTogglePlayerFullscreen() {
+  return supportsPlayerFullscreen() && (Boolean(state.data?.current_item) || isPlayerPanelFullscreen());
+}
+
+function renderPlayerFullscreenButton() {
+  const button = elements.playerFullscreenButton;
+  if (!button) {
+    return;
+  }
+  const active = isPlayerPanelFullscreen();
+  const enabled = canTogglePlayerFullscreen();
+  button.disabled = !enabled;
+  button.textContent = active ? "退出全屏" : "全屏显示";
+  button.setAttribute("aria-pressed", String(active));
+  button.title = enabled
+    ? (active ? "退出播放器区域全屏" : "将播放器区域切换为全屏")
+    : supportsPlayerFullscreen()
+      ? "当前没有可全屏的播放内容"
+      : "当前环境不支持区域全屏";
+}
+
+function requestElementFullscreen(element) {
+  if (!element) {
+    return Promise.resolve(false);
+  }
+  if (typeof element.requestFullscreen === "function") {
+    return element.requestFullscreen().then(() => true).catch(() => false);
+  }
+  if (typeof element.webkitRequestFullscreen === "function") {
+    element.webkitRequestFullscreen();
+    return Promise.resolve(true);
+  }
+  return Promise.resolve(false);
+}
+
+function exitDocumentFullscreen() {
+  if (typeof document.exitFullscreen === "function") {
+    return document.exitFullscreen().then(() => true).catch(() => false);
+  }
+  if (typeof document.webkitExitFullscreen === "function") {
+    document.webkitExitFullscreen();
+    return Promise.resolve(true);
+  }
+  return Promise.resolve(false);
+}
+
+async function togglePlayerFullscreen() {
+  if (!supportsPlayerFullscreen()) {
+    return;
+  }
+  if (isPlayerPanelFullscreen()) {
+    await exitDocumentFullscreen();
+    return;
+  }
+  if (!state.data?.current_item) {
+    return;
+  }
+  const activeFullscreen = fullscreenElement();
+  if (activeFullscreen && activeFullscreen !== elements.playerPanel) {
+    await exitDocumentFullscreen();
+  }
+  await requestElementFullscreen(elements.playerPanel);
+}
+
+function clearPlayerFrameClickTimer() {
+  if (!state.playerFrameClickTimer) {
+    return;
+  }
+  window.clearTimeout(state.playerFrameClickTimer);
+  state.playerFrameClickTimer = null;
+}
+
+function toggleMountedLocalPlayback() {
+  if (state.data?.playback_mode !== "local" || !state.data?.current_item) {
+    return false;
+  }
+  const video = activePrimaryVideoElement();
+  if (!video) {
+    return false;
+  }
+  if (video.paused) {
+    state.localShouldBePlaying = true;
+    video.play().catch(() => {});
+  } else {
+    state.localShouldBePlaying = false;
+    video.pause();
+  }
+  return true;
+}
+
+function queuePlayerFrameSingleClick() {
+  clearPlayerFrameClickTimer();
+  state.playerFrameClickTimer = window.setTimeout(() => {
+    state.playerFrameClickTimer = null;
+    toggleMountedLocalPlayback();
+  }, playerClickDelayMs);
+}
+
+async function handlePlayerFrameDoubleClick() {
+  clearPlayerFrameClickTimer();
+  if (!supportsPlayerFullscreen()) {
+    return;
+  }
+  if (!state.data?.current_item && !isPlayerPanelFullscreen()) {
+    return;
+  }
+  await togglePlayerFullscreen();
+  renderPlayerFullscreenButton();
 }
 
 function readLocalNumber(key, fallbackValue) {
@@ -382,6 +518,7 @@ function render() {
   renderVolumeControls(data.playback_mode);
   applyStoredVolumeToMountedPlayer();
   renderPlayer(currentItem, data.playback_mode);
+  renderPlayerFullscreenButton();
   applyRemotePlayerControl(data.player_control_command, currentItem, data.playback_mode);
   renderQueueCurrent(currentItem);
   if (!state.dragItemId) {
@@ -874,14 +1011,24 @@ function volumePercentText() {
   return `${Math.round(state.localPlayerVolume * 100)}%`;
 }
 
+function setRangeFillPercent(input, percent) {
+  if (!input) {
+    return;
+  }
+  const normalizedPercent = Math.max(0, Math.min(100, Number(percent || 0)));
+  input.style.setProperty("--range-fill-percent", `${normalizedPercent}%`);
+}
+
 function renderVolumeControls(playbackMode) {
   if (!elements.volumePanel || !elements.volumeSlider || !elements.volumeMuteButton || !elements.volumeValue) {
     return;
   }
 
   const isLocalMode = playbackMode === "local";
+  const volumePercent = Math.round(state.localPlayerVolume * 100);
   elements.volumePanel.classList.toggle("hidden", !isLocalMode);
-  elements.volumeSlider.value = String(Math.round(state.localPlayerVolume * 100));
+  elements.volumeSlider.value = String(volumePercent);
+  setRangeFillPercent(elements.volumeSlider, volumePercent);
   elements.volumeValue.textContent = volumePercentText();
   elements.volumeMuteButton.textContent = state.localPlayerMuted ? "取消静音" : "静音";
   elements.volumeMuteButton.classList.toggle("is-muted", state.localPlayerMuted);
@@ -1088,6 +1235,7 @@ function renderPlayer(currentItem, playbackMode) {
       <video
         data-player-role="video"
         controls
+        controlsList="nofullscreen"
         autoplay
         playsinline
         preload="metadata"
@@ -1208,7 +1356,9 @@ function renderPlayer(currentItem, playbackMode) {
     elements.playerFrame.innerHTML = `
       <video
         controls
+        controlsList="nofullscreen"
         autoplay
+        playsinline
         preload="metadata"
         src="${escapeHtml(selectedMediaUrl)}"
       ></video>
@@ -2317,6 +2467,7 @@ elements.avOffsetInput?.addEventListener("keydown", async (event) => {
 });
 
 elements.volumeSlider?.addEventListener("input", (event) => {
+  setRangeFillPercent(event.target, event.target.value);
   setLocalPlayerVolume(Number(event.target.value || "0") / 100);
 });
 
@@ -2337,6 +2488,28 @@ elements.clearPlaylistButton.addEventListener("click", (event) => {
 elements.historyToggleButton.addEventListener("click", () => {
   state.listView = state.listView === "history" ? "queue" : "history";
   render();
+});
+
+elements.playerFullscreenButton?.addEventListener("click", async () => {
+  await togglePlayerFullscreen();
+  renderPlayerFullscreenButton();
+});
+
+elements.playerFrame?.addEventListener("click", (event) => {
+  if (event.target.closest("button, input, select, textarea, a")) {
+    return;
+  }
+  if (!event.target.closest("video")) {
+    return;
+  }
+  queuePlayerFrameSingleClick();
+});
+
+elements.playerFrame?.addEventListener("dblclick", (event) => {
+  if (event.target.closest("button, input, select, textarea, a")) {
+    return;
+  }
+  handlePlayerFrameDoubleClick().catch(() => {});
 });
 
 elements.nextButton.addEventListener("click", async () => {
@@ -2539,6 +2712,9 @@ document.addEventListener("visibilitychange", () => {
     syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
   }
 });
+
+document.addEventListener("fullscreenchange", renderPlayerFullscreenButton);
+document.addEventListener("webkitfullscreenchange", renderPlayerFullscreenButton);
 
 elements.playlist.addEventListener("dragstart", (event) => {
   const item = event.target.closest(".song-item");
