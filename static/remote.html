@@ -32,6 +32,41 @@
           </div>
           <p id="player-control-hint" class="player-control-hint"></p>
         </div>
+        <section id="remote-av-sync-panel" class="remote-setting-panel hidden">
+          <div class="remote-setting-copy">
+            <p class="panel-tag">音画延迟</p>
+            <p class="muted">正数表示音频延后，负数表示音频提前。</p>
+          </div>
+          <div class="remote-setting-controls">
+            <button type="button" class="ghost-button remote-step-button" data-av-step="-200">-200ms</button>
+            <button type="button" class="ghost-button remote-step-button" data-av-step="-50">-50ms</button>
+            <label class="remote-input-wrap" for="remote-av-offset-input">
+              <input id="remote-av-offset-input" type="number" min="-5000" max="5000" step="10" value="0" />
+              <span>ms</span>
+            </label>
+            <button type="button" class="ghost-button remote-step-button" data-av-step="50">+50ms</button>
+            <button type="button" class="ghost-button remote-step-button" data-av-step="200">+200ms</button>
+          </div>
+        </section>
+        <section id="remote-volume-panel" class="remote-setting-panel hidden">
+          <div class="remote-setting-copy">
+            <p class="panel-tag">播放音量</p>
+            <p class="muted">直接遥控服务端当前本地播放的音量。</p>
+          </div>
+          <div class="remote-setting-controls">
+            <button type="button" id="remote-volume-mute-button" class="ghost-button remote-mute-button">静音</button>
+            <input
+              id="remote-volume-slider"
+              class="remote-volume-slider"
+              type="range"
+              min="0"
+              max="100"
+              step="1"
+              value="100"
+            />
+            <strong id="remote-volume-value" class="remote-volume-value">100%</strong>
+          </div>
+        </section>
       </section>
 
       <section class="panel request-panel">

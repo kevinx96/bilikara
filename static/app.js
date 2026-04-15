@@ -1,6 +1,14 @@
 const pollIntervalMs = 1000;
 const bannerAutoHideMs = 5000;
 const stalledRetrySeconds = 5;
+const localPlayerSyncIntervalMs = 120;
+const audioVariantSwitchDebounceMs = 350;
+const maxAvOffsetMs = 5000;
+const storageKeys = {
+  playerVolume: "bilikara.player.volume",
+  playerMuted: "bilikara.player.muted",
+  avOffsetMs: "bilikara.player.av_offset_ms",
+};
 
 const state = {
   clientId: createClientId(),
@@ -8,13 +16,24 @@ const state = {
   data: null,
   playerSignature: "",
   playerContext: null,
+  localPlayerSyncTimer: null,
   listView: "queue",
   cacheSettingsOpen: false,
   cacheLimitSaving: false,
+  avOffsetSaving: false,
+  localPreferencesHydrated: false,
+  localOffsetRestoreApplied: false,
+  audioVariantSwitchInFlight: false,
+  audioVariantSwitchUnlockAt: 0,
+  audioVariantSwitchTimer: null,
   backupBannerShown: false,
   backupBannerDismissed: false,
   backupBannerTimer: null,
   localAdvanceInFlight: false,
+  localShouldBePlaying: false,
+  localSeekResumePending: false,
+  localPlayerVolume: 1,
+  localPlayerMuted: false,
   pendingPlaybackRestore: null,
   lastAppliedPlayerControlSeq: 0,
   lastReportedPlayerStatusSignature: "",
@@ -40,6 +59,12 @@ const elements = {
   currentTitle: document.getElementById("current-title"),
   playerFrame: document.getElementById("player-frame"),
   audioVariantBar: document.getElementById("audio-variant-bar"),
+  avSyncPanel: document.getElementById("av-sync-panel"),
+  avOffsetInput: document.getElementById("av-offset-input"),
+  volumePanel: document.getElementById("volume-panel"),
+  volumeMuteButton: document.getElementById("volume-mute-button"),
+  volumeSlider: document.getElementById("volume-slider"),
+  volumeValue: document.getElementById("volume-value"),
   addForm: document.getElementById("add-form"),
   requesterSelect: document.getElementById("requester-select"),
   urlInput: document.getElementById("url-input"),
@@ -115,6 +140,66 @@ function createClientId() {
   return `client-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+function readLocalNumber(key, fallbackValue) {
+  try {
+    const rawValue = window.localStorage?.getItem(key);
+    if (rawValue == null) {
+      return fallbackValue;
+    }
+    const numeric = Number(rawValue);
+    return Number.isFinite(numeric) ? numeric : fallbackValue;
+  } catch {
+    return fallbackValue;
+  }
+}
+
+function readLocalBoolean(key, fallbackValue) {
+  try {
+    const rawValue = window.localStorage?.getItem(key);
+    if (rawValue == null) {
+      return fallbackValue;
+    }
+    return rawValue === "true";
+  } catch {
+    return fallbackValue;
+  }
+}
+
+function writeLocalPreference(key, value) {
+  try {
+    window.localStorage?.setItem(key, String(value));
+  } catch {
+    // Ignore storage failures and keep runtime behavior working.
+  }
+}
+
+function hydrateLocalPreferences() {
+  state.localPlayerVolume = Math.max(
+    0,
+    Math.min(1, readLocalNumber(storageKeys.playerVolume, state.localPlayerVolume)),
+  );
+  state.localPlayerMuted = readLocalBoolean(storageKeys.playerMuted, state.localPlayerMuted);
+}
+
+function rememberedAvOffsetMs() {
+  return boundedAvOffsetMs(readLocalNumber(storageKeys.avOffsetMs, 0));
+}
+
+function rememberedVolumePercent() {
+  return Math.max(0, Math.min(100, Math.round(readLocalNumber(storageKeys.playerVolume, 1) * 100)));
+}
+
+function rememberedMuted() {
+  return readLocalBoolean(storageKeys.playerMuted, false);
+}
+
+function syncLocalPlayerSettingsFromSnapshot(playerSettings) {
+  const volumePercent = Math.max(0, Math.min(100, Number(playerSettings?.volume_percent ?? 100)));
+  state.localPlayerVolume = volumePercent / 100;
+  state.localPlayerMuted = Boolean(playerSettings?.is_muted);
+  persistLocalVolumePreferences();
+}
+
 function clientHeaders(extraHeaders = {}) {
   return {
     "X-Bilikara-Client": state.clientId,
@@ -148,6 +233,31 @@ async function fetchState() {
     throw new Error(payload.error || "获取状态失败");
   }
   state.data = payload.data;
+  syncLocalPlayerSettingsFromSnapshot(state.data?.player_settings);
+  if (!state.localOffsetRestoreApplied) {
+    const rememberedOffset = rememberedAvOffsetMs();
+    const serverOffset = Number(payload.data?.player_settings?.av_offset_ms || 0);
+    if (rememberedOffset !== serverOffset) {
+      state.localOffsetRestoreApplied = true;
+      state.data = await apiPost("/api/player/av-offset", { offset_ms: rememberedOffset });
+    } else {
+      state.localOffsetRestoreApplied = true;
+    }
+  }
+  if (!state.localPreferencesHydrated) {
+    const rememberedVolume = rememberedVolumePercent();
+    const rememberedMute = rememberedMuted();
+    const serverVolume = Number(state.data?.player_settings?.volume_percent ?? 100);
+    const serverMuted = Boolean(state.data?.player_settings?.is_muted);
+    state.localPreferencesHydrated = true;
+    if (rememberedVolume !== serverVolume || rememberedMute !== serverMuted) {
+      state.data = await apiPost("/api/player/volume", {
+        volume_percent: rememberedVolume,
+        is_muted: rememberedMute,
+      });
+      syncLocalPlayerSettingsFromSnapshot(state.data?.player_settings);
+    }
+  }
   render();
 }
 
@@ -268,6 +378,9 @@ function render() {
   });
 
   renderAudioVariantBar(currentItem, data.playback_mode);
+  renderAvSyncControls(data.playback_mode, data.player_settings);
+  renderVolumeControls(data.playback_mode);
+  applyStoredVolumeToMountedPlayer();
   renderPlayer(currentItem, data.playback_mode);
   applyRemotePlayerControl(data.player_control_command, currentItem, data.playback_mode);
   renderQueueCurrent(currentItem);
@@ -527,7 +640,9 @@ function audioVariantsForItem(item) {
   if (!item || !Array.isArray(item.audio_variants)) {
     return [];
   }
-  return item.audio_variants.filter((variant) => variant && variant.media_url);
+  return item.audio_variants.filter(
+    (variant) => variant && (variant.audio_url || variant.media_url),
+  );
 }
 
 function variantIdForLabel(label, index) {
@@ -588,6 +703,264 @@ function selectedMediaUrlForItem(item) {
   return selectedVariant?.media_url || item.local_media_url || "";
 }
 
+function selectedVideoUrlForItem(item) {
+  return String(item?.video_media_url || item?.local_media_url || "").trim();
+}
+
+function selectedAudioUrlForItem(item) {
+  const selectedVariant = selectedAudioVariantForItem(item);
+  return String(selectedVariant?.audio_url || selectedVariant?.media_url || "").trim();
+}
+
+function currentAvOffsetMs() {
+  return Number(state.data?.player_settings?.av_offset_ms || 0);
+}
+
+function currentAvOffsetSeconds() {
+  return currentAvOffsetMs() / 1000;
+}
+
+function boundedAvOffsetMs(rawValue) {
+  const numeric = Number(rawValue || 0);
+  if (!Number.isFinite(numeric)) {
+    return 0;
+  }
+  return Math.max(-maxAvOffsetMs, Math.min(maxAvOffsetMs, Math.round(numeric)));
+}
+
+function clampMediaTime(media, nextTime) {
+  const target = Math.max(0, Number(nextTime || 0));
+  if (!Number.isFinite(media?.duration)) {
+    return target;
+  }
+  return Math.min(target, Number(media.duration));
+}
+
+function clearLocalPlayerSyncTimer() {
+  if (state.localPlayerSyncTimer) {
+    window.clearInterval(state.localPlayerSyncTimer);
+    state.localPlayerSyncTimer = null;
+  }
+}
+
+function teardownMountedPlayer() {
+  clearLocalPlayerSyncTimer();
+  elements.playerFrame.querySelectorAll("video, audio").forEach((media) => {
+    try {
+      media.pause();
+    } catch {
+      // Ignore pause failures during teardown.
+    }
+    try {
+      media.removeAttribute("src");
+      media.load();
+    } catch {
+      // Ignore cleanup failures and let DOM replacement finish the teardown.
+    }
+  });
+}
+
+function activeLocalPlayerElements() {
+  return {
+    video: elements.playerFrame.querySelector('video[data-player-role="video"]'),
+    audio: elements.playerFrame.querySelector('audio[data-player-role="audio"]'),
+  };
+}
+
+function activePrimaryVideoElement() {
+  return elements.playerFrame.querySelector("video");
+}
+
+function captureLocalPlayerPreferences() {
+  const { video, audio } = activeLocalPlayerElements();
+  const primaryVideo = video || activePrimaryVideoElement();
+  const mediaWithVolume = audio || primaryVideo;
+  if (mediaWithVolume) {
+    const volume = Number(mediaWithVolume.volume);
+    if (Number.isFinite(volume)) {
+      state.localPlayerVolume = Math.max(0, Math.min(1, volume));
+    }
+    state.localPlayerMuted = Boolean(mediaWithVolume.muted);
+    persistLocalVolumePreferences();
+  }
+  if (primaryVideo) {
+    state.localShouldBePlaying = !primaryVideo.paused;
+  }
+}
+
+function applyStoredVolumeToSplitPlayer(video, audio) {
+  if (!video || !audio) {
+    return;
+  }
+  video.volume = state.localPlayerVolume;
+  video.muted = state.localPlayerMuted;
+  audio.volume = state.localPlayerVolume;
+  audio.muted = state.localPlayerMuted;
+}
+
+function syncSplitPlayerVolumeFromVideo(video, audio) {
+  if (!video || !audio) {
+    return;
+  }
+  state.localPlayerVolume = Number.isFinite(video.volume)
+    ? Math.max(0, Math.min(1, Number(video.volume)))
+    : state.localPlayerVolume;
+  state.localPlayerMuted = Boolean(video.muted);
+  persistLocalVolumePreferences();
+  audio.volume = state.localPlayerVolume;
+  audio.muted = state.localPlayerMuted;
+  renderVolumeControls(state.data?.playback_mode || "local");
+}
+
+function syncSplitPlayer(video, audio, offsetSeconds, forceSeek = false) {
+  if (!video || !audio) {
+    return;
+  }
+
+  syncSplitPlayerVolumeFromVideo(video, audio);
+  audio.playbackRate = Number(video.playbackRate || 1) || 1;
+  const targetAudioTime = clampMediaTime(audio, Number(video.currentTime || 0) - offsetSeconds);
+  const drift = Math.abs(Number(audio.currentTime || 0) - targetAudioTime);
+
+  if (forceSeek || drift > 0.08) {
+    audio.currentTime = targetAudioTime;
+  }
+
+  if (video.paused) {
+    if (!audio.paused) {
+      audio.pause();
+    }
+    return;
+  }
+
+  if (targetAudioTime <= 0) {
+    if (!audio.paused) {
+      audio.pause();
+    }
+    return;
+  }
+
+  if (audio.paused || forceSeek) {
+    audio.play().catch(() => {});
+  }
+}
+
+function syncMountedLocalPlayer(forceSeek = false) {
+  const { video, audio } = activeLocalPlayerElements();
+  if (!video || !audio) {
+    return;
+  }
+  syncSplitPlayer(video, audio, currentAvOffsetSeconds(), forceSeek);
+}
+
+function applyStoredVolumeToSinglePlayer(video) {
+  if (!video) {
+    return;
+  }
+  video.volume = state.localPlayerVolume;
+  video.muted = state.localPlayerMuted;
+}
+
+function applyStoredVolumeToMountedPlayer() {
+  const { video, audio } = activeLocalPlayerElements();
+  if (video && audio) {
+    applyStoredVolumeToSplitPlayer(video, audio);
+    return;
+  }
+  applyStoredVolumeToSinglePlayer(activePrimaryVideoElement());
+}
+
+function volumePercentText() {
+  return `${Math.round(state.localPlayerVolume * 100)}%`;
+}
+
+function renderVolumeControls(playbackMode) {
+  if (!elements.volumePanel || !elements.volumeSlider || !elements.volumeMuteButton || !elements.volumeValue) {
+    return;
+  }
+
+  const isLocalMode = playbackMode === "local";
+  elements.volumePanel.classList.toggle("hidden", !isLocalMode);
+  elements.volumeSlider.value = String(Math.round(state.localPlayerVolume * 100));
+  elements.volumeValue.textContent = volumePercentText();
+  elements.volumeMuteButton.textContent = state.localPlayerMuted ? "取消静音" : "静音";
+  elements.volumeMuteButton.classList.toggle("is-muted", state.localPlayerMuted);
+}
+
+function persistLocalVolumePreferences() {
+  writeLocalPreference(storageKeys.playerVolume, state.localPlayerVolume);
+  writeLocalPreference(storageKeys.playerMuted, state.localPlayerMuted);
+}
+
+async function setLocalPlayerVolume(nextVolume, { unmute = true } = {}) {
+  const normalizedVolume = Math.max(0, Math.min(1, Number(nextVolume || 0)));
+  const previousVolume = state.localPlayerVolume;
+  const previousMuted = state.localPlayerMuted;
+  state.localPlayerVolume = normalizedVolume;
+  if (unmute && normalizedVolume > 0) {
+    state.localPlayerMuted = false;
+  }
+  persistLocalVolumePreferences();
+  applyStoredVolumeToMountedPlayer();
+  renderVolumeControls(state.data?.playback_mode || "local");
+  try {
+    state.data = await apiPost("/api/player/volume", {
+      volume_percent: Math.round(normalizedVolume * 100),
+      is_muted: state.localPlayerMuted,
+    });
+    syncLocalPlayerSettingsFromSnapshot(state.data?.player_settings);
+    render();
+  } catch (error) {
+    state.localPlayerVolume = previousVolume;
+    state.localPlayerMuted = previousMuted;
+    persistLocalVolumePreferences();
+    applyStoredVolumeToMountedPlayer();
+    renderVolumeControls(state.data?.playback_mode || "local");
+    setFormMessage(error.message, true);
+  }
+}
+
+async function toggleLocalPlayerMute() {
+  const previousMuted = state.localPlayerMuted;
+  state.localPlayerMuted = !state.localPlayerMuted;
+  persistLocalVolumePreferences();
+  applyStoredVolumeToMountedPlayer();
+  renderVolumeControls(state.data?.playback_mode || "local");
+  try {
+    state.data = await apiPost("/api/player/volume", {
+      volume_percent: Math.round(state.localPlayerVolume * 100),
+      is_muted: state.localPlayerMuted,
+    });
+    syncLocalPlayerSettingsFromSnapshot(state.data?.player_settings);
+    render();
+  } catch (error) {
+    state.localPlayerMuted = previousMuted;
+    persistLocalVolumePreferences();
+    applyStoredVolumeToMountedPlayer();
+    renderVolumeControls(state.data?.playback_mode || "local");
+    setFormMessage(error.message, true);
+  }
+}
+
+function audioVariantSwitchLocked() {
+  return state.audioVariantSwitchInFlight || Date.now() < state.audioVariantSwitchUnlockAt;
+}
+
+function scheduleAudioVariantSwitchUnlock() {
+  if (state.audioVariantSwitchTimer) {
+    window.clearTimeout(state.audioVariantSwitchTimer);
+    state.audioVariantSwitchTimer = null;
+  }
+  const remainingMs = Math.max(0, state.audioVariantSwitchUnlockAt - Date.now());
+  state.audioVariantSwitchTimer = window.setTimeout(() => {
+    state.audioVariantSwitchUnlockAt = 0;
+    state.audioVariantSwitchTimer = null;
+    if (state.data) {
+      renderAudioVariantBar(state.data.current_item, state.data.playback_mode);
+    }
+  }, remainingMs);
+}
+
 function renderAudioVariantBar(currentItem, playbackMode) {
   if (playbackMode !== "local" || !currentItem) {
     elements.audioVariantBar.innerHTML = "";
@@ -603,6 +976,7 @@ function renderAudioVariantBar(currentItem, playbackMode) {
   }
 
   const selectedVariant = selectedAudioVariantForItem(currentItem);
+  const buttonsDisabled = audioVariantSwitchLocked();
   elements.audioVariantBar.innerHTML = "";
   variants.forEach((variant) => {
     const button = document.createElement("button");
@@ -611,22 +985,44 @@ function renderAudioVariantBar(currentItem, playbackMode) {
     button.textContent = variant.label || variant.id;
     button.dataset.itemId = currentItem.id;
     button.dataset.variantId = variant.id;
+    button.disabled = buttonsDisabled;
     button.classList.toggle("active", variant.id === selectedVariant?.id);
     elements.audioVariantBar.appendChild(button);
   });
   elements.audioVariantBar.classList.remove("hidden");
 }
 
+function renderAvSyncControls(playbackMode, playerSettings) {
+  if (!elements.avSyncPanel || !elements.avOffsetInput) {
+    return;
+  }
+
+  const isLocalMode = playbackMode === "local";
+  elements.avSyncPanel.classList.toggle("hidden", !isLocalMode);
+  const offsetMs = boundedAvOffsetMs(playerSettings?.av_offset_ms || 0);
+  elements.avOffsetInput.disabled = state.avOffsetSaving;
+  if (document.activeElement !== elements.avOffsetInput || state.avOffsetSaving) {
+    elements.avOffsetInput.value = String(offsetMs);
+  }
+}
+
 function renderPlayer(currentItem, playbackMode) {
   const selectedMediaUrl = currentItem ? selectedMediaUrlForItem(currentItem) : "";
+  const selectedVideoUrl = currentItem ? selectedVideoUrlForItem(currentItem) : "";
+  const selectedAudioUrl = currentItem ? selectedAudioUrlForItem(currentItem) : "";
+  const hasSplitPlayback = Boolean(selectedVideoUrl && selectedAudioUrl);
   const signature = [
     currentItem ? currentItem.id : "none",
     playbackMode,
-    selectedMediaUrl,
+    hasSplitPlayback ? selectedVideoUrl : selectedMediaUrl,
+    hasSplitPlayback ? selectedAudioUrl : "",
     currentItem ? currentItem.cache_status : "",
   ].join("|");
 
   if (signature === state.playerSignature) {
+    if (hasSplitPlayback) {
+      syncMountedLocalPlayer(false);
+    }
     return;
   }
 
@@ -635,14 +1031,18 @@ function renderPlayer(currentItem, playbackMode) {
     !state.pendingPlaybackRestore
     && playbackMode === "local"
     && currentItem
-    && selectedMediaUrl
+    && (hasSplitPlayback || selectedMediaUrl)
     && previousPlayerContext?.playbackMode === "local"
     && previousPlayerContext.itemId === currentItem.id
-    && previousPlayerContext.mediaUrl
-    && previousPlayerContext.mediaUrl !== selectedMediaUrl
+    && (
+      previousPlayerContext.mediaUrl !== selectedMediaUrl
+      || previousPlayerContext.videoUrl !== selectedVideoUrl
+      || previousPlayerContext.audioUrl !== selectedAudioUrl
+    )
   ) {
     const currentVideo = elements.playerFrame.querySelector("video");
     if (currentVideo) {
+      captureLocalPlayerPreferences();
       state.pendingPlaybackRestore = {
         itemId: currentItem.id,
         variantId: selectedAudioVariantForItem(currentItem)?.id || "",
@@ -656,8 +1056,12 @@ function renderPlayer(currentItem, playbackMode) {
   state.playerContext = {
     itemId: currentItem ? currentItem.id : "",
     mediaUrl: selectedMediaUrl,
+    videoUrl: selectedVideoUrl,
+    audioUrl: selectedAudioUrl,
     playbackMode,
   };
+  captureLocalPlayerPreferences();
+  teardownMountedPlayer();
 
   if (!currentItem) {
     elements.playerFrame.innerHTML =
@@ -679,6 +1083,127 @@ function renderPlayer(currentItem, playbackMode) {
     return;
   }
 
+  if (hasSplitPlayback) {
+    elements.playerFrame.innerHTML = `
+      <video
+        data-player-role="video"
+        controls
+        autoplay
+        playsinline
+        preload="metadata"
+        src="${escapeHtml(selectedVideoUrl)}"
+      ></video>
+      <audio
+        data-player-role="audio"
+        preload="auto"
+        src="${escapeHtml(selectedAudioUrl)}"
+      ></audio>
+    `;
+    const video = elements.playerFrame.querySelector('video[data-player-role="video"]');
+    const audio = elements.playerFrame.querySelector('audio[data-player-role="audio"]');
+    if (video && audio) {
+      applyStoredVolumeToSplitPlayer(video, audio);
+      const reportCurrentVideoStatus = () => {
+        reportPlayerStatus(currentItem.id, video);
+      };
+      let restoreApplied = false;
+      const maybeRestorePlayback = () => {
+        const pendingRestore = state.pendingPlaybackRestore;
+        if (
+          restoreApplied
+          || !pendingRestore
+          || pendingRestore.itemId !== currentItem.id
+          || pendingRestore.variantId !== selectedAudioVariantForItem(currentItem)?.id
+          || video.readyState < 1
+          || audio.readyState < 1
+        ) {
+          return;
+        }
+
+        restoreApplied = true;
+        if (Number.isFinite(pendingRestore.currentTime)) {
+          video.currentTime = clampMediaTime(video, pendingRestore.currentTime);
+        }
+        state.localShouldBePlaying = Boolean(pendingRestore.wasPlaying);
+        syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
+        if (pendingRestore.wasPlaying) {
+          video.play().catch(() => {});
+        }
+        state.pendingPlaybackRestore = null;
+        reportCurrentVideoStatus();
+      };
+
+      video.addEventListener("loadedmetadata", () => {
+        maybeRestorePlayback();
+        syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
+        reportCurrentVideoStatus();
+      });
+      audio.addEventListener("loadedmetadata", () => {
+        maybeRestorePlayback();
+        syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
+      });
+      video.addEventListener("play", () => {
+        state.localShouldBePlaying = true;
+        state.localSeekResumePending = false;
+        syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
+        reportCurrentVideoStatus();
+      });
+      video.addEventListener("pause", () => {
+        if (state.localSeekResumePending) {
+          return;
+        }
+        if (document.hidden && state.localShouldBePlaying) {
+          window.setTimeout(() => {
+            video.play().catch(() => {});
+            syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
+          }, 0);
+          return;
+        }
+        state.localShouldBePlaying = false;
+        if (!audio.paused) {
+          audio.pause();
+        }
+        reportCurrentVideoStatus();
+      });
+      video.addEventListener("seeking", () => {
+        state.localSeekResumePending = !video.paused || state.localShouldBePlaying;
+      });
+      video.addEventListener("seeked", () => {
+        syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
+        if (state.localSeekResumePending) {
+          video.play().catch(() => {});
+        }
+        state.localSeekResumePending = false;
+        reportCurrentVideoStatus();
+      });
+      video.addEventListener("ratechange", () => {
+        syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
+      });
+      video.addEventListener("volumechange", () => {
+        syncSplitPlayerVolumeFromVideo(video, audio);
+      });
+      video.addEventListener("ended", async () => {
+        state.localShouldBePlaying = false;
+        state.localSeekResumePending = false;
+        audio.pause();
+        reportCurrentVideoStatus();
+        await handleLocalPlaybackEnded();
+      });
+      audio.addEventListener("ended", () => {
+        syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
+      });
+      state.localPlayerSyncTimer = window.setInterval(() => {
+        syncSplitPlayer(video, audio, currentAvOffsetSeconds(), false);
+      }, localPlayerSyncIntervalMs);
+      window.setTimeout(() => {
+        maybeRestorePlayback();
+        syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
+        reportCurrentVideoStatus();
+      }, 0);
+    }
+    return;
+  }
+
   if (selectedMediaUrl) {
     elements.playerFrame.innerHTML = `
       <video
@@ -690,6 +1215,8 @@ function renderPlayer(currentItem, playbackMode) {
     `;
     const video = elements.playerFrame.querySelector("video");
     if (video) {
+      video.volume = state.localPlayerVolume;
+      video.muted = state.localPlayerMuted;
       const reportCurrentVideoStatus = () => {
         reportPlayerStatus(currentItem.id, video);
       };
@@ -701,10 +1228,7 @@ function renderPlayer(currentItem, playbackMode) {
       ) {
         video.addEventListener("loadedmetadata", () => {
           if (Number.isFinite(pendingRestore.currentTime)) {
-            video.currentTime = Math.min(
-              pendingRestore.currentTime,
-              Number.isFinite(video.duration) ? video.duration : pendingRestore.currentTime,
-            );
+            video.currentTime = clampMediaTime(video, pendingRestore.currentTime);
           }
           if (pendingRestore.wasPlaying) {
             video.play().catch(() => {});
@@ -714,10 +1238,45 @@ function renderPlayer(currentItem, playbackMode) {
         }, { once: true });
       }
       video.addEventListener("loadedmetadata", reportCurrentVideoStatus);
-      video.addEventListener("play", reportCurrentVideoStatus);
-      video.addEventListener("pause", reportCurrentVideoStatus);
-      video.addEventListener("seeked", reportCurrentVideoStatus);
+      video.addEventListener("play", () => {
+        state.localShouldBePlaying = true;
+        state.localSeekResumePending = false;
+        reportCurrentVideoStatus();
+      });
+      video.addEventListener("pause", () => {
+        if (state.localSeekResumePending) {
+          return;
+        }
+        if (document.hidden && state.localShouldBePlaying) {
+          window.setTimeout(() => {
+            video.play().catch(() => {});
+          }, 0);
+          return;
+        }
+        state.localShouldBePlaying = false;
+        reportCurrentVideoStatus();
+      });
+      video.addEventListener("seeking", () => {
+        state.localSeekResumePending = !video.paused || state.localShouldBePlaying;
+      });
+      video.addEventListener("seeked", () => {
+        if (state.localSeekResumePending) {
+          video.play().catch(() => {});
+        }
+        state.localSeekResumePending = false;
+        reportCurrentVideoStatus();
+      });
+      video.addEventListener("volumechange", () => {
+        state.localPlayerVolume = Number.isFinite(video.volume)
+          ? Math.max(0, Math.min(1, Number(video.volume)))
+          : state.localPlayerVolume;
+        state.localPlayerMuted = Boolean(video.muted);
+        persistLocalVolumePreferences();
+        renderVolumeControls(state.data?.playback_mode || "local");
+      });
       video.addEventListener("ended", async () => {
+        state.localShouldBePlaying = false;
+        state.localSeekResumePending = false;
         reportCurrentVideoStatus();
         await handleLocalPlaybackEnded();
       });
@@ -749,21 +1308,31 @@ function applyRemotePlayerControl(command, currentItem, playbackMode) {
     && (!commandItemId || commandItemId === currentItem.id)
   ) {
     const video = elements.playerFrame.querySelector("video");
+    const audio = elements.playerFrame.querySelector('audio[data-player-role="audio"]');
     if (video) {
       if (action === "toggle-play") {
         if (video.paused) {
+          state.localShouldBePlaying = true;
           video.play().catch(() => {});
         } else {
+          state.localShouldBePlaying = false;
           video.pause();
         }
       } else if (action === "seek-relative") {
         const deltaSeconds = Number(command?.delta_seconds || 0);
         if (Number.isFinite(deltaSeconds) && deltaSeconds !== 0) {
+          state.localSeekResumePending = !video.paused || state.localShouldBePlaying;
           const duration = Number.isFinite(video.duration) ? video.duration : Number.POSITIVE_INFINITY;
           const nextTime = Math.max(0, Number(video.currentTime || 0) + deltaSeconds);
           video.currentTime = Number.isFinite(duration)
             ? Math.min(nextTime, duration)
             : nextTime;
+          if (audio) {
+            syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
+          }
+          if (state.localSeekResumePending) {
+            video.play().catch(() => {});
+          }
         }
       }
     }
@@ -1543,6 +2112,36 @@ async function setCacheLimit(maxCacheItems) {
   }
 }
 
+async function setAvOffset(offsetMs) {
+  if (state.avOffsetSaving) {
+    return;
+  }
+
+  const boundedOffsetMs = boundedAvOffsetMs(offsetMs);
+  const currentValue = currentAvOffsetMs();
+  if (boundedOffsetMs === currentValue) {
+    writeLocalPreference(storageKeys.avOffsetMs, boundedOffsetMs);
+    if (elements.avOffsetInput) {
+      elements.avOffsetInput.value = String(boundedOffsetMs);
+    }
+    return;
+  }
+
+  state.avOffsetSaving = true;
+  renderAvSyncControls(state.data?.playback_mode, state.data?.player_settings);
+  try {
+    state.data = await apiPost("/api/player/av-offset", { offset_ms: boundedOffsetMs });
+    writeLocalPreference(storageKeys.avOffsetMs, boundedOffsetMs);
+    render();
+  } catch (error) {
+    setFormMessage(error.message, true);
+    render();
+  } finally {
+    state.avOffsetSaving = false;
+    renderAvSyncControls(state.data?.playback_mode, state.data?.player_settings);
+  }
+}
+
 function updateCacheSliderFill(value, minValue, maxValue) {
   const min = Number(minValue);
   const max = Number(maxValue);
@@ -1693,6 +2292,38 @@ elements.cacheLimitSlider.addEventListener("change", async (event) => {
   await setCacheLimit(Number(event.target.value || "1"));
 });
 
+elements.avSyncPanel?.addEventListener("click", async (event) => {
+  const button = event.target.closest("button[data-step]");
+  if (!button) {
+    return;
+  }
+  const step = Number(button.dataset.step || 0);
+  if (!Number.isFinite(step) || step === 0) {
+    return;
+  }
+  await setAvOffset(currentAvOffsetMs() + step);
+});
+
+elements.avOffsetInput?.addEventListener("change", async (event) => {
+  await setAvOffset(event.target.value);
+});
+
+elements.avOffsetInput?.addEventListener("keydown", async (event) => {
+  if (event.key !== "Enter") {
+    return;
+  }
+  event.preventDefault();
+  await setAvOffset(event.target.value);
+});
+
+elements.volumeSlider?.addEventListener("input", (event) => {
+  setLocalPlayerVolume(Number(event.target.value || "0") / 100);
+});
+
+elements.volumeMuteButton?.addEventListener("click", () => {
+  toggleLocalPlayerMute();
+});
+
 elements.clearPlaylistButton.addEventListener("click", (event) => {
   const point = anchorPointForEvent(event, elements.clearPlaylistButton);
   openConfirm({
@@ -1746,7 +2377,7 @@ elements.modeSwitch.addEventListener("click", async (event) => {
 
 elements.audioVariantBar.addEventListener("click", async (event) => {
   const button = event.target.closest("button[data-variant-id]");
-  if (!button || !state.data?.current_item) {
+  if (!button || !state.data?.current_item || audioVariantSwitchLocked()) {
     return;
   }
 
@@ -1762,6 +2393,9 @@ elements.audioVariantBar.addEventListener("click", async (event) => {
   }
 
   const video = elements.playerFrame.querySelector("video");
+  state.audioVariantSwitchInFlight = true;
+  state.audioVariantSwitchUnlockAt = Date.now() + audioVariantSwitchDebounceMs;
+  renderAudioVariantBar(currentItem, state.data?.playback_mode);
   state.pendingPlaybackRestore = {
     itemId: currentItem.id,
     variantId: nextVariantId,
@@ -1778,6 +2412,9 @@ elements.audioVariantBar.addEventListener("click", async (event) => {
   } catch (error) {
     state.pendingPlaybackRestore = null;
     setFormMessage(error.message, true);
+  } finally {
+    state.audioVariantSwitchInFlight = false;
+    scheduleAudioVariantSwitchUnlock();
   }
 });
 
@@ -1886,6 +2523,20 @@ document.addEventListener("keydown", (event) => {
   if (state.cacheSettingsOpen) {
     state.cacheSettingsOpen = false;
     syncCachePanelVisibility();
+  }
+});
+
+document.addEventListener("visibilitychange", () => {
+  if (!state.localShouldBePlaying) {
+    return;
+  }
+  const { video, audio } = activeLocalPlayerElements();
+  const primaryVideo = video || activePrimaryVideoElement();
+  if (primaryVideo) {
+    primaryVideo.play().catch(() => {});
+  }
+  if (video && audio) {
+    syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
   }
 });
 
@@ -2075,6 +2726,7 @@ elements.saveCookieButton.addEventListener("click", async () => {
 });
 
 async function startPolling() {
+  hydrateLocalPreferences();
   try {
     await fetchState();
   } catch (error) {
@@ -2089,7 +2741,10 @@ async function startPolling() {
   }, pollIntervalMs);
 }
 
-window.addEventListener("pagehide", disconnectClient);
+window.addEventListener("pagehide", () => {
+  teardownMountedPlayer();
+  disconnectClient();
+});
 window.addEventListener("beforeunload", disconnectClient);
 
 startPolling();

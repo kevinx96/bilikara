@@ -1,4 +1,5 @@
 const pollIntervalMs = 1500;
+const audioVariantSwitchDebounceMs = 350;
 
 const state = {
   clientId: createClientId(),
@@ -7,6 +8,9 @@ const state = {
   submitting: false,
   listView: "queue",
   playerControlPendingAction: "",
+  audioVariantSwitchInFlight: false,
+  audioVariantSwitchUnlockAt: 0,
+  audioVariantSwitchTimer: null,
   gatchaCandidate: null,
 };
 
@@ -17,6 +21,12 @@ const elements = {
   audioVariantBar: document.getElementById("audio-variant-bar"),
   playerControlPanel: document.getElementById("player-control-panel"),
   playerControlHint: document.getElementById("player-control-hint"),
+  remoteAvSyncPanel: document.getElementById("remote-av-sync-panel"),
+  remoteAvOffsetInput: document.getElementById("remote-av-offset-input"),
+  remoteVolumePanel: document.getElementById("remote-volume-panel"),
+  remoteVolumeMuteButton: document.getElementById("remote-volume-mute-button"),
+  remoteVolumeSlider: document.getElementById("remote-volume-slider"),
+  remoteVolumeValue: document.getElementById("remote-volume-value"),
   requestForm: document.getElementById("request-form"),
   requesterSelect: document.getElementById("requester-select"),
   urlInput: document.getElementById("url-input"),
@@ -183,6 +193,8 @@ function render() {
   renderCurrentItem(data.current_item, data.playback_mode);
   renderAudioVariantBar(data.current_item, data.playback_mode);
   renderPlayerControls(data.current_item, data.playback_mode);
+  renderRemoteAvSyncControls(data.playback_mode, data.player_settings);
+  renderRemoteVolumeControls(data.playback_mode, data.player_settings);
   renderListHeader(data.playlist || [], data.history || []);
   renderQueue(Array.isArray(data.playlist) ? data.playlist : []);
   renderHistory(Array.isArray(data.history) ? data.history : []);
@@ -250,6 +262,29 @@ function selectedAudioVariantForItem(item) {
   return variants.find((variant) => variant.id === selectedId) || variants[0];
 }
 
+function audioVariantSwitchLocked() {
+  if (state.audioVariantSwitchInFlight && Date.now() >= state.audioVariantSwitchUnlockAt) {
+    state.audioVariantSwitchInFlight = false;
+  }
+  return state.audioVariantSwitchInFlight || Date.now() < state.audioVariantSwitchUnlockAt;
+}
+
+function scheduleAudioVariantSwitchUnlock() {
+  if (state.audioVariantSwitchTimer) {
+    window.clearTimeout(state.audioVariantSwitchTimer);
+    state.audioVariantSwitchTimer = null;
+  }
+  const remainingMs = Math.max(0, state.audioVariantSwitchUnlockAt - Date.now());
+  state.audioVariantSwitchTimer = window.setTimeout(() => {
+    state.audioVariantSwitchInFlight = false;
+    state.audioVariantSwitchUnlockAt = 0;
+    state.audioVariantSwitchTimer = null;
+    if (state.data) {
+      renderAudioVariantBar(state.data.current_item, state.data.playback_mode);
+    }
+  }, remainingMs);
+}
+
 function renderAudioVariantBar(currentItem, playbackMode) {
   if (playbackMode !== "local" || !currentItem) {
     elements.audioVariantBar.innerHTML = "";
@@ -265,6 +300,7 @@ function renderAudioVariantBar(currentItem, playbackMode) {
   }
 
   const selectedVariant = selectedAudioVariantForItem(currentItem);
+  const buttonsDisabled = audioVariantSwitchLocked();
   elements.audioVariantBar.innerHTML = "";
   variants.forEach((variant) => {
     const button = document.createElement("button");
@@ -273,10 +309,82 @@ function renderAudioVariantBar(currentItem, playbackMode) {
     button.textContent = variant.label || variant.id;
     button.dataset.itemId = currentItem.id;
     button.dataset.variantId = variant.id;
+    button.disabled = buttonsDisabled;
     button.classList.toggle("active", variant.id === selectedVariant?.id);
     elements.audioVariantBar.appendChild(button);
   });
   elements.audioVariantBar.classList.remove("hidden");
+}
+
+function currentRemoteAvOffsetMs(playerSettings) {
+  return Number(playerSettings?.av_offset_ms || 0);
+}
+
+function currentRemoteVolumePercent(playerSettings) {
+  return Math.max(0, Math.min(100, Number(playerSettings?.volume_percent ?? 100)));
+}
+
+function currentRemoteMuted(playerSettings) {
+  return Boolean(playerSettings?.is_muted);
+}
+
+function renderRemoteAvSyncControls(playbackMode, playerSettings) {
+  if (!elements.remoteAvSyncPanel || !elements.remoteAvOffsetInput) {
+    return;
+  }
+  const isLocalMode = playbackMode === "local";
+  elements.remoteAvSyncPanel.classList.toggle("hidden", !isLocalMode);
+  elements.remoteAvOffsetInput.value = String(currentRemoteAvOffsetMs(playerSettings));
+}
+
+function renderRemoteVolumeControls(playbackMode, playerSettings) {
+  if (!elements.remoteVolumePanel || !elements.remoteVolumeSlider || !elements.remoteVolumeMuteButton || !elements.remoteVolumeValue) {
+    return;
+  }
+  const isLocalMode = playbackMode === "local";
+  elements.remoteVolumePanel.classList.toggle("hidden", !isLocalMode);
+  const volumePercent = currentRemoteVolumePercent(playerSettings);
+  const isMuted = currentRemoteMuted(playerSettings);
+  elements.remoteVolumeSlider.value = String(volumePercent);
+  elements.remoteVolumeValue.textContent = `${Math.round(volumePercent)}%`;
+  elements.remoteVolumeMuteButton.textContent = isMuted ? "取消静音" : "静音";
+  elements.remoteVolumeMuteButton.classList.toggle("is-muted", isMuted);
+}
+
+async function setRemoteAvOffset(offsetMs) {
+  const numeric = Number(offsetMs || 0);
+  if (!Number.isFinite(numeric)) {
+    return;
+  }
+  try {
+    state.data = await apiPost("/api/player/av-offset", { offset_ms: Math.max(-5000, Math.min(5000, Math.round(numeric))) });
+    render();
+  } catch (error) {
+    setFormMessage(error.message, true);
+  }
+}
+
+async function setRemoteVolumeSettings({ volumePercent, isMuted } = {}) {
+  const payload = {};
+  if (volumePercent !== undefined) {
+    const numeric = Number(volumePercent);
+    if (!Number.isFinite(numeric)) {
+      return;
+    }
+    payload.volume_percent = Math.max(0, Math.min(100, Math.round(numeric)));
+  }
+  if (isMuted !== undefined) {
+    payload.is_muted = Boolean(isMuted);
+  }
+  if (!Object.keys(payload).length) {
+    return;
+  }
+  try {
+    state.data = await apiPost("/api/player/volume", payload);
+    render();
+  } catch (error) {
+    setFormMessage(error.message, true);
+  }
 }
 
 function canRemoteControlPlayer(currentItem, playbackMode) {
@@ -637,7 +745,46 @@ elements.refreshButton.addEventListener("click", async () => {
     setFormMessage("列表已刷新。");
   } catch (error) {
     setFormMessage(error.message, true);
+  } finally {
+    state.audioVariantSwitchInFlight = false;
+    scheduleAudioVariantSwitchUnlock();
   }
+});
+
+elements.remoteAvSyncPanel?.addEventListener("click", async (event) => {
+  const button = event.target.closest("button[data-av-step]");
+  if (!button) {
+    return;
+  }
+  await setRemoteAvOffset(
+    currentRemoteAvOffsetMs(state.data?.player_settings) + Number(button.dataset.avStep || "0"),
+  );
+});
+
+elements.remoteAvOffsetInput?.addEventListener("change", async (event) => {
+  await setRemoteAvOffset(event.target.value);
+});
+
+elements.remoteAvOffsetInput?.addEventListener("keydown", async (event) => {
+  if (event.key !== "Enter") {
+    return;
+  }
+  event.preventDefault();
+  await setRemoteAvOffset(event.target.value);
+});
+
+elements.remoteVolumeSlider?.addEventListener("input", async (event) => {
+  await setRemoteVolumeSettings({
+    volumePercent: event.target.value,
+    isMuted: currentRemoteMuted(state.data?.player_settings),
+  });
+});
+
+elements.remoteVolumeMuteButton?.addEventListener("click", async () => {
+  await setRemoteVolumeSettings({
+    volumePercent: currentRemoteVolumePercent(state.data?.player_settings),
+    isMuted: !currentRemoteMuted(state.data?.player_settings),
+  });
 });
 
 elements.gatchaButton.addEventListener("click", handleGatchaDraw);
@@ -653,7 +800,7 @@ elements.gatchaConfirmButton.addEventListener("click", async () => {
 elements.audioVariantBar.addEventListener("click", async (event) => {
   const button = event.target.closest("button[data-variant-id]");
   const currentItem = state.data?.current_item;
-  if (!button || !currentItem) {
+  if (!button || !currentItem || audioVariantSwitchLocked()) {
     return;
   }
   if (button.dataset.itemId !== currentItem.id) {
@@ -667,6 +814,9 @@ elements.audioVariantBar.addEventListener("click", async (event) => {
   }
 
   try {
+    state.audioVariantSwitchInFlight = true;
+    state.audioVariantSwitchUnlockAt = Date.now() + audioVariantSwitchDebounceMs;
+    renderAudioVariantBar(currentItem, state.data?.playback_mode);
     state.data = await apiPost("/api/player/audio-variant", {
       item_id: currentItem.id,
       variant_id: nextVariantId,
@@ -677,6 +827,9 @@ elements.audioVariantBar.addEventListener("click", async (event) => {
     setFormMessage(`已切换到 ${activeVariant?.label || nextVariantId}`);
   } catch (error) {
     setFormMessage(error.message, true);
+  } finally {
+    state.audioVariantSwitchInFlight = false;
+    scheduleAudioVariantSwitchUnlock();
   }
 });
 

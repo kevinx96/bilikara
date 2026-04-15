@@ -129,6 +129,15 @@ class AppContext:
     def set_mode(self, mode: str) -> None:
         self.store.set_mode(mode)
 
+    def set_av_offset_ms(self, offset_ms: int) -> int:
+        return self.store.set_av_offset_ms(offset_ms)
+
+    def set_volume_percent(self, volume_percent: int) -> int:
+        return self.store.set_volume_percent(volume_percent)
+
+    def set_muted(self, is_muted: bool) -> bool:
+        return self.store.set_muted(is_muted)
+
     def set_audio_variant(self, item_id: str, variant_id: str) -> bool:
         return self.store.set_audio_variant(item_id, variant_id)
 
@@ -464,6 +473,28 @@ class BilikaraHandler(BaseHTTPRequestHandler):
                 if mode not in {"online", "local"}:
                     raise ValueError("mode 必须是 online 或 local")
                 CONTEXT.set_mode(mode)
+                self._write_json({"ok": True, "data": CONTEXT.snapshot()})
+                return
+            if route == "/api/player/av-offset":
+                offset_ms = body.get("offset_ms")
+                if not isinstance(offset_ms, int):
+                    raise ValueError("offset_ms must be an integer")
+                CONTEXT.set_av_offset_ms(offset_ms)
+                self._write_json({"ok": True, "data": CONTEXT.snapshot()})
+                return
+            if route == "/api/player/volume":
+                volume_percent = body.get("volume_percent")
+                is_muted = body.get("is_muted")
+                if volume_percent is not None:
+                    if not isinstance(volume_percent, int):
+                        raise ValueError("volume_percent must be an integer")
+                    CONTEXT.set_volume_percent(volume_percent)
+                if is_muted is not None:
+                    if not isinstance(is_muted, bool):
+                        raise ValueError("is_muted must be a boolean")
+                    CONTEXT.set_muted(is_muted)
+                if volume_percent is None and is_muted is None:
+                    raise ValueError("missing volume settings")
                 self._write_json({"ok": True, "data": CONTEXT.snapshot()})
                 return
             if route == "/api/cache/retry":

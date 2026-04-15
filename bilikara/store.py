@@ -13,6 +13,8 @@ from .models import HistoryEntry, PlaylistItem, SessionPlayedEntry
 
 MAX_SESSION_USERS = 32
 MAX_SESSION_USER_NAME_LENGTH = 24
+MAX_AV_OFFSET_MS = 5000
+MAX_VOLUME_PERCENT = 100
 
 
 class PlaylistStore:
@@ -27,6 +29,9 @@ class PlaylistStore:
         self.session_archive_dir = session_archive_dir or state_file.parent / "played_sessions"
         self.lock = threading.RLock()
         self.playback_mode = "local"
+        self.av_offset_ms = 0
+        self.volume_percent = 100
+        self.is_muted = False
         self.current_item: PlaylistItem | None = None
         self.playlist: list[PlaylistItem] = []
         self.history: list[HistoryEntry] = []
@@ -46,6 +51,11 @@ class PlaylistStore:
         with self.lock:
             return {
                 "playback_mode": self.playback_mode,
+                "player_settings": {
+                    "av_offset_ms": self.av_offset_ms,
+                    "volume_percent": self.volume_percent,
+                    "is_muted": self.is_muted,
+                },
                 "playlist": [item.to_dict() for item in self.playlist],
                 "current_item": self.current_item.to_dict() if self.current_item else None,
                 "history": [entry.to_dict() for entry in self.history],
@@ -184,6 +194,33 @@ class PlaylistStore:
             self.playback_mode = mode
             self._touch(persist_backup=True)
 
+    def set_av_offset_ms(self, offset_ms: int) -> int:
+        with self.lock:
+            bounded = max(-MAX_AV_OFFSET_MS, min(MAX_AV_OFFSET_MS, int(offset_ms)))
+            if self.av_offset_ms == bounded:
+                return bounded
+            self.av_offset_ms = bounded
+            self._touch(persist_backup=True)
+            return bounded
+
+    def set_volume_percent(self, volume_percent: int) -> int:
+        with self.lock:
+            bounded = max(0, min(MAX_VOLUME_PERCENT, int(volume_percent)))
+            if self.volume_percent == bounded:
+                return bounded
+            self.volume_percent = bounded
+            self._touch(persist_backup=True)
+            return bounded
+
+    def set_muted(self, is_muted: bool) -> bool:
+        with self.lock:
+            normalized = bool(is_muted)
+            if self.is_muted == normalized:
+                return normalized
+            self.is_muted = normalized
+            self._touch(persist_backup=True)
+            return normalized
+
     def set_audio_variant(self, item_id: str, variant_id: str) -> bool:
         with self.lock:
             item = self._find_item_unlocked(item_id)
@@ -278,9 +315,15 @@ class PlaylistStore:
                         for entry in history_payload
                         if isinstance(entry, dict)
                     ]
+                self.av_offset_ms = self._load_av_offset_ms(payload)
+                self.volume_percent = self._load_volume_percent(payload)
+                self.is_muted = self._load_is_muted(payload)
                 self.session_users = self._load_session_users_from_payload(payload)
                 return False
             self.playback_mode = str(payload.get("playback_mode") or "local")
+            self.av_offset_ms = self._load_av_offset_ms(payload)
+            self.volume_percent = self._load_volume_percent(payload)
+            self.is_muted = self._load_is_muted(payload)
             self.current_item = (
                 PlaylistItem.from_dict(self._sanitize_backup_payload(current_item_payload))
                 if current_item_payload
@@ -512,6 +555,11 @@ class PlaylistStore:
     def _save_session(self) -> None:
         payload = {
             "playback_mode": self.playback_mode,
+            "player_settings": {
+                "av_offset_ms": self.av_offset_ms,
+                "volume_percent": self.volume_percent,
+                "is_muted": self.is_muted,
+            },
             "current_item": self.current_item.serialize() if self.current_item else None,
             "playlist": [item.serialize() for item in self.playlist],
             "history": [entry.serialize() for entry in self.history],
@@ -542,6 +590,11 @@ class PlaylistStore:
             return
         payload = {
             "playback_mode": self.playback_mode,
+            "player_settings": {
+                "av_offset_ms": self.av_offset_ms,
+                "volume_percent": self.volume_percent,
+                "is_muted": self.is_muted,
+            },
             "current_item": (
                 self._backup_item_payload(self.current_item) if self.current_item else None
             ),
@@ -569,6 +622,8 @@ class PlaylistStore:
             cache_message="待缓存",
             local_relative_path="",
             local_media_url="",
+            video_relative_path="",
+            video_media_url="",
             audio_variants=[],
             selected_audio_variant_id="",
         )
@@ -582,6 +637,8 @@ class PlaylistStore:
             cache_message="待缓存",
             local_relative_path="",
             local_media_url="",
+            video_relative_path="",
+            video_media_url="",
             audio_variants=[],
             selected_audio_variant_id="",
         )
@@ -620,7 +677,41 @@ class PlaylistStore:
                 for entry in history_payload
                 if isinstance(entry, dict)
             ]
+            self.av_offset_ms = self._load_av_offset_ms(payload)
+            self.volume_percent = self._load_volume_percent(payload)
+            self.is_muted = self._load_is_muted(payload)
             self.session_users = self._load_session_users_from_payload(payload)
+
+    @staticmethod
+    def _load_av_offset_ms(payload: dict[str, Any]) -> int:
+        player_settings = payload.get("player_settings")
+        if not isinstance(player_settings, dict):
+            return 0
+        raw_value = player_settings.get("av_offset_ms", 0)
+        try:
+            value = int(raw_value)
+        except (TypeError, ValueError):
+            return 0
+        return max(-MAX_AV_OFFSET_MS, min(MAX_AV_OFFSET_MS, value))
+
+    @staticmethod
+    def _load_volume_percent(payload: dict[str, Any]) -> int:
+        player_settings = payload.get("player_settings")
+        if not isinstance(player_settings, dict):
+            return 100
+        raw_value = player_settings.get("volume_percent", 100)
+        try:
+            value = int(raw_value)
+        except (TypeError, ValueError):
+            return 100
+        return max(0, min(MAX_VOLUME_PERCENT, value))
+
+    @staticmethod
+    def _load_is_muted(payload: dict[str, Any]) -> bool:
+        player_settings = payload.get("player_settings")
+        if not isinstance(player_settings, dict):
+            return False
+        return bool(player_settings.get("is_muted", False))
 
     @staticmethod
     def _history_key(item: PlaylistItem) -> str:

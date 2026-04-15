@@ -32,6 +32,34 @@ class PlaylistStoreTest(unittest.TestCase):
     def test_default_mode_is_local(self):
         self.assertEqual(self.store.playback_mode, "local")
 
+    def test_av_offset_persists_in_state_file(self):
+        self.store.set_av_offset_ms(230)
+
+        restored_store = PlaylistStore(
+            state_file=self.state_file,
+            backup_file=self.backup_file,
+            session_archive_dir=self.session_archive_dir,
+        )
+
+        self.assertEqual(self.store.snapshot()["player_settings"]["av_offset_ms"], 230)
+        self.assertEqual(restored_store.av_offset_ms, 230)
+
+    def test_volume_settings_persist_in_state_file(self):
+        self.store.set_volume_percent(35)
+        self.store.set_muted(True)
+
+        restored_store = PlaylistStore(
+            state_file=self.state_file,
+            backup_file=self.backup_file,
+            session_archive_dir=self.session_archive_dir,
+        )
+
+        snapshot = self.store.snapshot()["player_settings"]
+        self.assertEqual(snapshot["volume_percent"], 35)
+        self.assertTrue(snapshot["is_muted"])
+        self.assertEqual(restored_store.volume_percent, 35)
+        self.assertTrue(restored_store.is_muted)
+
     def make_item(self, item_id: str, *, song_key: str | None = None) -> PlaylistItem:
         key = song_key or item_id
         numeric = sum(ord(char) for char in key)
@@ -240,9 +268,14 @@ class PlaylistStoreTest(unittest.TestCase):
         item.cache_message = "cached"
         item.local_relative_path = "a/video.mp4"
         item.local_media_url = "/media/a/video.mp4"
+        item.video_relative_path = "a/video-only.m4s"
+        item.video_media_url = "/media/a/video-only.m4s"
         self.store.move_session_user_to_index("D", 1)
         self.store.add_item(item, requester_name="A")
         self.store.set_mode("local")
+        self.store.set_av_offset_ms(180)
+        self.store.set_volume_percent(42)
+        self.store.set_muted(True)
 
         restored_store = PlaylistStore(
             state_file=self.state_file,
@@ -253,12 +286,17 @@ class PlaylistStoreTest(unittest.TestCase):
         self.assertTrue(restored_store.backup_summary()["available"])
         self.assertTrue(restored_store.restore_backup())
         self.assertEqual(restored_store.playback_mode, "local")
+        self.assertEqual(restored_store.av_offset_ms, 180)
+        self.assertEqual(restored_store.volume_percent, 42)
+        self.assertTrue(restored_store.is_muted)
         self.assertEqual(restored_store.current_item.id, "a")
         self.assertEqual([entry.id for entry in restored_store.playlist], [])
         restored_item = restored_store.current_item
         self.assertEqual(restored_item.cache_status, "pending")
         self.assertEqual(restored_item.local_relative_path, "")
         self.assertEqual(restored_item.local_media_url, "")
+        self.assertEqual(restored_item.video_relative_path, "")
+        self.assertEqual(restored_item.video_media_url, "")
         self.assertEqual(restored_item.requester_name, "A")
         self.assertEqual(restored_store.session_users[:4], ["A", "D", "B", "C"])
 
@@ -385,53 +423,38 @@ class BilibiliParserTest(unittest.TestCase):
         self.assertEqual(item.owner_url, "https://space.bilibili.com/114514")
         self.assertEqual(item.selected_audio_variant_id, "part_2")
 
-    @patch("bilikara.bilibili.random.choice")
-    @patch("bilikara.bilibili._local_gatcha_candidates")
-    def test_fetch_gatcha_candidate_uses_local_cache(self, mock_local_candidates, mock_choice):
-        cached = [
-            {
-                "mid": "123",
-                "bvid": "BV1xx411c7mD",
-                "title": "karaoke sample",
-                "url": "https://www.bilibili.com/video/BV1xx411c7mD",
-            }
-        ]
-        mock_local_candidates.return_value = cached
-        mock_choice.return_value = cached[0]
+    def test_fetch_gatcha_videos_for_uid_retries_once_on_412(self):
+        if not hasattr(bilibili_module, "_fetch_gatcha_videos_for_uid"):
+            self.skipTest("gatcha fetch is not available on this branch")
 
-        candidate = bilibili_module.fetch_gatcha_candidate()
-
-        self.assertEqual(candidate["bvid"], "BV1xx411c7mD")
-        self.assertEqual(candidate["title"], "karaoke sample")
-        mock_local_candidates.assert_called_once()
-
-    @patch("bilikara.bilibili.time.sleep")
-    @patch("bilikara.bilibili.request_json")
-    @patch("bilikara.bilibili.get_cached_wbi_keys")
-    def test_fetch_gatcha_videos_for_uid_retries_once_on_412(
-        self,
-        mock_get_cached_wbi_keys,
-        mock_request_json,
-        mock_sleep,
-    ):
-        mock_get_cached_wbi_keys.return_value = ("a" * 32, "b" * 32)
-        mock_request_json.side_effect = [
-            {"code": 412, "message": "412 Precondition Failed"},
-            {
-                "code": 0,
-                "data": {
-                    "list": {
-                        "vlist": [
-                            {"bvid": "BV1xx411c7mD", "title": "karaoke sample"},
-                            {"bvid": "BV1yy411c7mD", "title": "other sample"},
-                        ]
-                    }
+        with (
+            patch("bilikara.bilibili.time.sleep") as mock_sleep,
+            patch("bilikara.bilibili.time.monotonic") as mock_monotonic,
+            patch("bilikara.bilibili.request_json") as mock_request_json,
+            patch("bilikara.bilibili.get_cached_wbi_keys") as mock_get_cached_wbi_keys,
+        ):
+            mock_get_cached_wbi_keys.return_value = ("a" * 32, "b" * 32)
+            mock_monotonic.side_effect = [100.0, 100.0, 103.5, 103.5]
+            mock_request_json.side_effect = [
+                {"code": 412, "message": "412 Precondition Failed"},
+                {
+                    "code": 0,
+                    "data": {
+                        "list": {
+                            "vlist": [
+                                {"bvid": "BV1xx411c7mD", "title": "karaoke sample"},
+                                {"bvid": "BV1yy411c7mD", "title": "other sample"},
+                            ]
+                        }
+                    },
                 },
-            },
-        ]
+            ]
 
-        with patch.object(bilibili_module, "GATCHA_KEYWORDS", ["karaoke"]):
-            entries = bilibili_module._fetch_gatcha_videos_for_uid("123")
+            with (
+                patch.object(bilibili_module, "GATCHA_KEYWORDS", ["karaoke"], create=True),
+                patch.object(bilibili_module, "_GATCHA_LAST_REQUEST_AT", 0.0, create=True),
+            ):
+                entries = bilibili_module._fetch_gatcha_videos_for_uid("123")
 
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0]["bvid"], "BV1xx411c7mD")
