@@ -59,8 +59,11 @@ class AppContext:
         self._host = HOST
         self._port = PORT
         self._shutdown_on_last_client = False
+        self._host_client_id: str | None = None
         self._client_lock = threading.RLock()
         self._client_last_seen: dict[str, float] = {}
+        self._host_client_last_seen: dict[str, float] = {}
+        self._host_seen_once = False
         self._client_seen_once = False
         self._no_clients_since: float | None = None
         self._shutdown_requested = False
@@ -238,6 +241,8 @@ class AppContext:
             self._shutdown_on_last_client = shutdown_on_last_client
             self._client_last_seen.clear()
             self._client_seen_once = False
+            self._host_client_last_seen.clear()
+            self._host_seen_once = False
             self._no_clients_since = None
             self._shutdown_requested = False
         with self._remote_access_lock:
@@ -249,16 +254,67 @@ class AppContext:
         with self._remote_access_lock:
             return dict(self._remote_access)
 
-    def touch_client(self, client_id: str) -> None:
+    def touch_client(self, client_id: str, is_host: bool = True) -> None:
         client_key = str(client_id or "").strip()
         if not client_key:
             return
         now = time.monotonic()
         with self._client_lock:
             self._client_last_seen[client_key] = now
+            if is_host:
+                self._host_client_last_seen[client_key] = now
+                self._host_seen_once = True
             self._client_seen_once = True
             self._no_clients_since = None
             self._shutdown_requested = False
+
+    def disconnect_client(self, client_id: str) -> None:
+        client_key = str(client_id or "").strip()
+        if not client_key:
+            return
+        now = time.monotonic()
+        with self._client_lock:
+            self._client_last_seen.pop(client_key, None)
+            self._host_client_last_seen.pop(client_key, None)
+            self._prune_stale_clients(now)
+            if self._host_client_last_seen:
+                self._no_clients_since = None
+                return
+            self._no_clients_since = now
+
+    def _client_watchdog_loop(self) -> None:
+        while not self._closed:
+            time.sleep(1.0)
+            with self._client_lock:
+                # 注意：这里改成了依赖 self._host_seen_once
+                if not self._shutdown_on_last_client or not self._host_seen_once or self._shutdown_requested:
+                    continue
+                now = time.monotonic()
+                self._prune_stale_clients(now)
+                # 注意：这里改成了判断 host_client 字典
+                if self._host_client_last_seen:
+                    self._no_clients_since = None
+                    continue
+                if self._no_clients_since is None:
+                    self._no_clients_since = now
+                    continue
+                if now - self._no_clients_since < self._client_grace_seconds:
+                    continue
+                server = self._server
+                if server is None:
+                    continue
+                self._shutdown_requested = True
+            threading.Thread(target=server.shutdown, daemon=True).start()
+
+    def _prune_stale_clients(self, now: float) -> None:
+        expired = [
+            client_id
+            for client_id, last_seen in self._client_last_seen.items()
+            if now - last_seen > self._client_stale_seconds
+        ]
+        for client_id in expired:
+            self._client_last_seen.pop(client_id, None)
+            self._host_client_last_seen.pop(client_id, None)
 
     def disconnect_client(self, client_id: str) -> None:
         client_key = str(client_id or "").strip()
@@ -371,8 +427,18 @@ class BilikaraHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def do_GET(self) -> None:  # noqa: N802
-        CONTEXT.touch_client(self.headers.get("X-Bilikara-Client", ""))
         route = urlparse(self.path).path
+        client_id = self.headers.get("X-Bilikara-Client", "")
+        referer = self.headers.get("Referer", "")
+        
+        # 默认认为是 Host 主屏幕，除非明确来自 Remote
+        is_host = True
+        if referer and referer.rstrip("/").endswith("/remote"):
+            is_host = False
+        elif route == "/remote" or route.startswith("/remote/"):
+            is_host = False
+            
+        CONTEXT.touch_client(client_id, is_host=is_host)
         if route == "/api/state":
             self._write_json({"ok": True, "data": CONTEXT.snapshot()})
             return
@@ -400,8 +466,18 @@ class BilikaraHandler(BaseHTTPRequestHandler):
         self._serve_static(route)
 
     def do_POST(self) -> None:  # noqa: N802
-        CONTEXT.touch_client(self.headers.get("X-Bilikara-Client", ""))
         route = urlparse(self.path).path
+        client_id = self.headers.get("X-Bilikara-Client", "")
+        referer = self.headers.get("Referer", "")
+        
+        is_host = True
+        if referer and referer.rstrip("/").endswith("/remote"):
+            is_host = False
+        elif route == "/remote" or route.startswith("/remote/"):
+            is_host = False
+            
+        CONTEXT.touch_client(client_id, is_host=is_host)
+        
         try:
             body = self._read_json_body()
             if route == "/api/playlist/add":
