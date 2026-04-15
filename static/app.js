@@ -228,6 +228,17 @@ async function togglePlayerFullscreen() {
   await requestElementFullscreen(elements.playerPanel);
 }
 
+async function handlePlayerFrameDoubleClick() {
+  if (!supportsPlayerFullscreen()) {
+    return;
+  }
+  if (!state.data?.current_item && !isPlayerPanelFullscreen()) {
+    return;
+  }
+  await togglePlayerFullscreen();
+  renderPlayerFullscreenButton();
+}
+
 function readLocalNumber(key, fallbackValue) {
   try {
     const rawValue = window.localStorage?.getItem(key);
@@ -963,14 +974,24 @@ function volumePercentText() {
   return `${Math.round(state.localPlayerVolume * 100)}%`;
 }
 
+function setRangeFillPercent(input, percent) {
+  if (!input) {
+    return;
+  }
+  const normalizedPercent = Math.max(0, Math.min(100, Number(percent || 0)));
+  input.style.setProperty("--range-fill-percent", `${normalizedPercent}%`);
+}
+
 function renderVolumeControls(playbackMode) {
   if (!elements.volumePanel || !elements.volumeSlider || !elements.volumeMuteButton || !elements.volumeValue) {
     return;
   }
 
   const isLocalMode = playbackMode === "local";
+  const volumePercent = Math.round(state.localPlayerVolume * 100);
   elements.volumePanel.classList.toggle("hidden", !isLocalMode);
-  elements.volumeSlider.value = String(Math.round(state.localPlayerVolume * 100));
+  elements.volumeSlider.value = String(volumePercent);
+  setRangeFillPercent(elements.volumeSlider, volumePercent);
   elements.volumeValue.textContent = volumePercentText();
   elements.volumeMuteButton.textContent = state.localPlayerMuted ? "取消静音" : "静音";
   elements.volumeMuteButton.classList.toggle("is-muted", state.localPlayerMuted);
@@ -1192,6 +1213,9 @@ function renderPlayer(currentItem, playbackMode) {
     const video = elements.playerFrame.querySelector('video[data-player-role="video"]');
     const audio = elements.playerFrame.querySelector('audio[data-player-role="audio"]');
     if (video && audio) {
+      video.addEventListener("dblclick", () => {
+        handlePlayerFrameDoubleClick().catch(() => {});
+      });
       applyStoredVolumeToSplitPlayer(video, audio);
       const reportCurrentVideoStatus = () => {
         reportPlayerStatus(currentItem.id, video);
@@ -1307,6 +1331,9 @@ function renderPlayer(currentItem, playbackMode) {
     `;
     const video = elements.playerFrame.querySelector("video");
     if (video) {
+      video.addEventListener("dblclick", () => {
+        handlePlayerFrameDoubleClick().catch(() => {});
+      });
       video.volume = state.localPlayerVolume;
       video.muted = state.localPlayerMuted;
       const reportCurrentVideoStatus = () => {
@@ -2409,6 +2436,7 @@ elements.avOffsetInput?.addEventListener("keydown", async (event) => {
 });
 
 elements.volumeSlider?.addEventListener("input", (event) => {
+  setRangeFillPercent(event.target, event.target.value);
   setLocalPlayerVolume(Number(event.target.value || "0") / 100);
 });
 
@@ -2434,6 +2462,13 @@ elements.historyToggleButton.addEventListener("click", () => {
 elements.playerFullscreenButton?.addEventListener("click", async () => {
   await togglePlayerFullscreen();
   renderPlayerFullscreenButton();
+});
+
+elements.playerFrame?.addEventListener("dblclick", (event) => {
+  if (event.target.closest("button, input, select, textarea, a")) {
+    return;
+  }
+  handlePlayerFrameDoubleClick().catch(() => {});
 });
 
 elements.nextButton.addEventListener("click", async () => {

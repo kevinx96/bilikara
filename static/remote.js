@@ -379,6 +379,14 @@ function currentRemoteMuted(playerSettings) {
   return Boolean(playerSettings?.is_muted);
 }
 
+function setRangeFillPercent(input, percent) {
+  if (!input) {
+    return;
+  }
+  const normalizedPercent = Math.max(0, Math.min(100, Number(percent || 0)));
+  input.style.setProperty("--range-fill-percent", `${normalizedPercent}%`);
+}
+
 function renderRemoteAvSyncControls(playbackMode, playerSettings) {
   if (!elements.remoteAvSyncPanel || !elements.remoteAvOffsetInput) {
     return;
@@ -397,6 +405,7 @@ function renderRemoteVolumeControls(playbackMode, playerSettings) {
   const volumePercent = currentRemoteVolumePercent(playerSettings);
   const isMuted = currentRemoteMuted(playerSettings);
   elements.remoteVolumeSlider.value = String(volumePercent);
+  setRangeFillPercent(elements.remoteVolumeSlider, volumePercent);
   elements.remoteVolumeValue.textContent = `${Math.round(volumePercent)}%`;
   elements.remoteVolumeMuteButton.textContent = isMuted ? "取消静音" : "静音";
   elements.remoteVolumeMuteButton.classList.toggle("is-muted", isMuted);
@@ -467,8 +476,12 @@ function renderPlayerControls(currentItem, playbackMode) {
   elements.playerControlPanel.classList.remove("hidden");
 
   elements.playerControlPanel.querySelectorAll("button[data-control-action]").forEach((button) => {
-    const isPending = button.dataset.controlAction === state.playerControlPendingAction;
-    button.disabled = !canControl || Boolean(state.playerControlPendingAction);
+    const action = button.dataset.controlAction || "";
+    const isPending = action === state.playerControlPendingAction;
+    const disabled = action === "next-track"
+      ? Boolean(state.playerControlPendingAction)
+      : !canControl || Boolean(state.playerControlPendingAction);
+    button.disabled = disabled;
     button.classList.toggle("is-pending", isPending);
   });
 
@@ -487,8 +500,8 @@ function renderPlayerControls(currentItem, playbackMode) {
     return;
   }
   elements.playerControlHint.textContent = isPaused
-    ? "当前已暂停，可以恢复播放或前后跳转。"
-    : "当前正在播放，可以暂停或前后跳转。";
+    ? "当前已暂停，可以恢复播放、前后跳转，或直接切歌。"
+    : "当前正在播放，可以暂停、前后跳转，或直接切歌。";
 }
 
 function renderListHeader(playlist, history) {
@@ -743,6 +756,24 @@ async function sendPlayerControl(action, deltaSeconds = 0) {
   renderPlayerControls(state.data?.current_item, state.data?.playback_mode);
 }
 
+async function sendPlayerNext() {
+  if (!state.data?.current_item) {
+    return;
+  }
+  try {
+    state.playerControlPendingAction = "next-track";
+    renderPlayerControls(state.data?.current_item, state.data?.playback_mode);
+    state.data = await apiPost("/api/player/next");
+    setFormMessage("已切到下一首。");
+    render();
+  } catch (error) {
+    setFormMessage(error.message, true);
+    await fetchState().catch(() => {});
+  }
+  state.playerControlPendingAction = "";
+  renderPlayerControls(state.data?.current_item, state.data?.playback_mode);
+}
+
 function queueNoteText() {
   return "";
 }
@@ -840,6 +871,7 @@ elements.remoteAvOffsetInput?.addEventListener("keydown", async (event) => {
 });
 
 elements.remoteVolumeSlider?.addEventListener("input", async (event) => {
+  setRangeFillPercent(event.target, event.target.value);
   await setRemoteVolumeSettings({
     volumePercent: event.target.value,
     isMuted: currentRemoteMuted(state.data?.player_settings),
@@ -905,6 +937,10 @@ elements.playerControlPanel.addEventListener("click", async (event) => {
     return;
   }
   const action = button.dataset.controlAction || "";
+  if (action === "next-track") {
+    await sendPlayerNext();
+    return;
+  }
   const deltaSeconds = Number(button.dataset.delta || "0");
   await sendPlayerControl(action, deltaSeconds);
 });
