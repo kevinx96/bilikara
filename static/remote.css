@@ -8,6 +8,7 @@
   --accent-deep: #8f311d;
   --accent-soft: rgba(202, 91, 60, 0.12);
   --green: #2d7c61;
+  --red: #b14545;
   --shadow: 0 18px 40px rgba(79, 56, 39, 0.12);
   --font-sans: "IBM Plex Sans", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
 }
@@ -239,10 +240,10 @@ h1 {
   gap: 10px;
 }
 
-.remote-shell.layout-mode-normal .search-panel,
-.remote-shell.layout-mode-normal .gatcha-panel,
-.remote-shell.layout-mode-normal #remote-av-sync-panel,
-.remote-shell.layout-mode-normal #remote-volume-panel {
+.remote-shell.layout-mode-basic .search-panel,
+.remote-shell.layout-mode-basic .gatcha-panel,
+.remote-shell.layout-mode-basic #remote-av-sync-panel,
+.remote-shell.layout-mode-basic #remote-volume-panel {
   display: none !important;
 }
 
@@ -735,6 +736,16 @@ select:disabled {
   color: var(--ink);
 }
 
+.primary-button:disabled,
+.secondary-button:disabled,
+.ghost-button:disabled,
+.toggle-button:disabled {
+  cursor: not-allowed;
+  background: rgba(109, 98, 88, 0.16);
+  color: var(--muted);
+  opacity: 0.62;
+}
+
 .message {
   min-height: 20px;
   font-size: 14px;
@@ -837,6 +848,17 @@ select:disabled {
 .gatcha-desc,
 .gatcha-label {
   color: var(--muted);
+}
+
+.gatcha-message {
+  min-height: 18px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--muted);
+}
+
+.gatcha-message.is-error {
+  color: var(--red);
 }
 
 #gatcha-candidate-title {

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from datetime import datetime
 import json
 import os
@@ -78,11 +79,17 @@ class CacheManager:
         self.item_activity_at: dict[str, float] = {}
         self.retry_requested_ids: set[str] = set()
         self.log_dir = LOG_DIR / "bbdown"
+        self.bbdown_login_process: subprocess.Popen[str] | None = None
+        self.bbdown_login_state = "idle"
+        self.bbdown_login_message = "未登录"
+        # self.bbdown_login_qr_text = ""
+        self.bbdown_login_qr_image = ""
         self.worker = threading.Thread(target=self._worker_loop, daemon=True)
         self.worker.start()
 
     def status(self, metrics: dict[str, Any] | None = None) -> dict:
         cache_metrics = metrics or self.cache_metrics()
+        login_status = self.bbdown_login_status()
         with self.lock:
             return {
                 "state": self.binary_state,
@@ -91,6 +98,8 @@ class CacheManager:
                 "max_cache_items": self.max_cache_items,
                 "cache_bytes": cache_metrics["total_bytes"],
                 "cached_items": cache_metrics["item_count"],
+                "logged_in": login_status["logged_in"],
+                "login": login_status,
             }
 
     def ffmpeg_status(self) -> dict[str, Any]:
@@ -101,6 +110,63 @@ class CacheManager:
                 "message": self.ffmpeg_message,
                 "path": str(FFMPEG_RUNTIME_PATH),
             }
+
+    def bbdown_login_status(self) -> dict[str, Any]:
+        logged_in = self._bbdown_data_path().exists()
+        with self.lock:
+            if logged_in:
+                state = "logged_in"
+                message = "BBDown 已登录"
+            else:
+                state = self.bbdown_login_state
+                message = self.bbdown_login_message
+            return {
+                "logged_in": logged_in,
+                "state": state,
+                "message": message,
+                "data_path": str(self._bbdown_data_path()),
+                # "qr_text": "" if logged_in else self.bbdown_login_qr_text,
+                "qr_image": "" if logged_in else self.bbdown_login_qr_image,
+            }
+
+    def start_bbdown_login(self, *, force_refresh_qr: bool = False) -> dict[str, Any]:
+        if self._bbdown_data_path().exists():
+            return self.bbdown_login_status()
+        process_to_stop: subprocess.Popen[str] | None = None
+        with self.lock:
+            if self.bbdown_login_process and self.bbdown_login_process.poll() is None and not force_refresh_qr:
+                return self.bbdown_login_status()
+            if self.bbdown_login_process and self.bbdown_login_process.poll() is None:
+                process_to_stop = self.bbdown_login_process
+                self.bbdown_login_process = None
+            self.bbdown_login_state = "starting"
+            self.bbdown_login_message = "正在启动 BBDown 登录"
+            # self.bbdown_login_qr_text = ""
+            self.bbdown_login_qr_image = ""
+        self._terminate_process(process_to_stop)
+        self._remove_bbdown_qr_image()
+        threading.Thread(target=self._bbdown_login_worker, daemon=True).start()
+        return self.bbdown_login_status()
+
+    def logout_bbdown(self) -> dict[str, Any]:
+        with self.lock:
+            process = self.bbdown_login_process
+            self.bbdown_login_process = None
+        self._terminate_process(process)
+        self._remove_bbdown_qr_image()
+        try:
+            self._bbdown_data_path().unlink(missing_ok=True)
+        except OSError as exc:
+            with self.lock:
+                self.bbdown_login_state = "failed"
+                self.bbdown_login_message = f"退出登录失败: {exc}"
+            return self.bbdown_login_status()
+        with self.lock:
+            self.bbdown_login_state = "idle"
+            self.bbdown_login_message = "未登录"
+            # self.bbdown_login_qr_text = ""
+            self.bbdown_login_qr_image = ""
+        return self.bbdown_login_status()
 
     def policy_snapshot(self, metrics: dict[str, Any] | None = None) -> dict[str, Any]:
         cache_metrics = metrics or self.cache_metrics()
@@ -1518,6 +1584,59 @@ class CacheManager:
         return str(target)
 
     @staticmethod
+    def _bbdown_data_path() -> Path:
+        return BB_DOWN_DIR / "BBDown.data"
+
+    @staticmethod
+    def _bbdown_qr_image_path() -> Path:
+        return BB_DOWN_DIR / "qrcode.png"
+
+    def _remove_bbdown_qr_image(self) -> None:
+        try:
+            self._bbdown_qr_image_path().unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    # @staticmethod
+    # def _extract_terminal_qr_text(output: str) -> str:
+    #     lines = [ANSI_ESCAPE_RE.sub("", line).rstrip() for line in str(output or "").splitlines()]
+    #     block_chars = ("█", "■", "▓", "▀", "▄")
+    #     qr_lines = [line for line in lines if any(char in line for char in block_chars)]
+    #     if len(qr_lines) < 8:
+    #         return ""
+    #     return "\n".join(qr_lines[-48:])
+
+    # @staticmethod
+    # def _terminal_qr_svg_data_url(qr_text: str) -> str:
+    #     lines = [line.rstrip() for line in str(qr_text or "").splitlines() if line.rstrip()]
+    #     if len(lines) < 8:
+    #         return ""
+
+    #     width = max(len(line) for line in lines)
+    #     cell = 4
+    #     cells_w = max(1, (width + 1) // 2)
+    #     cells_h = len(lines)
+    #     rects: list[str] = []
+    #     dark_chars = {"█", "■", "▓", "▀", "▄"}
+    #     for y, line in enumerate(lines):
+    #         padded = line.ljust(width)
+    #         for x in range(cells_w):
+    #             chunk = padded[x * 2 : x * 2 + 2]
+    #             if any(char in dark_chars for char in chunk):
+    #                 rects.append(f'<rect x="{x * cell}" y="{y * cell}" width="{cell}" height="{cell}"/>')
+
+    #     if not rects:
+    #         return ""
+
+    #     svg = (
+    #         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {cells_w * cell} {cells_h * cell}" '
+    #         f'shape-rendering="crispEdges"><rect width="100%" height="100%" fill="#fff"/>'
+    #         f'<g fill="#111">{"".join(rects)}</g></svg>'
+    #     )
+    #     encoded = base64.b64encode(svg.encode("utf-8")).decode("ascii")
+    #     return f"data:image/svg+xml;base64,{encoded}"
+
+    @staticmethod
     def _tool_process_env(binary_path: Path) -> dict[str, str]:
         env = os.environ.copy()
         path_entries = []
@@ -1697,6 +1816,91 @@ class CacheManager:
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait(timeout=5)
+
+    def _bbdown_login_worker(self) -> None:
+            try:
+                self._remove_bbdown_qr_image()
+                binary_path = self._ensure_bbdown()
+            except Exception as exc:  # noqa: BLE001
+                with self.lock:
+                    self.bbdown_login_state = "failed"
+                    self.bbdown_login_message = f"BBDown 不可用: {exc}"
+                return
+
+            command = [str(binary_path), "login"]
+            try:
+                process = subprocess.Popen(
+                    command,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL,
+                    text=True,
+                    encoding=SUBPROCESS_OUTPUT_ENCODING,
+                    errors="replace",
+                    bufsize=1,
+                    cwd=str(BB_DOWN_DIR),
+                    env=self._tool_process_env(binary_path),
+                    **self._hidden_process_kwargs(),
+                )
+            except OSError as exc:
+                with self.lock:
+                    self.bbdown_login_state = "failed"
+                    self.bbdown_login_message = f"启动 BBDown 登录失败: {exc}"
+                return
+
+            with self.lock:
+                self.bbdown_login_process = process
+                self.bbdown_login_state = "waiting"
+                self.bbdown_login_message = "请使用哔哩哔哩 App 扫码登录"
+
+            output_lines: list[str] = []
+            try:
+                assert process.stdout is not None
+                for raw_line in self._iter_output_messages(process.stdout):
+                    line = self._normalize_output_line(raw_line)
+                    if not line:
+                        continue
+                    output_lines.append(line)
+                    del output_lines[:-80]
+                    
+                    qr_image_path = self._bbdown_qr_image_path()
+                    qr_image = "" 
+                    
+                    try:
+                        if qr_image_path.stat().st_size > 0:
+                            with qr_image_path.open("rb") as image_file:
+                                encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
+                                qr_image = f"data:image/png;base64,{encoded_string}"
+                    except Exception:
+                        pass
+                    
+                    with self.lock:
+                        if self.bbdown_login_process is process:
+                            self.bbdown_login_qr_image = qr_image
+                    
+                    if self._bbdown_data_path().exists():
+                        break
+            finally:
+                if process.poll() is None and self._bbdown_data_path().exists():
+                    self._terminate_process(process)
+                return_code = process.poll()
+                if return_code is None:
+                    try:
+                        return_code = process.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        return_code = None
+                with self.lock:
+                    is_current_process = self.bbdown_login_process is process
+                    if is_current_process:
+                        self.bbdown_login_process = None
+                    if self._bbdown_data_path().exists():
+                        self._remove_bbdown_qr_image()
+                        self.bbdown_login_state = "logged_in"
+                        self.bbdown_login_message = "BBDown 已登录"
+                        self.bbdown_login_qr_image = ""
+                    elif is_current_process and self.bbdown_login_state not in {"failed", "idle"} and return_code not in (None, 0):
+                        self.bbdown_login_state = "failed"
+                        self.bbdown_login_message = "BBDown 登录失败，请重试"
 
     def _outside_window_message(self) -> str:
         if self.max_cache_items <= 0:

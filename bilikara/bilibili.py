@@ -10,7 +10,7 @@ import re
 import random
 import hashlib
 import time
-from .config import BILIBILI_HEADERS, COOKIE, GATCHA_UIDS, GATCHA_KEYWORDS
+from .config import BILIBILI_HEADERS, GATCHA_UIDS, GATCHA_KEYWORDS
 from dataclasses import dataclass
 from .models import PlaylistItem
 import bilikara.config as cfg  
@@ -36,6 +36,101 @@ _GATCHA_REQUEST_LOCK = threading.Lock()
 _GATCHA_LAST_REQUEST_AT = 0.0
 _GATCHA_CACHE_FILE = cfg.DATA_DIR / "gatcha_cache.json"
 GATCHA_RETRY_DELAY_SECONDS = 5
+MISSING_BILIBILI_COOKIE_MESSAGE = "请登录 Bilibili 账号或填写 SESSDATA 和 bili_jct"
+_COOKIE_REQUIRED_KEYS = {"sessdata", "bili_jct"}
+_COOKIE_PREFERRED_ORDER = (
+    "SESSDATA",
+    "bili_jct",
+    "DedeUserID",
+    "DedeUserID__ckMd5",
+    "sid",
+    "buvid3",
+    "buvid4",
+    "b_nut",
+    "bili_ticket",
+    "bili_ticket_expires",
+    "CURRENT_FNVAL",
+    "CURRENT_QUALITY",
+)
+
+
+def _cookie_pair_name(name: object) -> str:
+    normalized = str(name or "").strip()
+    if normalized.lower() == "sessdata":
+        return "SESSDATA"
+    if normalized.lower() == "bili_jct":
+        return "bili_jct"
+    return normalized
+
+
+def _collect_cookie_pairs(payload: object, pairs: dict[str, str]) -> None:
+    if isinstance(payload, dict):
+        lower_keys = {str(key).lower(): key for key in payload}
+        if "name" in lower_keys and "value" in lower_keys:
+            name = _cookie_pair_name(payload.get(lower_keys["name"]))
+            value = str(payload.get(lower_keys["value"]) or "").strip()
+            if name and value:
+                pairs[name] = value
+        for key, value in payload.items():
+            name = _cookie_pair_name(key)
+            if name and isinstance(value, (str, int, float)) and name.lower() in {
+                preferred.lower() for preferred in _COOKIE_PREFERRED_ORDER
+            }:
+                normalized_value = str(value or "").strip()
+                if normalized_value:
+                    pairs[name] = normalized_value
+            _collect_cookie_pairs(value, pairs)
+        return
+
+    if isinstance(payload, list):
+        for item in payload:
+            _collect_cookie_pairs(item, pairs)
+        return
+
+    if isinstance(payload, str):
+        for match in re.finditer(r"([A-Za-z0-9_]+)=([^;\s]+)", payload):
+            name = _cookie_pair_name(match.group(1))
+            value = match.group(2).strip()
+            if name and value:
+                pairs[name] = value
+
+
+def _format_cookie_pairs(pairs: dict[str, str]) -> str:
+    normalized_keys = {key.lower() for key in pairs}
+    if not _COOKIE_REQUIRED_KEYS.issubset(normalized_keys):
+        return ""
+
+    ordered_names: list[str] = []
+    for preferred in _COOKIE_PREFERRED_ORDER:
+        for key in pairs:
+            if key.lower() == preferred.lower() and key not in ordered_names:
+                ordered_names.append(key)
+                break
+    ordered_names.extend(sorted(key for key in pairs if key not in ordered_names))
+    return "; ".join(f"{name}={pairs[name]}" for name in ordered_names)
+
+
+def cookie_from_bbdown_data() -> str:
+    data_path = cfg.BB_DOWN_DIR / "BBDown.data"
+    if not data_path.exists():
+        return ""
+
+    try:
+        raw_text = data_path.read_text(encoding="utf-8-sig", errors="replace")
+    except OSError:
+        return ""
+
+    pairs: dict[str, str] = {}
+    try:
+        payload = json.loads(raw_text)
+    except json.JSONDecodeError:
+        payload = raw_text
+    _collect_cookie_pairs(payload, pairs)
+    return _format_cookie_pairs(pairs)
+
+
+def effective_bilibili_cookie() -> str:
+    return cookie_from_bbdown_data() or str(cfg.COOKIE or "").strip()
 
 @dataclass
 class VideoReference:
@@ -208,6 +303,9 @@ def _fetch_gatcha_videos_for_uid(
 
 
 def refresh_gatcha_cache() -> dict:
+    if not effective_bilibili_cookie():
+        raise BilibiliError(MISSING_BILIBILI_COOKIE_MESSAGE)
+
     with _GATCHA_CACHE_LOCK:
         cache_payload = _load_gatcha_cache()
 
@@ -293,8 +391,12 @@ def search_gatcha_cache(query: str, *, limit: int = 30) -> list[dict]:
     if not normalized_query:
         return []
 
+    local_candidates = _local_gatcha_candidates()
+    if not local_candidates and not effective_bilibili_cookie():
+        raise BilibiliError(MISSING_BILIBILI_COOKIE_MESSAGE)
+
     results: list[dict] = []
-    for entry in _local_gatcha_candidates():
+    for entry in local_candidates:
         title = str(entry.get("title") or "")
         if normalized_query not in title.lower():
             continue
@@ -314,8 +416,10 @@ def search_gatcha_cache(query: str, *, limit: int = 30) -> list[dict]:
 
 def request_json(url: str) -> dict:
     headers = dict(BILIBILI_HEADERS)
-    if cfg.COOKIE:                          
-        headers["Cookie"] = cfg.COOKIE
+    headers.pop("Cookie", None)
+    cookie = effective_bilibili_cookie()
+    if cookie:
+        headers["Cookie"] = cookie
     else:
         print("Warning: [bilikara] COOKIE 变量为空，API 将以游客身份访问。")
     request = urllib.request.Request(url, headers=headers)
@@ -699,7 +803,9 @@ def get_cached_wbi_keys():
 def fetch_gatcha_candidate() -> dict | None:
     candidates_by_uid = _local_gatcha_candidates_by_uid()
     if not candidates_by_uid:
-        raise BilibiliError("请填写gatcha所需cookie")
+        if not effective_bilibili_cookie():
+            raise BilibiliError(MISSING_BILIBILI_COOKIE_MESSAGE)
+        raise BilibiliError("本地稿件缓存还没准备好，请稍后再试")
 
     chosen_mid = random.choice(list(candidates_by_uid.keys()))
     chosen = random.choice(candidates_by_uid[chosen_mid])

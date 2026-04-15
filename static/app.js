@@ -1,6 +1,7 @@
 const pollIntervalMs = 1000;
 const bannerAutoHideMs = 5000;
 const stalledRetrySeconds = 5;
+const gatchaCooldownMs = 15000;
 const localPlayerSyncIntervalMs = 120;
 const audioVariantSwitchDebounceMs = 350;
 const maxAvOffsetMs = 5000;
@@ -33,6 +34,11 @@ const state = {
   backupBannerShown: false,
   backupBannerDismissed: false,
   backupBannerTimer: null,
+  backupBannerCountdownTimer: null,
+  backupBannerDeadline: 0,
+  backupBannerRemainingMs: bannerAutoHideMs,
+  backupBannerPaused: false,
+  backupDismissHover: false,
   localAdvanceInFlight: false,
   localShouldBePlaying: false,
   localSeekResumePending: false,
@@ -49,18 +55,32 @@ const state = {
   bindingIntent: null,
   retryActivityById: {},
   gatchaCandidate: null,
-  layoutMode: "hardcore",
+  gatchaCooldownUntil: 0,
+  gatchaCooldownTimer: null,
+  bbdownLoginRequesting: false,
+  layoutMode: "full",
 };
 
 const elements = {
   appShell: document.getElementById("app-shell"),
-  bbdownStatus: document.getElementById("bbdown-status"),
+  serviceStatusIndicator: document.getElementById("service-status-indicator"),
+  playbackModeSummary: document.getElementById("playback-mode-summary"),
+  playbackModeCurrent: document.getElementById("playback-mode-current"),
   cacheChipMeta: document.getElementById("cache-chip-meta"),
   cacheSettings: document.getElementById("cache-settings"),
   cacheSettingsToggle: document.getElementById("cache-settings-toggle"),
   cachePanel: document.getElementById("cache-panel"),
   cacheUsageDetail: document.getElementById("cache-usage-detail"),
-  ffmpegStatusHint: document.getElementById("ffmpeg-status-hint"),
+  bbdownStatusRow: document.getElementById("bbdown-status-row"),
+  bbdownLoginButton: document.getElementById("bbdown-login-button"),
+  bbdownLoginPanel: document.getElementById("bbdown-login-panel"),
+  bbdownLoginQrImage: document.getElementById("bbdown-login-qr-image"),
+  bbdownLoginQrText: document.getElementById("bbdown-login-qr-text"),
+  bbdownLoginMessage: document.getElementById("bbdown-login-message"),
+  bbdownLoginRefresh: document.getElementById("bbdown-login-refresh"),
+  ffmpegStatusRow: document.getElementById("ffmpeg-status-row"),
+  bbdownPanelStatusIndicator: document.getElementById("bbdown-panel-status-indicator"),
+  ffmpegPanelStatusIndicator: document.getElementById("ffmpeg-panel-status-indicator"),
   cacheLimitValue: document.getElementById("cache-limit-value"),
   cacheLimitSlider: document.getElementById("cache-limit-slider"),
   cacheLimitScale: document.getElementById("cache-limit-scale"),
@@ -132,6 +152,7 @@ const elements = {
   gatchaButton: document.getElementById("gatcha-button"),
   gatchaConfirmButton: document.getElementById("gatcha-confirm-button"),
   gatchaRetryButton: document.getElementById("gatcha-retry-button"),
+  gatchaMessage: document.getElementById("gatcha-message"),
   gatchaInitView: document.getElementById("gatcha-init-view"),
   gatchaResultView: document.getElementById("gatcha-result-view"),
   gatchaCandidateTitle: document.getElementById("gatcha-candidate-title"),
@@ -349,13 +370,16 @@ function hydrateLocalPreferences() {
 }
 
 function normalizeLayoutMode(value) {
-  return value === "normal" ? "normal" : "hardcore";
+  if (value === "basic" || value === "normal") {
+    return "basic";
+  }
+  return "full";
 }
 
 function renderLayoutMode() {
   const layoutMode = normalizeLayoutMode(state.layoutMode);
-  elements.appShell?.classList.toggle("layout-mode-normal", layoutMode === "normal");
-  elements.appShell?.classList.toggle("layout-mode-hardcore", layoutMode === "hardcore");
+  elements.appShell?.classList.toggle("layout-mode-basic", layoutMode === "basic");
+  elements.appShell?.classList.toggle("layout-mode-full", layoutMode === "full");
   elements.layoutModeSwitch?.querySelectorAll("button[data-layout-mode]").forEach((button) => {
     button.classList.toggle("active", button.dataset.layoutMode === layoutMode);
   });
@@ -500,7 +524,7 @@ function renderSearchResults(items) {
     button.type = "button";
     button.className = "next-button";
     button.dataset.url = String(item.url || "");
-    button.textContent = "Add";
+    button.textContent = "点歌";
 
     meta.append(title, url);
     row.append(meta, button);
@@ -509,7 +533,11 @@ function renderSearchResults(items) {
 }
 
 async function handleGatchaDraw() {
-  setFormMessage("正在连接 B 站寻找幸运投稿...");
+  if (gatchaCooldownRemainingSeconds() > 0) {
+    syncGatchaCooldownButtons();
+    return;
+  }
+  setGatchaMessage("正在连接 B 站寻找幸运投稿...");
   try {
     const response = await fetch("/api/gatcha/candidate", { headers: clientHeaders() });
     const payload = await response.json();
@@ -519,13 +547,55 @@ async function handleGatchaDraw() {
 
     state.gatchaCandidate = payload.data;
     elements.gatchaCandidateTitle.textContent = state.gatchaCandidate.title;
+    startGatchaCooldown();
     
     // 切换界面
     elements.gatchaInitView.classList.add("hidden");
     elements.gatchaResultView.classList.remove("hidden");
-    setFormMessage("运气不错！抽中了这首。");
+    setGatchaMessage("");
   } catch (error) {
-    setFormMessage(error.message, true);
+    setGatchaMessage(error.message, true);
+  }
+}
+
+function setGatchaMessage(message, isError = false) {
+  if (!elements.gatchaMessage) {
+    return;
+  }
+  elements.gatchaMessage.textContent = message || "";
+  elements.gatchaMessage.classList.toggle("is-error", Boolean(isError));
+}
+
+function gatchaCooldownRemainingSeconds() {
+  return Math.max(0, Math.ceil((state.gatchaCooldownUntil - Date.now()) / 1000));
+}
+
+function startGatchaCooldown() {
+  state.gatchaCooldownUntil = Date.now() + gatchaCooldownMs;
+  syncGatchaCooldownButtons();
+  if (state.gatchaCooldownTimer) {
+    clearInterval(state.gatchaCooldownTimer);
+  }
+  state.gatchaCooldownTimer = setInterval(() => {
+    syncGatchaCooldownButtons();
+    if (gatchaCooldownRemainingSeconds() <= 0) {
+      clearInterval(state.gatchaCooldownTimer);
+      state.gatchaCooldownTimer = null;
+    }
+  }, 250);
+}
+
+function syncGatchaCooldownButtons() {
+  const remainingSeconds = gatchaCooldownRemainingSeconds();
+  const coolingDown = remainingSeconds > 0;
+  const cooldownText = `等待 ${remainingSeconds}s`;
+  if (elements.gatchaButton) {
+    elements.gatchaButton.disabled = coolingDown;
+    elements.gatchaButton.textContent = coolingDown ? cooldownText : "试试运气";
+  }
+  if (elements.gatchaRetryButton) {
+    elements.gatchaRetryButton.disabled = coolingDown;
+    elements.gatchaRetryButton.textContent = coolingDown ? cooldownText : "重新再来";
   }
 }
 
@@ -563,10 +633,6 @@ function render() {
   renderSessionUsers(data.session_users || []);
   renderCacheSettings(data.bbdown, data.ffmpeg, data.cache_policy);
   renderRemoteAccess(data.remote_access);
-
-  elements.modeSwitch?.querySelectorAll(".mode-button").forEach((button) => {
-    button.classList.toggle("active", button.dataset.mode === data.playback_mode);
-  });
   renderLayoutMode();
 
   renderAudioVariantBar(currentItem, data.playback_mode);
@@ -819,14 +885,131 @@ function renderListHeader(playlist, history) {
 }
 
 function renderCacheSettings(bbdown, ffmpeg, cachePolicy) {
-  elements.bbdownStatus.textContent = formatBBDownStatus(bbdown);
-  elements.bbdownStatus.title = bbdown?.message || "";
+  syncToolIndicator(elements.serviceStatusIndicator, aggregateToolStatusState(bbdown, ffmpeg));
+  if (elements.playbackModeSummary) {
+    elements.playbackModeSummary.textContent = formatPlaybackMode(state.data?.playback_mode);
+  }
+  if (elements.playbackModeCurrent) {
+    elements.playbackModeCurrent.textContent = formatPlaybackMode(state.data?.playback_mode);
+  }
   elements.cacheChipMeta.textContent = formatCacheChipMeta(cachePolicy);
   elements.cacheUsageDetail.textContent = formatCacheUsage(cachePolicy);
-  elements.ffmpegStatusHint.textContent = formatFFmpegHint(ffmpeg);
+  syncToolIndicator(elements.bbdownPanelStatusIndicator, bbdown?.state);
+  syncToolIndicator(elements.ffmpegPanelStatusIndicator, ffmpeg?.state);
+  renderBBDownLogin(bbdown?.login || { logged_in: Boolean(bbdown?.logged_in) });
+  if (elements.bbdownStatusRow) {
+    elements.bbdownStatusRow.title = `BBDown ${formatBBDownHint(bbdown)}`;
+  }
+  if (elements.ffmpegStatusRow) {
+    elements.ffmpegStatusRow.title = `FFmpeg ${formatFFmpegHint(ffmpeg)}`;
+  }
 
   renderCacheSlider(cachePolicy);
   syncCachePanelVisibility();
+}
+
+function renderBBDownLogin(login) {
+  const loggedIn = Boolean(login?.logged_in);
+  if (elements.bbdownLoginButton) {
+    elements.bbdownLoginButton.classList.toggle("is-logged", loggedIn);
+    elements.bbdownLoginButton.classList.toggle("is-unlogged", !loggedIn);
+    elements.bbdownLoginButton.classList.remove("is-unknown");
+    const label = elements.bbdownLoginButton.querySelector(".bbdown-login-label");
+    if (label) {
+      label.textContent = loggedIn ? "已登录" : "未登录";
+    }
+    elements.bbdownLoginButton.title = loggedIn ? "点击退出 BBDown 登录" : "点击生成 BBDown 登录二维码";
+  }
+
+  elements.bbdownLoginPanel?.classList.toggle("hidden", loggedIn);
+  if (loggedIn) {
+    return;
+  }
+
+  const qrImage = String(login?.qr_image || "");
+  const qrText = String(login?.qr_text || "");
+  if (elements.bbdownLoginQrImage) {
+    elements.bbdownLoginQrImage.classList.toggle("hidden", !qrImage);
+    if (qrImage && elements.bbdownLoginQrImage.src !== qrImage) {
+      elements.bbdownLoginQrImage.src = qrImage;
+    } else if (!qrImage) {
+      elements.bbdownLoginQrImage.removeAttribute("src");
+    }
+  }
+  if (elements.bbdownLoginQrText) {
+    elements.bbdownLoginQrText.classList.toggle("hidden", Boolean(qrImage) || !qrText);
+    elements.bbdownLoginQrText.textContent = qrText;
+  }
+  if (elements.bbdownLoginMessage) {
+    elements.bbdownLoginMessage.textContent = login?.message || "正在准备二维码...";
+    elements.bbdownLoginMessage.classList.toggle("is-error", login?.state === "failed");
+  }
+  maybeStartBBDownLogin(login);
+}
+
+function maybeStartBBDownLogin(login, options = {}) {
+  if (!state.cacheSettingsOpen || state.bbdownLoginRequesting || login?.logged_in) {
+    return;
+  }
+  const force = Boolean(options.force);
+  const loginState = String(login?.state || "idle");
+  if (!force && (loginState === "starting" || loginState === "waiting")) {
+    return;
+  }
+  if (!force && loginState !== "idle") {
+    return;
+  }
+  startBBDownLogin({ force });
+}
+
+async function startBBDownLogin(options = {}) {
+  state.bbdownLoginRequesting = true;
+  try {
+    state.data = await apiPost("/api/bbdown/login/start", {
+      force: Boolean(options.force),
+    });
+    render();
+  } catch (error) {
+    setFormMessage(error.message, true);
+  } finally {
+    state.bbdownLoginRequesting = false;
+  }
+}
+
+function syncToolIndicator(indicator, state) {
+  if (!indicator) {
+    return;
+  }
+  const normalizedState = String(state || "idle");
+  indicator.classList.remove("is-ready", "is-failed", "is-loading", "is-pending");
+  indicator.textContent = "";
+  if (normalizedState === "ready") {
+    indicator.classList.add("is-ready");
+    indicator.textContent = "✓";
+  } else if (normalizedState === "failed") {
+    indicator.classList.add("is-failed");
+    indicator.textContent = "×";
+  } else if (normalizedState === "checking" || normalizedState === "installing" || normalizedState === "loading") {
+    indicator.classList.add("is-loading");
+  } else {
+    indicator.classList.add("is-pending");
+    indicator.textContent = "·";
+  }
+}
+
+function aggregateToolStatusState(bbdown, ffmpeg) {
+  const states = [bbdown?.state, ffmpeg?.state].map((value) => String(value || "idle"));
+  if (states.includes("failed")) {
+    return "failed";
+  }
+  if (states.every((stateValue) => stateValue === "ready")) {
+    return "ready";
+  }
+  return "loading";
+}
+
+function formatPlaybackMode(mode) {
+  return mode === "online" ? "在线外挂" : "本地缓存";
 }
 
 function renderCacheSlider(cachePolicy) {
@@ -854,9 +1037,12 @@ function renderCacheSlider(cachePolicy) {
   });
 }
 
-function syncCachePanelVisibility() {
+function syncCachePanelVisibility(options = {}) {
   elements.cacheSettingsToggle.setAttribute("aria-expanded", String(state.cacheSettingsOpen));
   elements.cachePanel.classList.toggle("hidden", !state.cacheSettingsOpen);
+  maybeStartBBDownLogin(state.data?.bbdown?.login, {
+    force: Boolean(options.forceLoginRefresh),
+  });
 }
 
 function renderQueueCurrent(currentItem) {
@@ -1950,52 +2136,31 @@ function ownerTooltipForEntry(entry) {
   return `UP主: ${ownerName}`;
 }
 
-function formatBBDownStatus(bbdown) {
+function formatBBDownHint(bbdown) {
   if (!bbdown) {
     return "未知";
   }
   const labelMap = {
-    idle: "空闲",
+    idle: "待准备",
     checking: "检查中",
+    installing: "更新中",
     ready: "已就绪",
     failed: "异常",
   };
-  const stateLabel = labelMap[bbdown.state] || bbdown.state || "未知";
-  if (bbdown.version) {
-    return `${stateLabel} · ${bbdown.version}`;
-  }
-  return stateLabel;
-}
-
-function formatFFmpegStatus(ffmpeg) {
-  if (!ffmpeg) {
-    return "未知";
-  }
-  const labelMap = {
-    idle: "空闲",
-    checking: "检查中",
-    ready: "已就绪",
-    failed: "异常",
-  };
-  const stateLabel = labelMap[ffmpeg.state] || ffmpeg.state || "未知";
-  if (ffmpeg.version) {
-    return `${stateLabel} · ${ffmpeg.version}`;
-  }
-  return stateLabel;
+  return labelMap[bbdown.state] || bbdown.state || "未知";
 }
 
 function formatFFmpegHint(ffmpeg) {
   if (!ffmpeg) {
-    return "FFmpeg 未知";
+    return "未知";
   }
   const labelMap = {
-    idle: "空闲",
+    idle: "待准备",
     checking: "检查中",
     ready: "已就绪",
     failed: "异常",
   };
-  const stateLabel = labelMap[ffmpeg.state] || ffmpeg.state || "未知";
-  return `FFmpeg ${stateLabel}`;
+  return labelMap[ffmpeg.state] || ffmpeg.state || "未知";
 }
 
 function formatCacheChipMeta(cachePolicy) {
@@ -2073,6 +2238,7 @@ function renderBackupBanner(backup, hasCurrentItem, queueLength, autoRestoredBac
   if (!backup?.available || !autoRestoredBackup) {
     clearBackupBannerTimer();
     elements.backupBanner.classList.add("hidden");
+    updateBackupDismissButton();
     return;
   }
 
@@ -2093,9 +2259,45 @@ function renderBackupBanner(backup, hasCurrentItem, queueLength, autoRestoredBac
 
 function startBackupBannerTimer() {
   clearBackupBannerTimer();
-  state.backupBannerTimer = window.setTimeout(() => {
-    dismissBackupBanner();
-  }, bannerAutoHideMs);
+  state.backupBannerPaused = false;
+  state.backupBannerRemainingMs = bannerAutoHideMs;
+  state.backupBannerDeadline = Date.now() + state.backupBannerRemainingMs;
+  updateBackupDismissButton();
+  startBackupBannerCountdown();
+}
+
+function startBackupBannerCountdown() {
+  clearBackupBannerCountdown();
+  state.backupBannerCountdownTimer = window.setInterval(() => {
+    if (state.backupBannerPaused) {
+      return;
+    }
+    state.backupBannerRemainingMs = Math.max(0, state.backupBannerDeadline - Date.now());
+    updateBackupDismissButton();
+    if (state.backupBannerRemainingMs <= 0) {
+      dismissBackupBanner();
+    }
+  }, 250);
+}
+
+function pauseBackupBannerTimer() {
+  if (state.backupBannerDismissed || state.backupBannerPaused) {
+    return;
+  }
+  state.backupBannerRemainingMs = Math.max(0, state.backupBannerDeadline - Date.now());
+  state.backupBannerPaused = true;
+  clearBackupBannerCountdown();
+  updateBackupDismissButton();
+}
+
+function resumeBackupBannerTimer() {
+  if (state.backupBannerDismissed || !state.backupBannerPaused) {
+    return;
+  }
+  state.backupBannerPaused = false;
+  state.backupBannerDeadline = Date.now() + state.backupBannerRemainingMs;
+  updateBackupDismissButton();
+  startBackupBannerCountdown();
 }
 
 function clearBackupBannerTimer() {
@@ -2103,12 +2305,36 @@ function clearBackupBannerTimer() {
     window.clearTimeout(state.backupBannerTimer);
     state.backupBannerTimer = null;
   }
+  clearBackupBannerCountdown();
+  state.backupBannerDeadline = 0;
+  state.backupBannerRemainingMs = bannerAutoHideMs;
+  state.backupBannerPaused = false;
+}
+
+function clearBackupBannerCountdown() {
+  if (state.backupBannerCountdownTimer) {
+    window.clearInterval(state.backupBannerCountdownTimer);
+    state.backupBannerCountdownTimer = null;
+  }
+}
+
+function updateBackupDismissButton() {
+  if (!elements.dismissBackupButton) {
+    return;
+  }
+  if (state.backupBannerDismissed || state.backupDismissHover) {
+    elements.dismissBackupButton.textContent = "×";
+    return;
+  }
+  const remainingSeconds = Math.max(1, Math.ceil(state.backupBannerRemainingMs / 1000));
+  elements.dismissBackupButton.textContent = `${remainingSeconds}`;
 }
 
 function dismissBackupBanner() {
   state.backupBannerDismissed = true;
   elements.backupBanner.classList.add("hidden");
   clearBackupBannerTimer();
+  updateBackupDismissButton();
 }
 
 function openConfirm(intent) {
@@ -2791,9 +3017,55 @@ elements.dismissBackupButton.addEventListener("click", () => {
   dismissBackupBanner();
 });
 
+elements.backupBanner.addEventListener("mouseenter", () => {
+  pauseBackupBannerTimer();
+});
+
+elements.backupBanner.addEventListener("mouseleave", () => {
+  resumeBackupBannerTimer();
+});
+
+elements.dismissBackupButton.addEventListener("mouseenter", () => {
+  state.backupDismissHover = true;
+  updateBackupDismissButton();
+});
+
+elements.dismissBackupButton.addEventListener("mouseleave", () => {
+  state.backupDismissHover = false;
+  updateBackupDismissButton();
+});
+
+elements.dismissBackupButton.addEventListener("focus", () => {
+  state.backupDismissHover = true;
+  updateBackupDismissButton();
+});
+
+elements.dismissBackupButton.addEventListener("blur", () => {
+  state.backupDismissHover = false;
+  updateBackupDismissButton();
+});
+
 elements.cacheSettingsToggle.addEventListener("click", () => {
   state.cacheSettingsOpen = !state.cacheSettingsOpen;
-  syncCachePanelVisibility();
+  syncCachePanelVisibility({ forceLoginRefresh: state.cacheSettingsOpen });
+});
+
+elements.bbdownLoginButton?.addEventListener("click", async () => {
+  const loggedIn = Boolean(state.data?.bbdown?.login?.logged_in || state.data?.bbdown?.logged_in);
+  if (!loggedIn) {
+    await startBBDownLogin({ force: true });
+    return;
+  }
+  try {
+    state.data = await apiPost("/api/bbdown/logout");
+    render();
+  } catch (error) {
+    setFormMessage(error.message, true);
+  }
+});
+
+elements.bbdownLoginRefresh?.addEventListener("click", async () => {
+  await startBBDownLogin({ force: true });
 });
 
 elements.cacheLimitSlider.addEventListener("input", (event) => {
@@ -2904,13 +3176,14 @@ elements.queueCurrentRetry.addEventListener("click", async () => {
   }
 });
 
-elements.modeSwitch.addEventListener("click", async (event) => {
-  const button = event.target.closest("button[data-mode]");
+elements.modeSwitch?.addEventListener("click", async (event) => {
+  const button = event.target.closest("button");
   if (!button) {
     return;
   }
+  const nextMode = state.data?.playback_mode === "online" ? "local" : "online";
   try {
-    state.data = await apiPost("/api/mode", { mode: button.dataset.mode });
+    state.data = await apiPost("/api/mode", { mode: nextMode });
     render();
   } catch (error) {
     setFormMessage(error.message, true);
@@ -3296,7 +3569,7 @@ elements.gatchaConfirmButton.addEventListener("click", async () => {
 
   const url = state.gatchaCandidate.url;
   const requesterName = selectedRequesterName();
-  setFormMessage("Nozomi power注入！");
+  setGatchaMessage("Nozomi power注入！");
   try {
     state.data = await submitAddRequest(url, "tail", { requesterName });
     setFormMessage(`点歌成功：${state.gatchaCandidate.title}`);
@@ -3336,7 +3609,7 @@ elements.gatchaConfirmButton.addEventListener("click", async () => {
       });
       return;
     }
-    setFormMessage(error.message, true);
+    setGatchaMessage(error.message, true);
   }
 });
 
@@ -3344,22 +3617,17 @@ elements.saveCookieButton.addEventListener("click", async () => {
   const sessdata = elements.cookieSessdata.value.trim();
   const jct = elements.cookieJct.value.trim();
 
-  if (!sessdata || !jct) {
-    setFormMessage("请填写完整的 SESSDATA 和 bili_jct", true);
-    return;
-  }
-
-  setFormMessage("正在更新 Cookie 配置...");
+  setGatchaMessage("正在更新 Cookie 配置...");
   try {
-    const result = await apiPost("/api/config/cookie", {
+    await apiPost("/api/config/cookie", {
       sessdata: sessdata,
       bili_jct: jct
     });
-    setFormMessage("Cookie 已更新,正在拉取稿件信息(第一次拉取稿件数量会影响拉取时间)");
+    setGatchaMessage("Cookie 已更新，正在拉取稿件信息（第一次拉取稿件数量会影响拉取时间）");
     elements.cookieSessdata.value = "";
     elements.cookieJct.value = "";
   } catch (error) {
-    setFormMessage(error.message, true);
+    setGatchaMessage(error.message, true);
   }
 });
 

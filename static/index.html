@@ -7,7 +7,7 @@
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
-    <div class="app-shell layout-mode-hardcore" id="app-shell">
+    <div class="app-shell layout-mode-full" id="app-shell">
       <section class="backup-banner hidden" id="backup-banner">
         <div class="backup-copy">
           <p class="backup-title">Auto Restore</p>
@@ -15,7 +15,7 @@
         </div>
         <div class="backup-actions">
           <button type="button" id="discard-backup-button" class="banner-action">清空备份</button>
-          <button type="button" id="dismiss-backup-button" class="banner-close" aria-label="关闭">x</button>
+          <button type="button" id="dismiss-backup-button" class="banner-close" aria-label="关闭">×</button>
         </div>
       </section>
 
@@ -67,21 +67,23 @@
           <div class="mode-control layout-control">
             <span class="control-label">切换布局</span>
             <div class="mode-switch" id="layout-mode-switch">
-              <button class="mode-button" data-layout-mode="normal">普通模式</button>
-              <button class="mode-button active" data-layout-mode="hardcore">硬核模式</button>
-            </div>
-          </div>
-          <div class="mode-control playback-control">
-            <span class="control-label">播放模式</span>
-            <div class="mode-switch" id="mode-switch">
-              <button class="mode-button active" data-mode="local">本地播放</button>
-              <button class="mode-button" data-mode="online">在线播放</button>
+              <button class="mode-button" data-layout-mode="basic">基础</button>
+              <button class="mode-button active" data-layout-mode="full">完整</button>
             </div>
           </div>
           <div class="status-chip" id="cache-settings">
             <button type="button" class="status-chip-toggle" id="cache-settings-toggle" aria-expanded="false">
-              <span class="control-label">BBDown</span>
-              <strong id="bbdown-status">检查中</strong>
+              <span class="status-chip-label-row">
+                <span class="control-label">服务设置</span>
+                <span
+                  class="tool-status-indicator is-loading"
+                  id="service-status-indicator"
+                  aria-hidden="true"
+                ></span>
+              </span>
+              <div class="service-mode-summary">
+                <span id="playback-mode-summary">本地缓存</span>
+              </div>
               <p class="cache-chip-meta" id="cache-chip-meta">缓存占用 0 MB</p>
             </button>
             <div class="cache-panel hidden" id="cache-panel">
@@ -92,7 +94,32 @@
                 </div>
                 <div class="cache-panel-side">
                   <p class="cache-panel-hint">关闭服务后会自动清空</p>
-                  <p class="cache-panel-hint cache-panel-tool-hint" id="ffmpeg-status-hint">FFmpeg 检查中</p>
+                  <div class="cache-panel-tool-list">
+                    <p id="bbdown-status-row">
+                      <span>BBDown</span>
+                      <button
+                        type="button"
+                        class="bbdown-login-badge is-unknown"
+                        id="bbdown-login-button"
+                      >
+                        <span class="bbdown-login-label">未登录</span>
+                        <span class="bbdown-login-hover-label">退出</span>
+                      </button>
+                      <span
+                        class="tool-status-indicator is-loading cache-panel-tool-indicator"
+                        id="bbdown-panel-status-indicator"
+                        aria-hidden="true"
+                      ></span>
+                    </p>
+                    <p id="ffmpeg-status-row">
+                      <span>FFmpeg</span>
+                      <span
+                        class="tool-status-indicator is-loading cache-panel-tool-indicator"
+                        id="ffmpeg-panel-status-indicator"
+                        aria-hidden="true"
+                      ></span>
+                    </p>
+                  </div>
                 </div>
               </div>
               <div class="cache-panel-row cache-panel-row-stack">
@@ -118,6 +145,32 @@
                     <span>4</span>
                     <span>5</span>
                   </div>
+                </div>
+              </div>
+              <div class="bbdown-login-panel hidden" id="bbdown-login-panel">
+                <div class="bbdown-login-copy">
+                  <p class="cache-panel-label">BBDown 登录</p>
+                  <!-- <p class="cache-panel-hint">使用哔哩哔哩 App 扫码后，BBDown 会生成本地 BBDown.data。</p> -->
+                </div>
+                <div class="bbdown-login-qr">
+                  <img id="bbdown-login-qr-image" class="bbdown-login-qr-image hidden" alt="BBDown 登录二维码" />
+                  <pre id="bbdown-login-qr-text" class="bbdown-login-qr-text hidden"></pre>
+                  <p id="bbdown-login-message" class="bbdown-login-message">正在准备二维码...</p>
+                </div>
+                <button type="button" class="toolbar-button bbdown-login-refresh" id="bbdown-login-refresh">
+                  重新生成二维码
+                </button>
+              </div>
+              <div class="cache-panel-row cache-panel-mode-row">
+                <div>
+                  <p class="cache-panel-label">播放模式</p>
+                  <p class="cache-panel-hint">⚠️在线外挂仅作为备用</p>
+                </div>
+                <div class="cache-mode-control">
+                  <span id="playback-mode-current">本地缓存</span>
+                  <button type="button" class="toolbar-button cache-mode-toggle" id="mode-switch">
+                    切换
+                  </button>
                 </div>
               </div>
             </div>
@@ -146,7 +199,7 @@
 
             <div class="player-frame" id="player-frame">
               <div class="empty-state">
-                <p>把 bilibili 视频链接加入列表后，这里会开始播放。</p>
+                <p>把 Bilibili 视频链接加入列表后，这里会开始播放。</p>
               </div>
             </div>
             <div class="audio-variant-bar hidden" id="audio-variant-bar"></div>
@@ -201,7 +254,7 @@
                 id="url-input"
                 name="url"
                 type="text"
-                placeholder="视频 URL / BV 号"
+                placeholder="输入 Bilibili 视频链接、BV 号或 av 号"
                 autocomplete="off"
               />
               <button type="submit">点歌</button>
@@ -266,6 +319,29 @@
                 </div>
               </div>
             </section>
+
+            <section class="list-card sub-card cookie-sub-card">
+              <div class="cookie-config-bar">
+                <div class="cookie-sub-card-head">
+                  <div>
+                    <p class="section-tag">Cookie Config</p>
+                    <h2>Cookie</h2>
+                  </div>
+                </div>
+                <div class="cookie-inputs">
+                  <div class="input-group">
+                    <label>SESSDATA</label>
+                    <input type="text" id="cookie-sessdata" placeholder="从浏览器获取的 SESSDATA">
+                  </div>
+                  <div class="input-group">
+                    <label>bili_jct</label>
+                    <input type="text" id="cookie-jct" placeholder="从浏览器获取的 bili_jct">
+                  </div>
+                  <button type="button" id="save-cookie-button" class="next-button">更新配置</button>
+                </div>
+                <!-- <p class="cookie-hint">配置将实时保存到后端，用于解决“试试运气”时的 412/101 错误。</p> -->
+              </div>
+            </section>
             
             <section class="gatcha-panel">
               <div class="request-head">
@@ -278,7 +354,8 @@
               <div id="gatcha-init-view" class="gatcha-content">
                 <div class="gatcha-icon">🎲</div>
                 <p class="gatcha-desc">从关注的投稿中随机抽取一首歌曲</p>
-                <button type="button" id="gatcha-button" class="next-button gatcha-main-btn">试试运气(cd15s)</button>
+                <button type="button" id="gatcha-button" class="next-button gatcha-main-btn">试试运气</button>
+                <p class="gatcha-message" id="gatcha-message" role="status"></p>
               </div>
 
               <div id="gatcha-result-view" class="gatcha-content hidden">
@@ -360,8 +437,7 @@
           </div>
           <form id="search-form" class="search-inputs">
             <div class="input-group">
-              <label>Title</label>
-              <input type="text" id="search-query" placeholder="搜索本地歌曲目录(需要登陆或者cookie)" autocomplete="off">
+              <input type="text" id="search-query" placeholder="搜索本地歌曲目录 (需要登录或者 cookie)" autocomplete="off">
             </div>
             <button type="submit" id="search-button" class="next-button">搜索</button>
           </form>
@@ -369,28 +445,6 @@
         </div>
       </section>
 
-      <section class="list-card sub-card cookie-sub-card">
-        <div class="cookie-config-bar">
-          <div class="cookie-sub-card-head">
-            <div>
-              <p class="section-tag">Cookie Config</p>
-              <h2>Cookie</h2>
-            </div>
-          </div>
-          <div class="cookie-inputs">
-            <div class="input-group">
-              <label>SESSDATA</label>
-              <input type="text" id="cookie-sessdata" placeholder="从浏览器获取的 SESSDATA">
-            </div>
-            <div class="input-group">
-              <label>bili_jct</label>
-              <input type="text" id="cookie-jct" placeholder="从浏览器获取的 bili_jct">
-            </div>
-            <button type="button" id="save-cookie-button" class="next-button">更新配置</button>
-          </div>
-          <p class="cookie-hint">配置将实时保存到后端，用于解决“试试运气”时的 412/101 错误。</p>
-        </div>
-      </section>
     </div>
 
     <!-- Templates -->
@@ -456,7 +510,7 @@
           </div>
         </div>
         <div class="history-actions">
-          <button data-action="history-tail">加入列表</button>
+          <button data-action="history-tail">点歌</button>
           <button data-action="history-next" class="secondary">顶歌</button>
         </div>
       </article>

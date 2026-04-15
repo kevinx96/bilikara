@@ -400,6 +400,55 @@ class BilibiliParserTest(unittest.TestCase):
         selected = select_matching_pages(pages, preferred_page=2)
         self.assertEqual([page.page for page in selected], [3])
 
+    def test_effective_cookie_prefers_bbdown_data(self):
+        with TemporaryDirectory() as temp_dir:
+            bbdown_dir = Path(temp_dir)
+            (bbdown_dir / "BBDown.data").write_text(
+                json.dumps(
+                    {
+                        "cookie_info": {
+                            "cookies": [
+                                {"name": "bili_jct", "value": "jct-from-bbdown"},
+                                {"name": "SESSDATA", "value": "sess-from-bbdown"},
+                                {"name": "DedeUserID", "value": "42"},
+                            ]
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with (
+                patch.object(bilibili_module.cfg, "BB_DOWN_DIR", bbdown_dir),
+                patch.object(bilibili_module.cfg, "COOKIE", "SESSDATA=manual; bili_jct=manual"),
+            ):
+                self.assertEqual(
+                    bilibili_module.effective_bilibili_cookie(),
+                    "SESSDATA=sess-from-bbdown; bili_jct=jct-from-bbdown; DedeUserID=42",
+                )
+
+    def test_effective_cookie_falls_back_to_manual_cookie(self):
+        with TemporaryDirectory() as temp_dir:
+            with (
+                patch.object(bilibili_module.cfg, "BB_DOWN_DIR", Path(temp_dir)),
+                patch.object(bilibili_module.cfg, "COOKIE", "SESSDATA=manual; bili_jct=manual"),
+            ):
+                self.assertEqual(
+                    bilibili_module.effective_bilibili_cookie(),
+                    "SESSDATA=manual; bili_jct=manual",
+                )
+
+    def test_gatcha_missing_cookie_message_when_cache_empty(self):
+        with (
+            patch.object(bilibili_module, "_local_gatcha_candidates_by_uid", return_value={}),
+            patch.object(bilibili_module, "effective_bilibili_cookie", return_value=""),
+        ):
+            with self.assertRaisesRegex(
+                bilibili_module.BilibiliError,
+                bilibili_module.MISSING_BILIBILI_COOKIE_MESSAGE,
+            ):
+                bilibili_module.fetch_gatcha_candidate()
+
     @patch("bilikara.bilibili.request_json")
     def test_fetch_video_item(self, mock_request_json):
         mock_request_json.return_value = {
