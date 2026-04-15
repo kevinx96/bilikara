@@ -1,5 +1,8 @@
 const pollIntervalMs = 1500;
 const audioVariantSwitchDebounceMs = 350;
+const storageKeys = {
+  layoutMode: "bilikara.remote.layout.mode",
+};
 
 const state = {
   clientId: createClientId(),
@@ -12,9 +15,12 @@ const state = {
   audioVariantSwitchUnlockAt: 0,
   audioVariantSwitchTimer: null,
   gatchaCandidate: null,
+  layoutMode: "hardcore",
 };
 
 const elements = {
+  remoteShell: document.getElementById("remote-shell"),
+  layoutModeSwitch: document.getElementById("layout-mode-switch"),
   currentTitle: document.getElementById("current-title"),
   currentRequester: document.getElementById("current-requester"),
   currentMeta: document.getElementById("current-meta"),
@@ -75,6 +81,51 @@ function requesterBadgeText(requesterName) {
 
 function selectedRequesterName() {
   return String(elements.requesterSelect?.value || "").trim();
+}
+
+function readLocalString(key, fallbackValue) {
+  try {
+    const rawValue = window.localStorage?.getItem(key);
+    return rawValue == null ? fallbackValue : String(rawValue);
+  } catch {
+    return fallbackValue;
+  }
+}
+
+function writeLocalPreference(key, value) {
+  try {
+    window.localStorage?.setItem(key, String(value));
+  } catch {
+    // Ignore storage failures and keep runtime behavior working.
+  }
+}
+
+function normalizeLayoutMode(value) {
+  return value === "normal" ? "normal" : "hardcore";
+}
+
+function hydrateLocalPreferences() {
+  state.layoutMode = normalizeLayoutMode(readLocalString(storageKeys.layoutMode, state.layoutMode));
+}
+
+function renderLayoutMode() {
+  const layoutMode = normalizeLayoutMode(state.layoutMode);
+  elements.remoteShell?.classList.toggle("layout-mode-normal", layoutMode === "normal");
+  elements.remoteShell?.classList.toggle("layout-mode-hardcore", layoutMode === "hardcore");
+  elements.layoutModeSwitch?.querySelectorAll("button[data-layout-mode]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.layoutMode === layoutMode);
+  });
+}
+
+function setLayoutMode(mode) {
+  const nextMode = normalizeLayoutMode(mode);
+  if (state.layoutMode === nextMode) {
+    renderLayoutMode();
+    return;
+  }
+  state.layoutMode = nextMode;
+  writeLocalPreference(storageKeys.layoutMode, nextMode);
+  renderLayoutMode();
 }
 
 function setFormMessage(message, isError = false) {
@@ -167,7 +218,7 @@ async function searchGatchaCache(query) {
   });
   const payload = await response.json();
   if (!response.ok || !payload.ok) {
-    throw new Error(payload.error || "Search failed");
+    throw new Error(payload.error || "搜索失败");
   }
   return Array.isArray(payload.data?.items) ? payload.data.items : [];
 }
@@ -184,7 +235,7 @@ function renderSearchResults(items) {
   if (!items.length) {
     const empty = document.createElement("div");
     empty.className = "search-empty";
-    empty.textContent = "No cached matches found.";
+    empty.textContent = "未找到缓存结果。";
     elements.searchResults.appendChild(empty);
     return;
   }
@@ -207,7 +258,7 @@ function renderSearchResults(items) {
     button.type = "button";
     button.className = "primary-button";
     button.dataset.url = String(item.url || "");
-    button.textContent = "Add";
+    button.textContent = "点歌";
 
     meta.append(title, url);
     row.append(meta, button);
@@ -216,19 +267,19 @@ function renderSearchResults(items) {
 }
 
 async function handleGatchaDraw() {
-  setFormMessage("Loading a random cached gatcha entry...");
+  setFormMessage("正在随机抽取一首歌曲...");
   try {
     const response = await fetch("/api/gatcha/candidate", { headers: clientHeaders() });
     const payload = await response.json();
     if (!response.ok || !payload.ok) {
-      throw new Error(payload.error || "Gatcha failed");
+      throw new Error(payload.error || "试试运气失败");
     }
 
     state.gatchaCandidate = payload.data;
     elements.gatchaCandidateTitle.textContent = state.gatchaCandidate.title;
     elements.gatchaInitView.classList.add("hidden");
     elements.gatchaResultView.classList.remove("hidden");
-    setFormMessage("Gatcha result ready.");
+    setFormMessage("已经抽到一首歌了。");
   } catch (error) {
     setFormMessage(error.message, true);
   }
@@ -250,6 +301,7 @@ function render() {
   renderQueue(Array.isArray(data.playlist) ? data.playlist : []);
   renderHistory(Array.isArray(data.history) ? data.history : []);
   syncListView();
+  renderLayoutMode();
 }
 
 function renderRequesterSelect(sessionUsers) {
@@ -391,7 +443,7 @@ function renderRemoteAvSyncControls(playbackMode, playerSettings) {
   if (!elements.remoteAvSyncPanel || !elements.remoteAvOffsetInput) {
     return;
   }
-  const isLocalMode = playbackMode === "local";
+  const isLocalMode = playbackMode === "local" && state.layoutMode === "hardcore";
   elements.remoteAvSyncPanel.classList.toggle("hidden", !isLocalMode);
   elements.remoteAvOffsetInput.value = String(currentRemoteAvOffsetMs(playerSettings));
 }
@@ -400,7 +452,7 @@ function renderRemoteVolumeControls(playbackMode, playerSettings) {
   if (!elements.remoteVolumePanel || !elements.remoteVolumeSlider || !elements.remoteVolumeMuteButton || !elements.remoteVolumeValue) {
     return;
   }
-  const isLocalMode = playbackMode === "local";
+  const isLocalMode = playbackMode === "local" && state.layoutMode === "hardcore";
   elements.remoteVolumePanel.classList.toggle("hidden", !isLocalMode);
   const volumePercent = currentRemoteVolumePercent(playerSettings);
   const isMuted = currentRemoteMuted(playerSettings);
@@ -688,12 +740,12 @@ async function addByUrl(url, position = "tail") {
     return;
   }
   if (!requesterName) {
-    setFormMessage("Please select a requester first.", true);
+    setFormMessage("请先选择点歌人。", true);
     return;
   }
 
   state.submitting = true;
-  setFormMessage("Adding selected song...");
+  setFormMessage("正在添加已选歌曲...");
   try {
     const result = await submitAddRequestWithDuplicateConfirm(url, position, requesterName);
     if (result.cancelled) {
@@ -706,7 +758,7 @@ async function addByUrl(url, position = "tail") {
     state.gatchaCandidate = null;
     elements.gatchaResultView.classList.add("hidden");
     elements.gatchaInitView.classList.remove("hidden");
-    setFormMessage("Song added.");
+    setFormMessage("点歌成功。");
     render();
   } catch (error) {
     setFormMessage(error.message, true);
@@ -806,16 +858,16 @@ elements.searchForm.addEventListener("submit", async (event) => {
   const query = String(elements.searchQuery.value || "").trim();
   if (!query) {
     hideSearchResults();
-    setFormMessage("Please enter a search keyword.", true);
+    setFormMessage("请输入搜索关键词。", true);
     return;
   }
 
   elements.searchButton.disabled = true;
-  setFormMessage("Searching local cache...");
+  setFormMessage("正在搜索本地目录...");
   try {
     const items = await searchGatchaCache(query);
     renderSearchResults(items);
-    setFormMessage(items.length ? `Found ${items.length} cached result(s).` : "No cached matches found.");
+    setFormMessage(items.length ? `找到 ${items.length} 条缓存结果。` : "未找到缓存结果。");
   } catch (error) {
     hideSearchResults();
     setFormMessage(error.message, true);
@@ -834,6 +886,14 @@ elements.searchResults.addEventListener("click", async (event) => {
 
 elements.addNextButton.addEventListener("click", async () => {
   await submitRequest("next");
+});
+
+elements.layoutModeSwitch?.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-layout-mode]");
+  if (!button) {
+    return;
+  }
+  setLayoutMode(button.dataset.layoutMode);
 });
 
 elements.refreshButton.addEventListener("click", async () => {
@@ -971,6 +1031,8 @@ window.addEventListener("pagehide", disconnectClient);
 window.addEventListener("beforeunload", disconnectClient);
 
 async function startPolling() {
+  hydrateLocalPreferences();
+  renderLayoutMode();
   try {
     await fetchState();
   } catch (error) {

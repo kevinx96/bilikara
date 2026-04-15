@@ -96,6 +96,50 @@ h1 {
   line-height: 1.5;
 }
 
+.hero-controls {
+  margin-top: 14px;
+}
+
+.mode-control {
+  display: grid;
+  gap: 8px;
+}
+
+.layout-control {
+  width: fit-content;
+}
+
+.mode-switch {
+  display: inline-flex;
+  width: fit-content;
+  padding: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.9);
+}
+
+.mode-button {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  padding: 9px 14px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition:
+    transform 0.18s ease,
+    background 0.18s ease,
+    color 0.18s ease;
+}
+
+.mode-button:hover {
+  transform: translateY(-1px);
+}
+
+.mode-button.active {
+  background: var(--accent);
+  color: white;
+}
+
 .panel-head {
   display: flex;
   justify-content: space-between;
@@ -150,6 +194,13 @@ h1 {
   margin-top: 14px;
   display: grid;
   gap: 10px;
+}
+
+.remote-shell.layout-mode-normal .search-panel,
+.remote-shell.layout-mode-normal .gatcha-panel,
+.remote-shell.layout-mode-normal #remote-av-sync-panel,
+.remote-shell.layout-mode-normal #remote-volume-panel {
+  display: none !important;
 }
 
 .remote-setting-panel {

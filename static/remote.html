@@ -8,11 +8,20 @@
     <link rel="stylesheet" href="/remote-queue.css" />
   </head>
   <body>
-    <main class="remote-shell">
+    <main class="remote-shell layout-mode-hardcore" id="remote-shell">
       <header class="hero-card">
         <p class="eyebrow">Mobile Request</p>
         <h1>bilikara 点歌台</h1>
         <p class="hero-copy">在同一个局域网里，用手机查看当前队列、继续点歌，也可以远程控制正在播放的视频。</p>
+        <div class="hero-controls">
+          <div class="mode-control layout-control">
+            <span class="panel-tag">切换布局</span>
+            <div class="mode-switch" id="layout-mode-switch">
+              <button type="button" class="mode-button" data-layout-mode="normal">普通模式</button>
+              <button type="button" class="mode-button active" data-layout-mode="hardcore">硬核模式</button>
+            </div>
+          </div>
+        </div>
       </header>
 
       <section class="panel now-playing-panel">
@@ -99,11 +108,11 @@
           <input
             id="search-query"
             type="text"
-            placeholder="Search cached titles"
+            placeholder="搜索本地歌曲目录(需要登陆或者cookie)"
             autocomplete="off"
           />
           <div class="action-row action-row-single">
-            <button type="submit" id="search-button" class="primary-button">Search</button>
+            <button type="submit" id="search-button" class="primary-button">搜索</button>
           </div>
         </form>
         <div id="search-results" class="search-results hidden"></div>
@@ -115,15 +124,15 @@
         </div>
         <div id="gatcha-init-view" class="gatcha-content">
           <div class="gatcha-icon">🎲</div>
-          <p class="gatcha-desc">Pick a random song from local cached gatcha entries.</p>
-          <button type="button" id="gatcha-button" class="primary-button">Try Gatcha</button>
+          <p class="gatcha-desc">从关注的投稿中随机抽取一首歌曲</p>
+          <button type="button" id="gatcha-button" class="primary-button">试试运气</button>
         </div>
         <div id="gatcha-result-view" class="gatcha-content hidden">
-          <p class="gatcha-label">Selected Result</p>
-          <h3 id="gatcha-candidate-title">Loading...</h3>
+          <p class="gatcha-label">运气不错，抽到了：</p>
+          <h3 id="gatcha-candidate-title">歌曲标题加载中...</h3>
           <div class="action-row">
-            <button type="button" id="gatcha-confirm-button" class="primary-button">Add</button>
-            <button type="button" id="gatcha-retry-button" class="secondary-button">Retry</button>
+            <button type="button" id="gatcha-confirm-button" class="primary-button">确定点歌</button>
+            <button type="button" id="gatcha-retry-button" class="secondary-button">重新再来</button>
           </div>
         </div>
       </section>
