@@ -1048,7 +1048,9 @@ class CacheManager:
         command.extend(["-map", "0:v:0"])
         for index in range(len(audio_files)):
             command.extend(["-map", f"{index + 1}:a:0"])
-        command.extend(["-c", "copy", "-movflags", "+faststart"])
+        # Browser playback is much more reliable with AAC audio in MP4 than
+        # with BBDown's original FLAC-in-MP4/M4A streams.
+        command.extend(["-c:v", "copy", "-c:a", "aac", "-ac", "2", "-b:a", "192k", "-movflags", "+faststart"])
         for index, (_page, _audio_file, label) in enumerate(audio_files):
             command.extend([f"-metadata:s:a:{index}", f"title={label}"])
             command.extend([f"-disposition:a:{index}", "default" if index == 0 else "0"])
@@ -1131,18 +1133,12 @@ class CacheManager:
         )
         audio_variants = []
         for index, (variant_id, label, path) in enumerate(variant_files):
-            raw_audio_file = audio_files[index][1] if index < len(audio_files) else None
-            raw_audio_url = (
-                self._build_media_url(str(raw_audio_file.relative_to(CACHE_DIR)))
-                if raw_audio_file is not None
-                else ""
-            )
             audio_variants.append(
                 {
                     "id": variant_id,
                     "label": label,
                     "media_url": self._build_media_url(str(path.relative_to(CACHE_DIR))),
-                    "audio_url": raw_audio_url,
+                    "audio_url": "",
                 }
             )
         existing_variant_id = str(item.selected_audio_variant_id or "").strip()
@@ -1199,8 +1195,14 @@ class CacheManager:
                 "0:v:0",
                 "-map",
                 "1:a:0",
-                "-c",
+                "-c:v",
                 "copy",
+                "-c:a",
+                "aac",
+                "-ac",
+                "2",
+                "-b:a",
+                "192k",
                 "-movflags",
                 "+faststart",
                 "-metadata:s:a:0",
