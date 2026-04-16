@@ -1177,11 +1177,8 @@ class CacheManager:
         video_file: Path,
         audio_files: list[tuple[int, Path, str]],
     ) -> list[tuple[str, str, Path]]:
-        if len(audio_files) <= 1:
-            if not audio_files:
-                return [("default", "Default", item_dir / "output" / "video.mp4")]
-            page, _audio_file, label = audio_files[0]
-            return [(self._variant_id(page, label, 0), label, item_dir / "output" / "video.mp4")]
+        if not audio_files:
+            raise DownloadCommandError("没有可用的音轨文件，无法生成音轨变体")
 
         variant_files: list[tuple[str, str, Path]] = []
         variants_dir = item_dir / "variants"
@@ -1191,6 +1188,7 @@ class CacheManager:
             variant_id = self._variant_id(page, label, index)
             variant_path = variants_dir / f"{variant_id}.mp4"
             variant_path.unlink(missing_ok=True)
+
             command = [
                 str(ffmpeg_path),
                 "-y",
@@ -1210,7 +1208,11 @@ class CacheManager:
                 f"title={label}",
                 str(variant_path),
             ]
-            self._append_log_line(log_path, f"[{self._log_timestamp()}] command: {json.dumps(command, ensure_ascii=False)}")
+            self._append_log_line(
+                log_path,
+                f"[{self._log_timestamp()}] command: {json.dumps(command, ensure_ascii=False)}",
+            )
+
             process = subprocess.run(
                 command,
                 capture_output=True,
@@ -1222,7 +1224,12 @@ class CacheManager:
                 **self._hidden_process_kwargs(),
             )
             if process.returncode != 0 or not variant_path.exists():
-                raise DownloadCommandError(process.stderr.strip() or process.stdout.strip() or f"生成音轨变体失败: {label}")
+                raise DownloadCommandError(
+                    process.stderr.strip()
+                    or process.stdout.strip()
+                    or f"生成音轨变体失败: {label}"
+                )
+
             self._record_item_activity(item.id)
             variant_files.append((variant_id, label, variant_path))
         return variant_files
@@ -1264,17 +1271,13 @@ class CacheManager:
 
     @staticmethod
     def _cache_start_message(item) -> str:
-        page_count = len(item.selected_pages or [])
-        if page_count > 1:
-            return f"正在缓存 1 路视频轨 + {page_count} 路音轨"
-        return "正在缓存视频"
+        page_count = max(1, len(item.selected_pages or []))
+        return f"正在缓存 1 路视频轨 + {page_count} 路音轨"
 
     @staticmethod
     def _ready_message(item) -> str:
-        page_count = len(item.selected_pages or [])
-        if page_count > 1:
-            return f"缓存完成，共 {page_count} 条音轨"
-        return "缓存完成"
+        page_count = max(1, len(item.selected_pages or []))
+        return f"缓存完成，共 {page_count} 条音轨"
 
     @staticmethod
     def _display_stage_message(stage_label: str, line: str, progress: float | None) -> str:

@@ -1186,24 +1186,26 @@ function availablePartEntriesForItem(item) {
   const durations = Array.isArray(item.available_durations) && item.available_durations.length
     ? item.available_durations
     : item.selected_durations;
-  if (!Array.isArray(pages) || !Array.isArray(parts) || pages.length <= 1) {
-    return [];
-  }
-  return pages
+
+  const normalizedPages = Array.isArray(pages) && pages.length
+    ? pages
+    : [Number(item.page || 1)];
+
+  return normalizedPages
     .map((page, index) => {
       const numericPage = Number(page || 0);
       if (!numericPage) {
         return null;
       }
-      const label = String(parts[index] || `P${numericPage}`).trim() || `P${numericPage}`;
+      const label = String(parts?.[index] || item.part_title || `P${numericPage}`).trim() || `P${numericPage}`;
       return {
         page: numericPage,
         label,
-        duration: Number(durations[index] || 0),
+        duration: Number(durations?.[index] || 0),
         id: variantIdForLabel(numericPage, label, index),
         bound: Array.isArray(item.selected_pages)
           ? item.selected_pages.some((selectedPage) => Number(selectedPage) === numericPage)
-          : false,
+          : numericPage === Number(item.page || 0),
       };
     })
     .filter(Boolean);
@@ -1253,18 +1255,17 @@ function selectedAudioVariantForItem(item) {
 
 function selectedMediaUrlForItem(item) {
   const selectedVariant = selectedAudioVariantForItem(item);
-  return selectedVariant?.media_url || item.local_media_url || "";
+  return String(selectedVariant?.media_url || "").trim();
 }
 
 function selectedVideoUrlForItem(item) {
-  return String(item?.video_media_url || item?.local_media_url || "").trim();
+  return String(item?.video_media_url || "").trim();
 }
 
 function selectedAudioUrlForItem(item) {
   const selectedVariant = selectedAudioVariantForItem(item);
-  return String(selectedVariant?.audio_url || selectedVariant?.media_url || "").trim();
+  return String(selectedVariant?.audio_url || "").trim();
 }
-
 function currentAvOffsetMs() {
   return Number(state.data?.player_settings?.av_offset_ms || 0);
 }
@@ -1610,15 +1611,15 @@ function renderAvSyncControls(playbackMode, playerSettings) {
 }
 
 function renderPlayer(currentItem, playbackMode) {
-  const selectedMediaUrl = currentItem ? selectedMediaUrlForItem(currentItem) : "";
   const selectedVideoUrl = currentItem ? selectedVideoUrlForItem(currentItem) : "";
   const selectedAudioUrl = currentItem ? selectedAudioUrlForItem(currentItem) : "";
   const hasSplitPlayback = Boolean(selectedVideoUrl && selectedAudioUrl);
+
   const signature = [
     currentItem ? currentItem.id : "none",
     playbackMode,
-    hasSplitPlayback ? selectedVideoUrl : selectedMediaUrl,
-    hasSplitPlayback ? selectedAudioUrl : "",
+    selectedVideoUrl,
+    selectedAudioUrl,
     currentItem ? currentItem.cache_status : "",
   ].join("|");
 
@@ -1634,16 +1635,17 @@ function renderPlayer(currentItem, playbackMode) {
     !state.pendingPlaybackRestore
     && playbackMode === "local"
     && currentItem
-    && (hasSplitPlayback || selectedMediaUrl)
+    && hasSplitPlayback
     && previousPlayerContext?.playbackMode === "local"
     && previousPlayerContext.itemId === currentItem.id
     && (
-      previousPlayerContext.mediaUrl !== selectedMediaUrl
-      || previousPlayerContext.videoUrl !== selectedVideoUrl
+      previousPlayerContext.videoUrl !== selectedVideoUrl
       || previousPlayerContext.audioUrl !== selectedAudioUrl
     )
   ) {
-    const currentVideo = elements.playerFrame.querySelector("video");
+    const currentVideo = elements.playerFrame.querySelector('video[data-player-role="video"]')
+      || elements.playerFrame.querySelector("video");
+
     if (currentVideo) {
       captureLocalPlayerPreferences();
       state.pendingPlaybackRestore = {
@@ -1658,11 +1660,11 @@ function renderPlayer(currentItem, playbackMode) {
   state.playerSignature = signature;
   state.playerContext = {
     itemId: currentItem ? currentItem.id : "",
-    mediaUrl: selectedMediaUrl,
     videoUrl: selectedVideoUrl,
     audioUrl: selectedAudioUrl,
     playbackMode,
   };
+
   captureLocalPlayerPreferences();
   teardownMountedPlayer();
 
@@ -1686,217 +1688,151 @@ function renderPlayer(currentItem, playbackMode) {
     return;
   }
 
-  if (hasSplitPlayback) {
+  if (!hasSplitPlayback) {
     elements.playerFrame.innerHTML = `
-      <video
-        data-player-role="video"
-        controls
-        controlsList="nofullscreen"
-        autoplay
-        playsinline
-        preload="metadata"
-        src="${escapeHtml(selectedVideoUrl)}"
-      ></video>
-      <audio
-        data-player-role="audio"
-        preload="auto"
-        src="${escapeHtml(selectedAudioUrl)}"
-      ></audio>
+      <div class="empty-state">
+        <p>当前歌曲正在准备独立音视频轨。</p>
+        <p class="empty-hint">${escapeHtml(currentItem.cache_message || "正在后台缓存")}</p>
+      </div>
     `;
-    const video = elements.playerFrame.querySelector('video[data-player-role="video"]');
-    const audio = elements.playerFrame.querySelector('audio[data-player-role="audio"]');
-    if (video && audio) {
-      applyStoredVolumeToSplitPlayer(video, audio);
-      const reportCurrentVideoStatus = () => {
-        reportPlayerStatus(currentItem.id, video);
-      };
-      let restoreApplied = false;
-      const maybeRestorePlayback = () => {
-        const pendingRestore = state.pendingPlaybackRestore;
-        if (
-          restoreApplied
-          || !pendingRestore
-          || pendingRestore.itemId !== currentItem.id
-          || pendingRestore.variantId !== selectedAudioVariantForItem(currentItem)?.id
-          || video.readyState < 1
-          || audio.readyState < 1
-        ) {
-          return;
-        }
-
-        restoreApplied = true;
-        if (Number.isFinite(pendingRestore.currentTime)) {
-          video.currentTime = clampMediaTime(video, pendingRestore.currentTime);
-        }
-        state.localShouldBePlaying = Boolean(pendingRestore.wasPlaying);
-        syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
-        if (pendingRestore.wasPlaying) {
-          video.play().catch(() => {});
-        }
-        state.pendingPlaybackRestore = null;
-        reportCurrentVideoStatus();
-      };
-
-      video.addEventListener("loadedmetadata", () => {
-        maybeRestorePlayback();
-        syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
-        reportCurrentVideoStatus();
-      });
-      audio.addEventListener("loadedmetadata", () => {
-        maybeRestorePlayback();
-        syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
-      });
-      video.addEventListener("play", () => {
-        state.localShouldBePlaying = true;
-        state.localSeekResumePending = false;
-        syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
-        reportCurrentVideoStatus();
-      });
-      video.addEventListener("pause", () => {
-        if (state.localSeekResumePending) {
-          return;
-        }
-        if (document.hidden && state.localShouldBePlaying) {
-          window.setTimeout(() => {
-            video.play().catch(() => {});
-            syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
-          }, 0);
-          return;
-        }
-        state.localShouldBePlaying = false;
-        if (!audio.paused) {
-          audio.pause();
-        }
-        reportCurrentVideoStatus();
-      });
-      video.addEventListener("seeking", () => {
-        state.localSeekResumePending = !video.paused || state.localShouldBePlaying;
-      });
-      video.addEventListener("seeked", () => {
-        syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
-        if (state.localSeekResumePending) {
-          video.play().catch(() => {});
-        }
-        state.localSeekResumePending = false;
-        reportCurrentVideoStatus();
-      });
-      video.addEventListener("ratechange", () => {
-        syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
-      });
-      video.addEventListener("volumechange", () => {
-        syncSplitPlayerVolumeFromVideo(video, audio);
-      });
-      video.addEventListener("ended", async () => {
-        state.localShouldBePlaying = false;
-        state.localSeekResumePending = false;
-        audio.pause();
-        reportCurrentVideoStatus();
-        await handleLocalPlaybackEnded();
-      });
-      audio.addEventListener("ended", () => {
-        syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
-      });
-      state.localPlayerSyncTimer = window.setInterval(() => {
-        syncSplitPlayer(video, audio, currentAvOffsetSeconds(), false);
-      }, localPlayerSyncIntervalMs);
-      window.setTimeout(() => {
-        maybeRestorePlayback();
-        syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
-        reportCurrentVideoStatus();
-      }, 0);
-    }
-    return;
-  }
-
-  if (selectedMediaUrl) {
-    elements.playerFrame.innerHTML = `
-      <video
-        controls
-        controlsList="nofullscreen"
-        autoplay
-        playsinline
-        preload="metadata"
-        src="${escapeHtml(selectedMediaUrl)}"
-      ></video>
-    `;
-    const video = elements.playerFrame.querySelector("video");
-    if (video) {
-      video.volume = state.localPlayerVolume;
-      video.muted = state.localPlayerMuted;
-      const reportCurrentVideoStatus = () => {
-        reportPlayerStatus(currentItem.id, video);
-      };
-      const pendingRestore = state.pendingPlaybackRestore;
-      if (
-        pendingRestore
-        && pendingRestore.itemId === currentItem.id
-        && pendingRestore.variantId === selectedAudioVariantForItem(currentItem)?.id
-      ) {
-        video.addEventListener("loadedmetadata", () => {
-          if (Number.isFinite(pendingRestore.currentTime)) {
-            video.currentTime = clampMediaTime(video, pendingRestore.currentTime);
-          }
-          if (pendingRestore.wasPlaying) {
-            video.play().catch(() => {});
-          }
-          state.pendingPlaybackRestore = null;
-          reportCurrentVideoStatus();
-        }, { once: true });
-      }
-      video.addEventListener("loadedmetadata", reportCurrentVideoStatus);
-      video.addEventListener("play", () => {
-        state.localShouldBePlaying = true;
-        state.localSeekResumePending = false;
-        reportCurrentVideoStatus();
-      });
-      video.addEventListener("pause", () => {
-        if (state.localSeekResumePending) {
-          return;
-        }
-        if (document.hidden && state.localShouldBePlaying) {
-          window.setTimeout(() => {
-            video.play().catch(() => {});
-          }, 0);
-          return;
-        }
-        state.localShouldBePlaying = false;
-        reportCurrentVideoStatus();
-      });
-      video.addEventListener("seeking", () => {
-        state.localSeekResumePending = !video.paused || state.localShouldBePlaying;
-      });
-      video.addEventListener("seeked", () => {
-        if (state.localSeekResumePending) {
-          video.play().catch(() => {});
-        }
-        state.localSeekResumePending = false;
-        reportCurrentVideoStatus();
-      });
-      video.addEventListener("volumechange", () => {
-        state.localPlayerVolume = Number.isFinite(video.volume)
-          ? Math.max(0, Math.min(1, Number(video.volume)))
-          : state.localPlayerVolume;
-        state.localPlayerMuted = Boolean(video.muted);
-        persistLocalVolumePreferences();
-        renderVolumeControls(state.data?.playback_mode || "local");
-      });
-      video.addEventListener("ended", async () => {
-        state.localShouldBePlaying = false;
-        state.localSeekResumePending = false;
-        reportCurrentVideoStatus();
-        await handleLocalPlaybackEnded();
-      });
-      window.setTimeout(reportCurrentVideoStatus, 0);
-    }
     return;
   }
 
   elements.playerFrame.innerHTML = `
-    <div class="empty-state">
-      <p>当前歌曲还没有完成本地缓存。</p>
-      <p class="empty-hint">${escapeHtml(currentItem.cache_message || "正在后台缓存")}</p>
-    </div>
+    <video
+      data-player-role="video"
+      controls
+      controlsList="nofullscreen"
+      autoplay
+      playsinline
+      preload="metadata"
+      src="${escapeHtml(selectedVideoUrl)}"
+    ></video>
+    <audio
+      data-player-role="audio"
+      preload="auto"
+      src="${escapeHtml(selectedAudioUrl)}"
+    ></audio>
   `;
+
+  const video = elements.playerFrame.querySelector('video[data-player-role="video"]');
+  const audio = elements.playerFrame.querySelector('audio[data-player-role="audio"]');
+
+  if (!video || !audio) {
+    return;
+  }
+
+  applyStoredVolumeToSplitPlayer(video, audio);
+
+  const reportCurrentVideoStatus = () => {
+    reportPlayerStatus(currentItem.id, video);
+  };
+
+  let restoreApplied = false;
+  const maybeRestorePlayback = () => {
+    const pendingRestore = state.pendingPlaybackRestore;
+    if (
+      restoreApplied
+      || !pendingRestore
+      || pendingRestore.itemId !== currentItem.id
+      || pendingRestore.variantId !== selectedAudioVariantForItem(currentItem)?.id
+      || video.readyState < 1
+      || audio.readyState < 1
+    ) {
+      return;
+    }
+
+    restoreApplied = true;
+    if (Number.isFinite(pendingRestore.currentTime)) {
+      video.currentTime = clampMediaTime(video, pendingRestore.currentTime);
+    }
+    state.localShouldBePlaying = Boolean(pendingRestore.wasPlaying);
+    syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
+    if (pendingRestore.wasPlaying) {
+      video.play().catch(() => {});
+    }
+    state.pendingPlaybackRestore = null;
+    reportCurrentVideoStatus();
+  };
+
+  video.addEventListener("loadedmetadata", () => {
+    maybeRestorePlayback();
+    syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
+    reportCurrentVideoStatus();
+  });
+
+  audio.addEventListener("loadedmetadata", () => {
+    maybeRestorePlayback();
+    syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
+  });
+
+  video.addEventListener("play", () => {
+    state.localShouldBePlaying = true;
+    state.localSeekResumePending = false;
+    syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
+    reportCurrentVideoStatus();
+  });
+
+  video.addEventListener("pause", () => {
+    if (state.localSeekResumePending) {
+      return;
+    }
+    if (document.hidden && state.localShouldBePlaying) {
+      window.setTimeout(() => {
+        video.play().catch(() => {});
+        syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
+      }, 0);
+      return;
+    }
+    state.localShouldBePlaying = false;
+    if (!audio.paused) {
+      audio.pause();
+    }
+    reportCurrentVideoStatus();
+  });
+
+  video.addEventListener("seeking", () => {
+    state.localSeekResumePending = !video.paused || state.localShouldBePlaying;
+  });
+
+  video.addEventListener("seeked", () => {
+    syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
+    if (state.localSeekResumePending) {
+      video.play().catch(() => {});
+    }
+    state.localSeekResumePending = false;
+    reportCurrentVideoStatus();
+  });
+
+  video.addEventListener("ratechange", () => {
+    syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
+  });
+
+  video.addEventListener("volumechange", () => {
+    syncSplitPlayerVolumeFromVideo(video, audio);
+  });
+
+  video.addEventListener("ended", async () => {
+    state.localShouldBePlaying = false;
+    state.localSeekResumePending = false;
+    audio.pause();
+    reportCurrentVideoStatus();
+    await handleLocalPlaybackEnded();
+  });
+
+  audio.addEventListener("ended", () => {
+    syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
+  });
+
+  state.localPlayerSyncTimer = window.setInterval(() => {
+    syncSplitPlayer(video, audio, currentAvOffsetSeconds(), false);
+  }, localPlayerSyncIntervalMs);
+
+  window.setTimeout(() => {
+    maybeRestorePlayback();
+    syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
+    reportCurrentVideoStatus();
+  }, 0);
 }
 
 function applyRemotePlayerControl(command, currentItem, playbackMode) {
