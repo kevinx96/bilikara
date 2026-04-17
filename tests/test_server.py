@@ -1,8 +1,9 @@
 import threading
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
-from bilikara.server import AppContext, run
+from bilikara.server import AppContext, BilikaraHandler, run
 
 
 class AppContextRemoteAccessTest(unittest.TestCase):
@@ -47,6 +48,27 @@ class RunDefaultsTest(unittest.TestCase):
 
         serve.assert_called_once()
         self.assertTrue(serve.call_args.kwargs["shutdown_on_last_client"])
+
+
+class PlaylistAddRequestTest(unittest.TestCase):
+    def test_add_requires_session_user_before_parsing_video(self):
+        handler = BilikaraHandler.__new__(BilikaraHandler)
+        context = SimpleNamespace(has_session_users=lambda: False)
+
+        with patch("bilikara.server.CONTEXT", context), patch(
+            "bilikara.server.fetch_video_item",
+            side_effect=AssertionError("should not parse video before user setup"),
+        ) as fetch_video:
+            with self.assertRaisesRegex(ValueError, "请先在服务端添加本场 KTV 用户"):
+                handler._handle_add(
+                    {
+                        "url": "https://www.bilibili.com/video/BV1xx411c7mD",
+                        "position": "tail",
+                        "requester_name": "",
+                    }
+                )
+
+        fetch_video.assert_not_called()
 
 
 if __name__ == "__main__":

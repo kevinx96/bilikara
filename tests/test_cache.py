@@ -272,6 +272,43 @@ class CacheManagerPolicyTest(unittest.TestCase):
         first_path = env["PATH"].split(os.pathsep)[0]
         self.assertEqual(first_path, str(ffmpeg_path.parent))
 
+    def test_audio_variant_ffmpeg_allows_flac_in_mp4_copy(self):
+        item_dir = self.cache_dir / "song-a"
+        item_dir.mkdir(parents=True, exist_ok=True)
+        video_file = item_dir / "video.mp4"
+        audio_file = item_dir / "audio.m4a"
+        log_path = Path(self.temp_dir.name) / "logs" / "song-a.log"
+        ffmpeg_path = Path(self.temp_dir.name) / "tools" / "ffmpeg"
+        video_file.write_bytes(b"video")
+        audio_file.write_bytes(b"audio")
+        captured_commands: list[list[str]] = []
+
+        class FakeCompletedProcess:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        def fake_run(command, **_kwargs):
+            captured_commands.append(command)
+            Path(command[-1]).write_bytes(b"variant")
+            return FakeCompletedProcess()
+
+        with patch("bilikara.cache.CACHE_DIR", self.cache_dir), patch("bilikara.cache.subprocess.run", fake_run):
+            manager = CacheManager(self.store, max_cache_items=3)
+            try:
+                manager._build_audio_variant_outputs(
+                    self.make_item("song-a"),
+                    ffmpeg_path,
+                    item_dir,
+                    log_path,
+                    video_file=video_file,
+                    audio_files=[(1, audio_file, "On vocal")],
+                )
+            finally:
+                manager.shutdown()
+
+        self.assertEqual(captured_commands[0][captured_commands[0].index("-strict") + 1], "-2")
+
     def test_start_bbdown_login_removes_stale_qr_image(self):
         bbdown_dir = Path(self.temp_dir.name) / "tools" / "bbdown"
         bbdown_dir.mkdir(parents=True, exist_ok=True)

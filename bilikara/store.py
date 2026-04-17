@@ -103,6 +103,10 @@ class PlaylistStore:
                 self._insert_cycle_item_unlocked(item)
             self._touch(persist_backup=True)
 
+    def has_session_users(self) -> bool:
+        with self.lock:
+            return bool(self.session_users)
+
     def remove_item(self, item_id: str) -> bool:
         with self.lock:
             if self.current_item and self.current_item.id == item_id:

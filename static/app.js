@@ -218,6 +218,23 @@ function selectedRequesterName() {
   return String(elements.requesterSelect?.value || "").trim();
 }
 
+function hasSessionUsers() {
+  return Array.isArray(state.data?.session_users) && state.data.session_users.length > 0;
+}
+
+function validatedRequesterNameForAdd(showMessage = setFormMessage) {
+  if (!hasSessionUsers()) {
+    showMessage("请先在服务端添加本场 KTV 用户", true);
+    return "";
+  }
+  const requesterName = selectedRequesterName();
+  if (!requesterName) {
+    showMessage("请先选择点歌人。", true);
+    return "";
+  }
+  return requesterName;
+}
+
 function createClientId() {
   if (window.crypto && typeof window.crypto.randomUUID === "function") {
     return window.crypto.randomUUID();
@@ -2628,15 +2645,12 @@ async function confirmBindingModal() {
 
 async function handleAdd(position, anchorPoint) {
   const url = elements.urlInput.value.trim();
-  const requesterName = selectedRequesterName();
-  console.log({
-    selectValue: elements.requesterSelect?.value,
-    selectOptions: [...(elements.requesterSelect?.options || [])].map((o) => o.value),
-    selectedRequesterName: selectedRequesterName(),
-    sessionUsers: state.data?.session_users,
-  });
   if (!url) {
     setFormMessage("请输入 B 站视频链接或 BV 号", true);
+    return;
+  }
+  const requesterName = validatedRequesterNameForAdd();
+  if (!requesterName) {
     return;
   }
 
@@ -2682,7 +2696,10 @@ async function handleAdd(position, anchorPoint) {
 }
 
 async function handleAddByUrl(url, position, anchorPoint) {
-  const requesterName = selectedRequesterName();
+  const requesterName = validatedRequesterNameForAdd();
+  if (!requesterName) {
+    return;
+  }
   setFormMessage("正在从历史记录加入列表...");
   try {
     state.data = await submitAddRequest(url, position, { requesterName });
@@ -3241,9 +3258,13 @@ elements.audioVariantBar.addEventListener("click", async (event) => {
     if (!page) {
       return;
     }
+    const requesterName = validatedRequesterNameForAdd(setAppMessage);
+    if (!requesterName) {
+      return;
+    }
     try {
       state.data = await submitAddRequest(currentItem.original_url || currentItem.resolved_url, "tail", {
-        requesterName: selectedRequesterName(),
+        requesterName,
         selectedVideoPage: page,
         selectedAudioPages: [page],
       });
@@ -3256,7 +3277,7 @@ elements.audioVariantBar.addEventListener("click", async (event) => {
           type: "duplicate-add",
           url: currentItem.original_url || currentItem.resolved_url,
           position: "tail",
-          requesterName: selectedRequesterName(),
+          requesterName,
           preserveInput: false,
           selectedVideoPage: page,
           selectedAudioPages: [page],
@@ -3595,7 +3616,10 @@ elements.gatchaConfirmButton.addEventListener("click", async () => {
   if (!state.gatchaCandidate) return;
 
   const url = state.gatchaCandidate.url;
-  const requesterName = selectedRequesterName();
+  const requesterName = validatedRequesterNameForAdd(setGatchaMessage);
+  if (!requesterName) {
+    return;
+  }
   setGatchaMessage("Nozomi power注入！");
   try {
     state.data = await submitAddRequest(url, "tail", { requesterName });

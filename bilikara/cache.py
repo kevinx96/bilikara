@@ -1074,6 +1074,8 @@ class CacheManager:
                 "copy",
                 "-movflags",
                 "+faststart",
+                "-strict",
+                "-2",
                 "-metadata:s:a:0",
                 f"title={label}",
                 str(variant_path),

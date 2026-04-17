@@ -108,6 +108,9 @@ class AppContext:
         self.store.add_item(item, position=position, requester_name=requester_name)
         self.cache_manager.sync_with_playlist()
 
+    def has_session_users(self) -> bool:
+        return self.store.has_session_users()
+
     def advance_to_next(self) -> None:
         self.store.advance_to_next()
         self.cache_manager.sync_with_playlist()
@@ -734,6 +737,8 @@ class BilikaraHandler(BaseHTTPRequestHandler):
         selected_video_page = raw_selected_video_page if isinstance(raw_selected_video_page, int) else None
         raw_selected_audio_pages = body.get("selected_audio_pages")
         selected_audio_pages = raw_selected_audio_pages if isinstance(raw_selected_audio_pages, list) else None
+        if not CONTEXT.has_session_users():
+            raise ValueError("请先在服务端添加本场 KTV 用户")
         item = fetch_video_item(
             url,
             selected_video_page=selected_video_page,
