@@ -163,8 +163,18 @@ class AppContext:
     def move_session_user_to_index(self, name: str, index: int) -> None:
         self.store.move_session_user_to_index(name, index)
 
-    def set_cache_limit(self, max_cache_items: int) -> None:
-        self.cache_manager.set_max_cache_items(max_cache_items)
+    def set_cache_policy(
+        self,
+        *,
+        max_cache_items: int | None = None,
+        video_quality: str | None = None,
+        audio_hires: bool | None = None,
+    ) -> None:
+        self.cache_manager.set_cache_policy(
+            max_cache_items=max_cache_items,
+            video_quality=video_quality,
+            audio_hires=audio_hires,
+        )
 
     def retry_cache_item(self, item_id: str) -> None:
         self.cache_manager.retry_item(item_id)
@@ -648,10 +658,22 @@ class BilikaraHandler(BaseHTTPRequestHandler):
                 self._write_json({"ok": True})
                 return
             if route == "/api/cache-policy":
-                max_cache_items = body.get("max_cache_items")
-                if not isinstance(max_cache_items, int):
+                max_cache_items = body.get("max_cache_items") if "max_cache_items" in body else None
+                video_quality = body.get("video_quality") if "video_quality" in body else None
+                audio_hires = body.get("audio_hires") if "audio_hires" in body else None
+                if max_cache_items is not None and not isinstance(max_cache_items, int):
                     raise ValueError("max_cache_items 必须是整数")
-                CONTEXT.set_cache_limit(max_cache_items)
+                if video_quality is not None and not isinstance(video_quality, str):
+                    raise ValueError("video_quality 必须是字符串")
+                if audio_hires is not None and not isinstance(audio_hires, bool):
+                    raise ValueError("audio_hires 必须是布尔值")
+                if max_cache_items is None and video_quality is None and audio_hires is None:
+                    raise ValueError("没有可更新的缓存策略")
+                CONTEXT.set_cache_policy(
+                    max_cache_items=max_cache_items,
+                    video_quality=video_quality,
+                    audio_hires=audio_hires,
+                )
                 self._write_json({"ok": True, "data": CONTEXT.snapshot()})
                 return
             if route == "/api/backup/restore":

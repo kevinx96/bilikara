@@ -30,6 +30,7 @@ const state = {
   historyRenderSignature: "",
   playlistEmptyRenderSignature: "",
   cacheSliderRenderSignature: "",
+  cachePolicyControlRenderSignature: "",
   playerFullscreenButtonRenderSignature: "",
   volumeControlsRenderSignature: "",
   queueCurrentRenderSignature: "",
@@ -42,6 +43,7 @@ const state = {
   listFlipTimer: null,
   cacheSettingsOpen: false,
   cacheLimitSaving: false,
+  cachePolicySaving: false,
   avOffsetSaving: false,
   avOffsetSaveSeq: 0,
   avOffsetEchoSuppressUntil: 0,
@@ -110,6 +112,8 @@ const elements = {
   cacheLimitValue: document.getElementById("cache-limit-value"),
   cacheLimitSlider: document.getElementById("cache-limit-slider"),
   cacheLimitScale: document.getElementById("cache-limit-scale"),
+  cacheQualitySelect: document.getElementById("cache-quality-select"),
+  cacheHiresCheckbox: document.getElementById("cache-hires-checkbox"),
   dataResetButton: document.getElementById("data-reset-button"),
   currentTitle: document.getElementById("current-title"),
   playerPanel: document.querySelector(".player-panel"),
@@ -1183,6 +1187,7 @@ function renderCacheSettings(bbdown, ffmpeg, cachePolicy) {
   setTextContent(elements.cacheChipMeta, cacheChipMeta);
   setTextContent(elements.cacheUsageDetail, cacheUsageDetail);
   renderCacheSlider(cachePolicy);
+  renderCachePolicyControls(cachePolicy);
   syncCachePanelVisibility();
 }
 
@@ -1331,6 +1336,63 @@ function renderCacheSlider(cachePolicy) {
     mark.classList.toggle("active", Number(choice) === currentValue);
     elements.cacheLimitScale.appendChild(mark);
   });
+}
+
+function renderCachePolicyControls(cachePolicy) {
+  const rawChoices = Array.isArray(cachePolicy?.video_quality_choices)
+    ? cachePolicy.video_quality_choices
+    : [];
+  const choices = rawChoices.length
+    ? rawChoices.map((choice) => {
+      if (typeof choice === "string") {
+        return { value: choice, label: choice };
+      }
+      return {
+        value: String(choice?.value || ""),
+        label: String(choice?.label || choice?.value || ""),
+      };
+    }).filter((choice) => choice.value)
+    : [
+      { value: "1080P 高码率", label: "1080P 高码率" },
+      { value: "1080P 高清", label: "1080P 高清" },
+      { value: "720P 高清", label: "720P 高清" },
+      { value: "480P 清晰", label: "480P 清晰" },
+      { value: "360P 流畅", label: "360P 流畅" },
+    ];
+  const currentQuality = String(cachePolicy?.video_quality || choices[0]?.value || "1080P 高码率");
+  const audioHires = Boolean(cachePolicy?.audio_hires);
+  const signature = JSON.stringify({
+    choices,
+    currentQuality,
+    audioHires,
+    saving: state.cachePolicySaving,
+  });
+
+  if (signature === state.cachePolicyControlRenderSignature) {
+    return;
+  }
+  state.cachePolicyControlRenderSignature = signature;
+
+  if (elements.cacheQualitySelect) {
+    const choicesSignature = JSON.stringify(choices);
+    if (elements.cacheQualitySelect.dataset.choicesSignature !== choicesSignature) {
+      elements.cacheQualitySelect.innerHTML = "";
+      choices.forEach((choice) => {
+        const option = document.createElement("option");
+        option.value = choice.value;
+        option.textContent = choice.label;
+        elements.cacheQualitySelect.appendChild(option);
+      });
+      elements.cacheQualitySelect.dataset.choicesSignature = choicesSignature;
+    }
+    elements.cacheQualitySelect.value = currentQuality;
+    elements.cacheQualitySelect.disabled = state.cachePolicySaving;
+  }
+
+  if (elements.cacheHiresCheckbox) {
+    elements.cacheHiresCheckbox.checked = audioHires;
+    elements.cacheHiresCheckbox.disabled = state.cachePolicySaving;
+  }
 }
 
 function syncCachePanelVisibility(options = {}) {
@@ -3282,6 +3344,27 @@ async function setCacheLimit(maxCacheItems) {
   }
 }
 
+async function setCachePolicyPreference(payload, successMessage) {
+  if (state.cachePolicySaving) {
+    return;
+  }
+  state.cachePolicySaving = true;
+  renderCachePolicyControls(state.data?.cache_policy);
+  try {
+    state.data = await apiPost("/api/cache-policy", payload);
+    setAppMessage(successMessage);
+    render();
+  } catch (error) {
+    setAppMessage(error.message, true);
+    render();
+  } finally {
+    state.cachePolicySaving = false;
+    if (state.data) {
+      renderCachePolicyControls(state.data.cache_policy);
+    }
+  }
+}
+
 async function setAvOffset(offsetMs) {
   if (state.avOffsetSaving) {
     return;
@@ -3529,6 +3612,28 @@ elements.cacheLimitSlider.addEventListener("input", (event) => {
 
 elements.cacheLimitSlider.addEventListener("change", async (event) => {
   await setCacheLimit(Number(event.target.value || "1"));
+});
+
+elements.cacheQualitySelect?.addEventListener("change", async (event) => {
+  const quality = String(event.target.value || "").trim();
+  if (!quality || quality === String(state.data?.cache_policy?.video_quality || "")) {
+    return;
+  }
+  await setCachePolicyPreference(
+    { video_quality: quality },
+    `默认清晰度已调整为 ${quality}。`,
+  );
+});
+
+elements.cacheHiresCheckbox?.addEventListener("change", async (event) => {
+  const audioHires = Boolean(event.target.checked);
+  if (audioHires === Boolean(state.data?.cache_policy?.audio_hires)) {
+    return;
+  }
+  await setCachePolicyPreference(
+    { audio_hires: audioHires },
+    audioHires ? "已启用 Hi-Res 音频优先。" : "已关闭 Hi-Res 音频优先。",
+  );
 });
 
 elements.avSyncPanel?.addEventListener("click", async (event) => {

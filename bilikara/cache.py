@@ -24,6 +24,7 @@ from .config import (
     BB_DOWN_RELEASE_API,
     BB_DOWN_VERSION_FILE,
     CACHE_DIR,
+    CACHE_POLICY_FILE,
     # COOKIE,
     FFMPEG_BUNDLED_PATH,
     FFMPEG_RUNTIME_PATH,
@@ -48,7 +49,21 @@ STARTF_USESHOWWINDOW = 0x00000001
 SW_HIDE = 0
 RETRY_REQUESTED_MESSAGE = "__retry_requested__"
 SUBPROCESS_OUTPUT_ENCODING = "gb18030" if os.name == "nt" else "utf-8"
-BB_DOWN_NON_4K_DFN_PRIORITY = "1080P 高码率,1080P 60帧,1080P 高清,720P 60帧,720P 高清,480P 清晰,360P 流畅"
+VIDEO_QUALITY_CHOICES = (
+    "8K 超高清",
+    "杜比视界",
+    "HDR 真彩",
+    "4K 超清",
+    "1080P 高码率",
+    "1080P 60帧",
+    "1080P 高清",
+    "720P 60帧",
+    "720P 高清",
+    "480P 清晰",
+    "360P 流畅",
+)
+DEFAULT_VIDEO_QUALITY = "1080P 60帧"
+DEFAULT_AUDIO_HIRES = True
 
 
 class CacheCancelledError(RuntimeError):
@@ -68,7 +83,9 @@ class CacheManager:
         on_bbdown_login_success: Callable[[], None] | None = None,
     ) -> None:
         self.store = store
-        self.max_cache_items = max(0, max_cache_items)
+        self.max_cache_items = self._bounded_cache_items(max_cache_items)
+        self.video_quality = DEFAULT_VIDEO_QUALITY
+        self.audio_hires = DEFAULT_AUDIO_HIRES
         self.on_bbdown_login_success = on_bbdown_login_success
         self.tasks: "queue.Queue[str]" = queue.Queue()
         self.pending_ids: set[str] = set()
@@ -93,6 +110,7 @@ class CacheManager:
         self.bbdown_login_message = "未登录"
         # self.bbdown_login_qr_text = ""
         self.bbdown_login_qr_image = ""
+        self._load_cache_policy()
         self.worker = threading.Thread(target=self._worker_loop, daemon=True)
         self.worker.start()
 
@@ -183,6 +201,12 @@ class CacheManager:
             return {
                 "max_cache_items": self.max_cache_items,
                 "choices": list(CACHE_LIMIT_CHOICES),
+                "video_quality": self.video_quality,
+                "video_quality_choices": [
+                    {"value": quality, "label": quality}
+                    for quality in VIDEO_QUALITY_CHOICES
+                ],
+                "audio_hires": self.audio_hires,
                 "clear_on_exit": True,
                 "usage_bytes": cache_metrics["total_bytes"],
                 "cached_item_count": cache_metrics["item_count"],
@@ -214,13 +238,91 @@ class CacheManager:
         return payload
 
     def set_max_cache_items(self, max_cache_items: int) -> int:
-        bounded = min(max(int(max_cache_items), CACHE_LIMIT_CHOICES[0]), CACHE_LIMIT_CHOICES[-1])
+        self.set_cache_policy(max_cache_items=max_cache_items)
         with self.lock:
-            if self.max_cache_items == bounded:
-                return bounded
-            self.max_cache_items = bounded
-        self.sync_with_playlist()
+            return self.max_cache_items
+
+    def set_cache_policy(
+        self,
+        *,
+        max_cache_items: int | None = None,
+        video_quality: str | None = None,
+        audio_hires: bool | None = None,
+    ) -> dict[str, Any]:
+        changed = False
+        cache_limit_changed = False
+        with self.lock:
+            if max_cache_items is not None:
+                bounded = self._bounded_cache_items(max_cache_items)
+                if self.max_cache_items != bounded:
+                    self.max_cache_items = bounded
+                    changed = True
+                    cache_limit_changed = True
+            if video_quality is not None:
+                normalized_quality = self._normalize_video_quality(video_quality)
+                if self.video_quality != normalized_quality:
+                    self.video_quality = normalized_quality
+                    changed = True
+            if audio_hires is not None:
+                normalized_hires = bool(audio_hires)
+                if self.audio_hires != normalized_hires:
+                    self.audio_hires = normalized_hires
+                    changed = True
+
+            if changed:
+                self._save_cache_policy_locked()
+
+        if cache_limit_changed:
+            self.sync_with_playlist()
+        return self.policy_snapshot()
+
+    def _load_cache_policy(self) -> None:
+        try:
+            payload = json.loads(CACHE_POLICY_FILE.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        if not isinstance(payload, dict):
+            return
+        with self.lock:
+            if "max_cache_items" in payload:
+                self.max_cache_items = self._bounded_cache_items(payload["max_cache_items"])
+            if "video_quality" in payload:
+                self.video_quality = self._normalize_video_quality(payload["video_quality"])
+            if "audio_hires" in payload:
+                self.audio_hires = bool(payload["audio_hires"])
+
+    def _save_cache_policy_locked(self) -> None:
+        payload = {
+            "max_cache_items": self.max_cache_items,
+            "video_quality": self.video_quality,
+            "audio_hires": self.audio_hires,
+        }
+        try:
+            CACHE_POLICY_FILE.parent.mkdir(parents=True, exist_ok=True)
+            temp_path = CACHE_POLICY_FILE.with_suffix(".tmp")
+            temp_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            temp_path.replace(CACHE_POLICY_FILE)
+        except OSError:
+            return
+
+    @staticmethod
+    def _bounded_cache_items(max_cache_items: int) -> int:
+        try:
+            value = int(max_cache_items)
+        except (TypeError, ValueError):
+            value = CACHE_LIMIT_CHOICES[0]
+        bounded = min(max(value, CACHE_LIMIT_CHOICES[0]), CACHE_LIMIT_CHOICES[-1])
         return bounded
+
+    @staticmethod
+    def _normalize_video_quality(video_quality: object) -> str:
+        value = str(video_quality or "").strip()
+        if value in VIDEO_QUALITY_CHOICES:
+            return value
+        return DEFAULT_VIDEO_QUALITY
 
     def cache_metrics(self) -> dict[str, Any]:
         item_bytes: dict[str, int] = {}
@@ -802,14 +904,14 @@ class CacheManager:
         page_url = self._page_url(item.resolved_url, page)
         target_dir = item_dir / f"{stream_kind}-p{page}"
         target_dir.mkdir(parents=True, exist_ok=True)
+        preference_args = self._bbdown_stream_preference_args(stream_kind)
 
         command = [
             str(binary_path),
             page_url,
             "-p",
             str(page),
-            "-q",
-            BB_DOWN_NON_4K_DFN_PRIORITY,
+            *preference_args,
             "--work-dir",
             str(target_dir),
             "--ffmpeg-path",
@@ -843,6 +945,25 @@ class CacheManager:
         if not stream_file:
             raise DownloadCommandError(f"{stage_label} 完成后未找到输出文件")
         return stream_file
+
+    def _bbdown_stream_preference_args(self, stream_kind: str) -> list[str]:
+        with self.lock:
+            video_quality = self.video_quality
+            audio_hires = self.audio_hires
+        if stream_kind == "video":
+            return ["-q", self._video_quality_priority(video_quality)]
+        if stream_kind == "audio" and not audio_hires:
+            # BBDown 1.6.x does not expose a direct "highest non-Hi-Res"
+            # selector. The closest safe fallback is to prefer the smaller
+            # audio stream when Hi-Res is disabled.
+            return ["--audio-ascending"]
+        return []
+
+    @staticmethod
+    def _video_quality_priority(video_quality: object) -> str:
+        normalized_quality = CacheManager._normalize_video_quality(video_quality)
+        start_index = VIDEO_QUALITY_CHOICES.index(normalized_quality)
+        return ",".join(VIDEO_QUALITY_CHOICES[start_index:])
 
     def _run_item_command(
         self,

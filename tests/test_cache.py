@@ -44,6 +44,9 @@ class CacheManagerPolicyTest(unittest.TestCase):
         temp_path = Path(self.temp_dir.name)
         self.cache_dir = temp_path / "cache"
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.cache_policy_file = temp_path / "cache_policy.json"
+        self.cache_policy_patcher = patch("bilikara.cache.CACHE_POLICY_FILE", self.cache_policy_file)
+        self.cache_policy_patcher.start()
         self.store = PlaylistStore(
             state_file=temp_path / "state.json",
             backup_file=temp_path / "playlist_backup.json",
@@ -51,6 +54,7 @@ class CacheManagerPolicyTest(unittest.TestCase):
         self.store.add_session_user("cache-test-user")
 
     def tearDown(self) -> None:
+        self.cache_policy_patcher.stop()
         self.temp_dir.cleanup()
 
     def make_item(self, item_id: str) -> PlaylistItem:
@@ -96,6 +100,40 @@ class CacheManagerPolicyTest(unittest.TestCase):
                 self.assertEqual(manager.set_max_cache_items(9), 5)
                 self.assertEqual(manager.max_cache_items, 5)
                 self.assertEqual(manager.policy_snapshot()["choices"], [1, 2, 3, 4, 5])
+            finally:
+                manager.shutdown()
+
+    def test_cache_policy_persists_quality_and_hires_preference(self):
+        with patch("bilikara.cache.CACHE_DIR", self.cache_dir):
+            manager = CacheManager(self.store, max_cache_items=3)
+            try:
+                snapshot = manager.set_cache_policy(
+                    video_quality="720P 高清",
+                    audio_hires=False,
+                )
+                self.assertEqual(snapshot["video_quality"], "720P 高清")
+                self.assertFalse(snapshot["audio_hires"])
+            finally:
+                manager.shutdown()
+
+            restored = CacheManager(self.store, max_cache_items=3)
+            try:
+                snapshot = restored.policy_snapshot()
+                self.assertEqual(snapshot["video_quality"], "720P 高清")
+                self.assertFalse(snapshot["audio_hires"])
+            finally:
+                restored.shutdown()
+
+    def test_bbdown_stream_preference_args_use_cache_policy(self):
+        with patch("bilikara.cache.CACHE_DIR", self.cache_dir):
+            manager = CacheManager(self.store, max_cache_items=3)
+            try:
+                manager.set_cache_policy(video_quality="720P 高清", audio_hires=False)
+                self.assertEqual(
+                    manager._bbdown_stream_preference_args("video"),
+                    ["-q", "720P 高清,480P 清晰,360P 流畅"],
+                )
+                self.assertEqual(manager._bbdown_stream_preference_args("audio"), ["--audio-ascending"])
             finally:
                 manager.shutdown()
 
