@@ -24,7 +24,7 @@ from .config import (
     BB_DOWN_RELEASE_API,
     BB_DOWN_VERSION_FILE,
     CACHE_DIR,
-    COOKIE,
+    # COOKIE,
     FFMPEG_BUNDLED_PATH,
     FFMPEG_RUNTIME_PATH,
     FFMPEG_PATH_OVERRIDE,
@@ -35,6 +35,7 @@ from .config import (
     MAX_CACHE_ITEMS,
     VENDOR_DIR,
 )
+from .bilibili import effective_bilibili_cookie
 from .store import PlaylistStore
 
 MEDIA_EXTENSIONS = {".mp4", ".mkv", ".webm", ".flv", ".m4v"}
@@ -294,6 +295,23 @@ class CacheManager:
                 persist_backup=False,
             )
             self._record_item_activity(item.id)
+
+    def clear_runtime_cache(self) -> None:
+        with self.lock:
+            process = self.active_process
+            self.pending_ids.clear()
+            self.desired_ids.clear()
+            self.retry_requested_ids.clear()
+            self.item_activity_at.clear()
+            self.active_process = None
+            self.active_item_id = None
+            while True:
+                try:
+                    self.tasks.get_nowait()
+                except queue.Empty:
+                    break
+        self._terminate_process(process)
+        self._clear_cache_root()
 
     def retry_item(self, item_id: str) -> None:
         item = self.store.get_item(item_id)
@@ -804,8 +822,9 @@ class CacheManager:
             "--skip-ai",
             "--video-only" if stream_kind == "video" else "--audio-only",
         ]
-        if COOKIE:
-            command.extend(["-c", COOKIE])
+        cookie = effective_bilibili_cookie()
+        if cookie:
+            command.extend(["-c", cookie])
 
         label = "视频轨" if stream_kind == "video" else "音轨"
         stage_label = f"下载{label} P{page}"

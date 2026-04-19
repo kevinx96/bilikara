@@ -38,7 +38,7 @@ class PlaylistStoreTest(unittest.TestCase):
     def test_default_mode_is_local(self):
         self.assertEqual(self.store.playback_mode, "local")
 
-    def test_av_offset_persists_in_state_file(self):
+    def test_av_offset_persists_in_player_state_file(self):
         self.store.set_av_offset_ms(230)
 
         restored_store = PlaylistStore(
@@ -49,8 +49,10 @@ class PlaylistStoreTest(unittest.TestCase):
 
         self.assertEqual(self.store.snapshot()["player_settings"]["av_offset_ms"], 230)
         self.assertEqual(restored_store.av_offset_ms, 230)
+        self.assertFalse(self.state_file.exists())
+        self.assertTrue((self.state_file.parent / "player_state.json").exists())
 
-    def test_volume_settings_persist_in_state_file(self):
+    def test_volume_settings_persist_in_player_state_file(self):
         self.store.set_volume_percent(35)
         self.store.set_muted(True)
 
@@ -65,6 +67,49 @@ class PlaylistStoreTest(unittest.TestCase):
         self.assertTrue(snapshot["is_muted"])
         self.assertEqual(restored_store.volume_percent, 35)
         self.assertTrue(restored_store.is_muted)
+
+    def test_legacy_state_file_is_ignored_and_removed(self):
+        for name in ["player_state.json", "history.json", "session_users.json"]:
+            (self.state_file.parent / name).unlink(missing_ok=True)
+        legacy_payload = {
+            "playback_mode": "online",
+            "player_settings": {"av_offset_ms": 320, "volume_percent": 55, "is_muted": True},
+            "history": [
+                {
+                    "key": "song-a",
+                    "display_title": "legacy song",
+                    "original_url": "https://www.bilibili.com/video/BV1xx411c7mD",
+                    "resolved_url": "https://www.bilibili.com/video/BV1xx411c7mD",
+                    "title": "legacy song",
+                    "part_title": "P1",
+                    "requested_at": 1,
+                    "request_count": 2,
+                    "requester_name": "A",
+                }
+            ],
+            "session_users": ["A", "B"],
+            "updated_at": 1,
+        }
+        self.state_file.write_text(
+            json.dumps(legacy_payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+        restored_store = PlaylistStore(
+            state_file=self.state_file,
+            backup_file=self.backup_file,
+            session_archive_dir=self.session_archive_dir,
+        )
+
+        self.assertEqual(restored_store.playback_mode, "local")
+        self.assertEqual(restored_store.av_offset_ms, 0)
+        self.assertEqual(restored_store.volume_percent, 100)
+        self.assertFalse(restored_store.is_muted)
+        self.assertEqual(restored_store.history, [])
+        self.assertEqual(restored_store.session_users, [])
+        self.assertFalse(self.state_file.exists())
+        self.assertTrue((self.state_file.parent / "history.json").exists())
+        self.assertTrue((self.state_file.parent / "session_users.json").exists())
 
     def make_item(self, item_id: str, *, song_key: str | None = None) -> PlaylistItem:
         key = song_key or item_id
@@ -257,7 +302,7 @@ class PlaylistStoreTest(unittest.TestCase):
         self.assertTrue(changed)
         self.assertEqual(self.store.current_item.selected_audio_variant_id, "p2_off_vocal")
 
-    def test_history_restores_from_state_file(self):
+    def test_history_restores_from_history_state_file(self):
         self.add_item("a", requester_name="A", song_key="song-a")
         restored_store = PlaylistStore(
             state_file=self.state_file,
@@ -319,6 +364,27 @@ class PlaylistStoreTest(unittest.TestCase):
         self.assertTrue(self.backup_file.exists())
         self.assertTrue(self.store.discard_backup())
         self.assertFalse(self.store.backup_summary()["available"])
+        self.assertIsNone(self.store.current_item)
+        self.assertEqual(self.store.playlist, [])
+
+    def test_reset_runtime_data_keeps_gatcha_cache_and_played_sessions(self):
+        self.store.set_mode("online")
+        self.add_item("a", requester_name="A")
+        self.assertTrue(self.backup_file.exists())
+        gatcha_file = self.state_file.parent / "gatcha_cache.json"
+        gatcha_file.write_text("{}", encoding="utf-8")
+        played_file = self.session_archive_dir / "played-keep.json"
+        played_file.parent.mkdir(parents=True, exist_ok=True)
+        played_file.write_text("{}", encoding="utf-8")
+
+        self.store.reset_runtime_data()
+
+        self.assertTrue(gatcha_file.exists())
+        self.assertTrue(played_file.exists())
+        self.assertFalse(self.backup_file.exists())
+        self.assertEqual(self.store.playback_mode, "local")
+        self.assertEqual(self.store.history, [])
+        self.assertEqual(self.store.session_users, [])
 
     def test_add_requires_existing_session_user_selection(self):
         isolated_store = PlaylistStore(

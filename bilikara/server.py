@@ -240,7 +240,18 @@ class AppContext:
         discarded = self.store.discard_backup()
         if discarded:
             self.auto_restored_backup = False
+        self.cache_manager.sync_with_playlist()
         return discarded
+
+    def reset_runtime_data(self) -> None:
+        self.cache_manager.clear_runtime_cache()
+        self.store.reset_runtime_data()
+        self.auto_restored_backup = False
+        with self._player_control_lock:
+            self._player_control_ack_seq = self._player_control_seq
+            self._player_control_command = None
+        with self._player_status_lock:
+            self._player_status = None
 
     def bind_server(self, server: ThreadingHTTPServer, *, shutdown_on_last_client: bool) -> None:
         with self._client_lock:
@@ -650,6 +661,10 @@ class BilikaraHandler(BaseHTTPRequestHandler):
                 return
             if route == "/api/backup/discard":
                 CONTEXT.discard_backup()
+                self._write_json({"ok": True, "data": CONTEXT.snapshot()})
+                return
+            if route == "/api/data/reset":
+                CONTEXT.reset_runtime_data()
                 self._write_json({"ok": True, "data": CONTEXT.snapshot()})
                 return
             if route == "/api/client/disconnect":

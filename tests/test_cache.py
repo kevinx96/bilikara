@@ -325,6 +325,22 @@ class CacheManagerPolicyTest(unittest.TestCase):
             finally:
                 manager.shutdown()
 
+    def test_bbdown_logout_removes_data_file(self):
+        bbdown_dir = Path(self.temp_dir.name) / "tools" / "bbdown"
+        bbdown_dir.mkdir(parents=True, exist_ok=True)
+        data_path = bbdown_dir / "BBDown.data"
+        data_path.write_text("{}", encoding="utf-8")
+
+        with patch("bilikara.cache.CACHE_DIR", self.cache_dir), patch("bilikara.cache.BB_DOWN_DIR", bbdown_dir):
+            manager = CacheManager(self.store, max_cache_items=3)
+            try:
+                status = manager.logout_bbdown()
+            finally:
+                manager.shutdown()
+
+        self.assertFalse(data_path.exists())
+        self.assertFalse(status["logged_in"])
+
     def test_bbdown_login_success_triggers_callback(self):
         bbdown_dir = Path(self.temp_dir.name) / "tools" / "bbdown"
         bbdown_dir.mkdir(parents=True, exist_ok=True)

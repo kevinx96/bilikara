@@ -117,7 +117,7 @@ p {
   background: rgba(255, 250, 244, 0.96);
   box-shadow: var(--shadow);
   backdrop-filter: blur(16px);
-  z-index: 40;
+  z-index: 180;
 }
 
 .confirm-popover.hidden {
@@ -789,6 +789,11 @@ h2 {
   align-items: center;
 }
 
+.cache-panel-danger-row {
+  align-items: center;
+  padding-top: 2px;
+}
+
 .cache-mode-control {
   display: inline-flex;
   align-items: center;
@@ -804,17 +809,33 @@ h2 {
   white-space: nowrap;
 }
 
-.cache-mode-toggle {
+.cache-mode-toggle,
+.cache-data-reset-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   min-width: 0;
   padding: 7px 12px;
-  border-radius: 999px;
-  background: var(--accent);
-  color: white;
   font-size: 12px;
   font-weight: 700;
+  border-radius: 999px;
+}
+
+.cache-mode-toggle {
+  background: var(--accent);
+  color: white;
+}
+
+.cache-data-reset-button {
+  flex: 0 0 auto;
+  color: var(--red);
+  background: rgba(177, 69, 69, 0.08);
+}
+
+.cache-data-reset-button:hover,
+.cache-data-reset-button:focus-visible {
+  background: rgba(177, 69, 69, 0.14);
+  color: var(--red);
 }
 
 .cache-panel-value {

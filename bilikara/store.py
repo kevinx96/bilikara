@@ -26,6 +26,13 @@ class PlaylistStore:
     ) -> None:
         self.state_file = state_file
         self.backup_file = backup_file
+        self.player_state_file = self._split_state_path(state_file, "player_state.json", "player")
+        self.history_state_file = self._split_state_path(state_file, "history.json", "history")
+        self.session_users_state_file = self._split_state_path(
+            state_file,
+            "session_users.json",
+            "session-users",
+        )
         self.session_archive_dir = session_archive_dir or state_file.parent / "played_sessions"
         self.lock = threading.RLock()
         self.playback_mode = "local"
@@ -44,7 +51,7 @@ class PlaylistStore:
         )
         self.session_played: list[SessionPlayedEntry] = []
         self.updated_at = time.time()
-        self._restore_history_from_state()
+        self._restore_persistent_state()
         self._save_session()
 
     def snapshot(self) -> dict:
@@ -314,22 +321,7 @@ class PlaylistStore:
             current_item_payload = payload.get("current_item")
             playlist_payload = payload.get("playlist") or []
             if not current_item_payload and not playlist_payload:
-                history_payload = payload.get("history") or []
-                if history_payload:
-                    self.history = [
-                        HistoryEntry.from_dict(dict(entry))
-                        for entry in history_payload
-                        if isinstance(entry, dict)
-                    ]
-                self.av_offset_ms = self._load_av_offset_ms(payload)
-                self.volume_percent = self._load_volume_percent(payload)
-                self.is_muted = self._load_is_muted(payload)
-                self.session_users = self._load_session_users_from_payload(payload)
                 return False
-            self.playback_mode = str(payload.get("playback_mode") or "local")
-            self.av_offset_ms = self._load_av_offset_ms(payload)
-            self.volume_percent = self._load_volume_percent(payload)
-            self.is_muted = self._load_is_muted(payload)
             self.current_item = (
                 PlaylistItem.from_dict(self._sanitize_backup_payload(current_item_payload))
                 if current_item_payload
@@ -339,21 +331,32 @@ class PlaylistStore:
                 PlaylistItem.from_dict(self._sanitize_backup_payload(item))
                 for item in playlist_payload
             ]
-            self.history = [
-                HistoryEntry.from_dict(dict(entry))
-                for entry in payload.get("history") or []
-                if isinstance(entry, dict)
-            ]
-            self.session_users = self._load_session_users_from_payload(payload)
             self._rebuild_cycle_items_unlocked()
             self._touch(persist_backup=False)
             return True
 
     def discard_backup(self) -> bool:
         with self.lock:
-            existed = self.backup_file.exists()
+            existed = self.backup_file.exists() or self.current_item is not None or bool(self.playlist)
+            self.current_item = None
+            self.playlist = []
             self.backup_file.unlink(missing_ok=True)
+            self._touch(persist_backup=False)
             return existed
+
+    def reset_runtime_data(self) -> None:
+        with self.lock:
+            self.playback_mode = "local"
+            self.av_offset_ms = 0
+            self.volume_percent = 100
+            self.is_muted = False
+            self.current_item = None
+            self.playlist = []
+            self.history = []
+            self.session_history = []
+            self.session_users = []
+            self.updated_at = time.time()
+            self._delete_runtime_json_files_unlocked()
 
     def backup_summary(self) -> dict[str, Any]:
         with self.lock:
@@ -561,22 +564,35 @@ class PlaylistStore:
         return self.session_users[start_index:] + self.session_users[:start_index]
 
     def _save_session(self) -> None:
-        payload = {
-            "playback_mode": self.playback_mode,
-            "player_settings": {
-                "av_offset_ms": self.av_offset_ms,
-                "volume_percent": self.volume_percent,
-                "is_muted": self.is_muted,
+        self._write_json_payload_unlocked(
+            self.player_state_file,
+            {
+                "playback_mode": self.playback_mode,
+                "player_settings": {
+                    "av_offset_ms": self.av_offset_ms,
+                    "volume_percent": self.volume_percent,
+                    "is_muted": self.is_muted,
+                },
+                "updated_at": self.updated_at,
             },
-            "current_item": self.current_item.serialize() if self.current_item else None,
-            "playlist": [item.serialize() for item in self.playlist],
-            "history": [entry.serialize() for entry in self.history],
-            "session_users": list(self.session_users),
-            "updated_at": self.updated_at,
-        }
-        self.state_file.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
         )
+        self._write_json_payload_unlocked(
+            self.history_state_file,
+            {
+                "history": [entry.serialize() for entry in self.history],
+                "updated_at": self.updated_at,
+            },
+        )
+        self._write_json_payload_unlocked(
+            self.session_users_state_file,
+            {
+                "session_users": list(self.session_users),
+                "updated_at": self.updated_at,
+            },
+        )
+        # Legacy monolithic state.json is no longer used. Remove it if present
+        # so a fresh run cannot accidentally revive old queue/cache churn.
+        self.state_file.unlink(missing_ok=True)
 
     def _save_session_played(self) -> None:
         if not self.session_played:
@@ -597,23 +613,13 @@ class PlaylistStore:
             self.backup_file.unlink(missing_ok=True)
             return
         payload = {
-            "playback_mode": self.playback_mode,
-            "player_settings": {
-                "av_offset_ms": self.av_offset_ms,
-                "volume_percent": self.volume_percent,
-                "is_muted": self.is_muted,
-            },
             "current_item": (
                 self._backup_item_payload(self.current_item) if self.current_item else None
             ),
             "playlist": [self._backup_item_payload(item) for item in self.playlist],
-            "history": [entry.serialize() for entry in self.history],
-            "session_users": list(self.session_users),
             "updated_at": self.updated_at,
         }
-        self.backup_file.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        self._write_json_payload_unlocked(self.backup_file, payload)
 
     def _touch(self, *, persist_backup: bool) -> None:
         self.updated_at = time.time()
@@ -652,42 +658,67 @@ class PlaylistStore:
         return sanitized
 
     def _read_backup_payload_unlocked(self) -> dict[str, Any] | None:
-        if not self.backup_file.exists():
+        return self._read_json_payload_unlocked(self.backup_file)
+
+    def _read_json_payload_unlocked(self, path: Path) -> dict[str, Any] | None:
+        if not path.exists():
             return None
         try:
-            payload = json.loads(self.backup_file.read_text(encoding="utf-8"))
+            payload = json.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             return None
         if not isinstance(payload, dict):
             return None
         return payload
 
-    def _read_state_payload_unlocked(self) -> dict[str, Any] | None:
-        if not self.state_file.exists():
-            return None
-        try:
-            payload = json.loads(self.state_file.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            return None
-        if not isinstance(payload, dict):
-            return None
-        return payload
+    def _write_json_payload_unlocked(self, path: Path, payload: dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
 
-    def _restore_history_from_state(self) -> None:
+    def _restore_persistent_state(self) -> None:
         with self.lock:
-            payload = self._read_state_payload_unlocked()
-            if not payload:
-                return
-            history_payload = payload.get("history") or []
+            history_payload = (
+                self._read_json_payload_unlocked(self.history_state_file) or {}
+            ).get("history") or []
             self.history = [
                 HistoryEntry.from_dict(dict(entry))
                 for entry in history_payload
                 if isinstance(entry, dict)
             ]
-            self.av_offset_ms = self._load_av_offset_ms(payload)
-            self.volume_percent = self._load_volume_percent(payload)
-            self.is_muted = self._load_is_muted(payload)
-            self.session_users = self._load_session_users_from_payload(payload)
+
+            player_payload = self._read_json_payload_unlocked(self.player_state_file)
+            if player_payload:
+                self.playback_mode = str(player_payload.get("playback_mode") or "local")
+                self.av_offset_ms = self._load_av_offset_ms(player_payload)
+                self.volume_percent = self._load_volume_percent(player_payload)
+                self.is_muted = self._load_is_muted(player_payload)
+
+            users_payload = self._read_json_payload_unlocked(self.session_users_state_file)
+            if users_payload:
+                self.session_users = self._load_session_users_from_payload(users_payload)
+
+    # LEGACY REFERENCE: old monolithic state.json reader.
+    # We intentionally do not call this anymore; v0.4+ expects users to start
+    # from an empty data directory and persists split files instead.
+    #
+    # def _read_state_payload_unlocked(self) -> dict[str, Any] | None:
+    #     return self._read_json_payload_unlocked(self.state_file)
+
+    def _delete_runtime_json_files_unlocked(self) -> None:
+        data_dir = self.state_file.parent
+        keep_names = {"gatcha_cache.json"}
+        for path in data_dir.glob("*.json"):
+            if path.name in keep_names:
+                continue
+            path.unlink(missing_ok=True)
+
+    @staticmethod
+    def _split_state_path(state_file: Path, default_name: str, suffix: str) -> Path:
+        if state_file.name == "state.json":
+            return state_file.with_name(default_name)
+        return state_file.with_name(f"{state_file.stem}-{suffix}.json")
 
     @staticmethod
     def _load_av_offset_ms(payload: dict[str, Any]) -> int:
@@ -832,7 +863,7 @@ class PlaylistStore:
             "playlist_count": total_count,
             "updated_at": float(payload.get("updated_at", 0.0) or 0.0),
             "preview_titles": preview_titles[:3],
-            "playback_mode": str(payload.get("playback_mode") or "local"),
+            "playback_mode": self.playback_mode,
         }
 
     def _validate_requester_name_unlocked(self, requester_name: str) -> str:

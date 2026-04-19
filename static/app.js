@@ -86,6 +86,7 @@ const elements = {
   cacheLimitValue: document.getElementById("cache-limit-value"),
   cacheLimitSlider: document.getElementById("cache-limit-slider"),
   cacheLimitScale: document.getElementById("cache-limit-scale"),
+  dataResetButton: document.getElementById("data-reset-button"),
   currentTitle: document.getElementById("current-title"),
   playerPanel: document.querySelector(".player-panel"),
   playerFrame: document.getElementById("player-frame"),
@@ -2763,6 +2764,22 @@ async function clearPlaylist() {
   }
 }
 
+async function resetRuntimeData() {
+  try {
+    teardownMountedPlayer();
+    state.playerSignature = "";
+    state.playerContext = null;
+    state.data = await apiPost("/api/data/reset");
+    closeConfirm();
+    dismissBackupBanner();
+    state.listView = "queue";
+    setAppMessage("已清空 data，保留已唱归档和抽卡缓存。");
+    render();
+  } catch (error) {
+    setAppMessage(error.message, true);
+  }
+}
+
 /*
   const name = String(elements.sessionUserInput.value || "").trim();
   if (!name) {
@@ -3093,6 +3110,7 @@ elements.bbdownLoginButton?.addEventListener("click", async () => {
   }
   try {
     state.data = await apiPost("/api/bbdown/logout");
+    setAppMessage("BBDown 已退出登录。");
     render();
   } catch (error) {
     setAppMessage(error.message, true);
@@ -3231,6 +3249,16 @@ elements.layoutModeSwitch?.addEventListener("click", (event) => {
     return;
   }
   setLayoutMode(button.dataset.layoutMode);
+});
+
+elements.dataResetButton?.addEventListener("click", (event) => {
+  event.stopPropagation();
+  const point = anchorPointForEvent(event, elements.dataResetButton);
+  openConfirm({
+    type: "reset-data",
+    message: "确认清空 data？会清空当前队列、用户、历史记录和缓存，但保留已唱归档与抽卡缓存。",
+    ...point,
+  });
 });
 
 elements.audioVariantBar.addEventListener("click", async (event) => {
@@ -3396,6 +3424,10 @@ elements.confirmOk.addEventListener("click", async () => {
       await clearPlaylist();
       return;
     }
+    if (intent.type === "reset-data") {
+      await resetRuntimeData();
+      return;
+    }
     if (intent.type === "remove-item" && intent.itemId) {
       state.data = await apiPost("/api/playlist/remove", { item_id: intent.itemId });
       closeConfirm();
@@ -3435,6 +3467,7 @@ document.addEventListener("click", (event) => {
       event.target.closest("#clear-playlist-button") ||
       event.target.closest('button[data-action="remove"]') ||
       event.target.closest("#queue-next-button") ||
+      event.target.closest("#data-reset-button") ||
       event.target.closest("#add-form") ||
       event.target.closest("#history-list")
     ) {
