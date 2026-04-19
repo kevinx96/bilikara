@@ -1419,6 +1419,7 @@ function renderQueueCurrent(currentItem) {
     }
     setTextContent(elements.queueCurrentTag, "播放中");
     setTextContent(elements.queueCurrentTitle, "还没有歌曲");
+    setElementTitle(elements.queueCurrentTitle, "");
     setClassToggle(elements.queueCurrentRetry, "hidden", true);
     elements.queueCurrentRetry.removeAttribute("data-id");
     return;
@@ -1442,6 +1443,7 @@ function renderQueueCurrent(currentItem) {
     }
     setTextContent(elements.queueCurrentTag, currentState.label);
     setTextContent(elements.queueCurrentTitle, currentItem.display_title);
+    setElementTitle(elements.queueCurrentTitle, ownerTooltipForEntry(currentItem));
     setTextContent(elements.queueCurrentRequester, requesterText);
     setClassToggle(elements.queueCurrentRequester, "hidden", !requesterText);
   }
@@ -2378,7 +2380,7 @@ function renderPlaylist(playlist, currentItem, cachePolicy) {
     if (node.dataset.staticSignature !== staticSignature) {
       node.dataset.staticSignature = staticSignature;
       setTextContent(titleNode, item.display_title);
-      setElementTitle(node, ownerTooltip);
+      setElementTitle(node, "");
       setElementTitle(titleNode, ownerTooltip);
       setTextContent(requesterNode, requesterText);
       setClassToggle(requesterNode, "hidden", !requesterText);
@@ -2557,7 +2559,7 @@ function renderHistory(history) {
     const requester = node.querySelector(".history-requester");
     title.textContent = entry.display_title;
     const ownerTooltip = ownerTooltipForEntry(entry);
-    node.title = ownerTooltip;
+    node.title = "";
     title.title = ownerTooltip;
     const requesterText = requesterBadgeText(entry.requester_name);
     requester.textContent = requesterText;

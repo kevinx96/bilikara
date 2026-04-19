@@ -347,6 +347,8 @@ p {
 .next-button:hover,
 .song-actions button:hover,
 .history-actions button:hover,
+.session-user-form button:hover,
+.session-user-actions button:hover,
 .compact-form button:hover,
 .mode-button:hover {
   transform: translateY(-1px);
@@ -1881,6 +1883,11 @@ select:disabled {
   backface-visibility: hidden;
   transform: translateZ(0);
   will-change: transform;
+}
+
+.queue-toolbar .toolbar-button:hover,
+.queue-toolbar .toolbar-button:focus-visible {
+  transform: translateY(-1px) translateZ(0);
 }
 
 .queue-current {

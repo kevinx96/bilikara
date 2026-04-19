@@ -182,9 +182,12 @@ class PlaylistStoreTest(unittest.TestCase):
     def test_clear_playlist_keeps_current(self):
         self.add_item("a", requester_name="A")
         self.add_item("b", requester_name="B")
+        self.assertTrue(self.backup_file.exists())
         self.store.clear_playlist()
         self.assertEqual(self.store.current_item.id, "a")
         self.assertEqual(self.store.playlist, [])
+        self.assertFalse(self.backup_file.exists())
+        self.assertFalse(self.store.backup_summary()["available"])
 
     def test_snapshot_uses_cleaned_display_titles(self):
         item = self.make_item("a")

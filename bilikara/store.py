@@ -130,7 +130,8 @@ class PlaylistStore:
     def clear_playlist(self) -> None:
         with self.lock:
             self.playlist = []
-            self._touch(persist_backup=True)
+            self.backup_file.unlink(missing_ok=True)
+            self._touch(persist_backup=False)
 
     def advance_to_next(self) -> bool:
         with self.lock:
