@@ -385,6 +385,10 @@ h2 {
   font-size: 24px;
 }
 
+#current-title {
+  overflow-wrap: anywhere;
+}
+
 .top-controls {
   display: flex;
   width: auto;
@@ -1116,6 +1120,25 @@ h2 {
   overflow: hidden;
 }
 
+.player-panel > .panel-head {
+  position: relative;
+  display: block;
+  min-height: 44px;
+  padding-right: 112px;
+}
+
+.player-panel > .panel-head > div {
+  min-width: 0;
+}
+
+.player-panel > .panel-head #player-fullscreen-button {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 96px;
+  min-width: 96px;
+}
+
 .player-panel:fullscreen,
 .player-panel:-webkit-full-screen {
   width: 100vw;
@@ -1192,6 +1215,8 @@ h2 {
   position: absolute;
   top: 16px;
   right: 16px;
+  min-height: 0;
+  padding-right: 0;
   z-index: 4;
   margin: 0;
   justify-content: flex-end;
@@ -1206,6 +1231,7 @@ h2 {
 
 .player-panel:fullscreen #player-fullscreen-button,
 .player-panel:-webkit-full-screen #player-fullscreen-button {
+  position: static;
   pointer-events: auto;
 }
 
