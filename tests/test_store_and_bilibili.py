@@ -68,6 +68,19 @@ class PlaylistStoreTest(unittest.TestCase):
         self.assertEqual(restored_store.volume_percent, 35)
         self.assertTrue(restored_store.is_muted)
 
+    def test_song_advance_delay_persists_in_player_state_file(self):
+        self.store.set_song_advance_delay_seconds(8)
+
+        restored_store = PlaylistStore(
+            state_file=self.state_file,
+            backup_file=self.backup_file,
+            session_archive_dir=self.session_archive_dir,
+        )
+
+        snapshot = self.store.snapshot()["player_settings"]
+        self.assertEqual(snapshot["song_advance_delay_seconds"], 8)
+        self.assertEqual(restored_store.song_advance_delay_seconds, 8)
+
     def test_legacy_state_file_is_ignored_and_removed(self):
         for name in ["player_state.json", "history.json", "session_users.json"]:
             (self.state_file.parent / name).unlink(missing_ok=True)
@@ -490,6 +503,72 @@ class PlaylistStoreTest(unittest.TestCase):
         self.store.move_session_user_to_index("C", 1)
         self.assertEqual(self.store.session_users[:3], ["A", "C", "B"])
         self.assertEqual([item.id for item in self.store.playlist], ["c1", "b1", "a2"])
+
+    def test_play_now_rebuilds_cycle_queue_for_new_current_requester(self):
+        self.add_item("a1", requester_name="A")
+        self.add_item("b1", requester_name="B")
+        self.add_item("c1", requester_name="C")
+        self.add_item("a2", requester_name="A")
+        self.assertEqual([item.id for item in self.store.playlist], ["b1", "c1", "a2"])
+
+        self.store.move_to_front("c1")
+
+        self.assertEqual(self.store.current_item.id, "c1")
+        self.assertEqual([item.id for item in self.store.playlist], ["a2", "b1"])
+
+    def test_advance_to_priority_item_rebuilds_cycle_queue(self):
+        self.add_item("a1", requester_name="A")
+        self.add_item("b1", requester_name="B")
+        self.add_item("c1", requester_name="C")
+        self.add_item("a2", requester_name="A")
+        self.store.move_to_next("c1")
+
+        self.store.advance_to_next()
+
+        self.assertEqual(self.store.current_item.id, "c1")
+        self.assertEqual([item.id for item in self.store.playlist], ["a2", "b1"])
+
+    def test_reordering_session_users_keeps_priority_next_and_rebuilds_cycle_tail(self):
+        self.add_item("a1", requester_name="A")
+        self.add_item("b1", requester_name="B")
+        self.add_item("c1", requester_name="C")
+        self.add_item("a2", requester_name="A")
+        self.add_item("b2", requester_name="B")
+        self.assertEqual([item.id for item in self.store.playlist], ["b1", "c1", "a2", "b2"])
+
+        self.store.move_to_next("b2")
+        self.assertEqual([item.id for item in self.store.playlist], ["b2", "b1", "c1", "a2"])
+
+        self.store.move_session_user_to_index("C", 1)
+
+        self.assertEqual(self.store.session_users[:3], ["A", "C", "B"])
+        self.assertEqual([item.id for item in self.store.playlist], ["b2", "c1", "b1", "a2"])
+        self.assertEqual(self.store.playlist[0].queue_slot_type, "priority")
+
+    def test_priority_section_is_independent_from_cycle_queue(self):
+        self.add_item("a1", requester_name="A")
+        self.add_item("b1", requester_name="B")
+        self.add_item("c1", requester_name="C")
+        self.add_item("a2", requester_name="A")
+        self.add_item("b2", requester_name="B")
+        self.add_item("c2", requester_name="C")
+        self.assertEqual([item.id for item in self.store.playlist], ["b1", "c1", "a2", "b2", "c2"])
+
+        self.add_item("c-priority", requester_name="C", position="next")
+        self.assertEqual(
+            [item.id for item in self.store.playlist],
+            ["c-priority", "b1", "c1", "a2", "b2", "c2"],
+        )
+
+        self.add_item("b-priority", requester_name="B", position="next")
+        self.assertEqual(
+            [item.id for item in self.store.playlist],
+            ["b-priority", "c-priority", "b1", "c1", "a2", "b2", "c2"],
+        )
+        self.assertEqual(
+            [item.queue_slot_type for item in self.store.playlist[:2]],
+            ["priority", "priority"],
+        )
 
     def test_current_item_does_not_consume_waiting_queue_turn(self):
         self.store = PlaylistStore(

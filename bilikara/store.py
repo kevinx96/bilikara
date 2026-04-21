@@ -15,6 +15,8 @@ MAX_SESSION_USERS = 32
 MAX_SESSION_USER_NAME_LENGTH = 24
 MAX_AV_OFFSET_MS = 5000
 MAX_VOLUME_PERCENT = 100
+DEFAULT_SONG_ADVANCE_DELAY_SECONDS = 5
+MAX_SONG_ADVANCE_DELAY_SECONDS = 30
 
 
 class PlaylistStore:
@@ -42,6 +44,7 @@ class PlaylistStore:
         self.av_offset_ms = 0
         self.volume_percent = 100
         self.is_muted = False
+        self.song_advance_delay_seconds = DEFAULT_SONG_ADVANCE_DELAY_SECONDS
         self.current_item: PlaylistItem | None = None
         self.current_item_started = False
         self.playlist: list[PlaylistItem] = []
@@ -66,6 +69,7 @@ class PlaylistStore:
                     "av_offset_ms": self.av_offset_ms,
                     "volume_percent": self.volume_percent,
                     "is_muted": self.is_muted,
+                    "song_advance_delay_seconds": self.song_advance_delay_seconds,
                 },
                 "playlist": [item.to_dict() for item in self.playlist],
                 "current_item": self.current_item.to_dict() if self.current_item else None,
@@ -123,11 +127,13 @@ class PlaylistStore:
                 self._archive_current_item_unlocked()
                 self.current_item = None
                 self.current_item_started = False
+                self._rebuild_cycle_items_unlocked()
                 self._touch(persist_backup=True)
                 return True
             for index, item in enumerate(self.playlist):
                 if item.id == item_id:
                     self.playlist.pop(index)
+                    self._rebuild_cycle_items_unlocked()
                     self._touch(persist_backup=True)
                     return True
         return False
@@ -152,6 +158,7 @@ class PlaylistStore:
             self.current_item_started = False
             if self.current_item:
                 self._record_session_played_unlocked(self.current_item)
+            self._rebuild_cycle_items_unlocked()
             self._touch(persist_backup=True)
             return True
 
@@ -166,6 +173,7 @@ class PlaylistStore:
                     self.playlist[index],
                     self.playlist[index - 1],
                 )
+                self._rebuild_cycle_items_unlocked()
                 self._touch(persist_backup=True)
                 return True
             if direction == "down" and index < len(self.playlist) - 1:
@@ -174,6 +182,7 @@ class PlaylistStore:
                     self.playlist[index],
                     self.playlist[index + 1],
                 )
+                self._rebuild_cycle_items_unlocked()
                 self._touch(persist_backup=True)
                 return True
         return False
@@ -186,6 +195,7 @@ class PlaylistStore:
             item = self.playlist.pop(index)
             item.queue_slot_type = "priority"
             self.playlist.insert(0, item)
+            self._rebuild_cycle_items_unlocked()
             self._touch(persist_backup=True)
             return True
 
@@ -200,6 +210,7 @@ class PlaylistStore:
             item = self.playlist.pop(index)
             item.queue_slot_type = "manual"
             self.playlist.insert(bounded_index, item)
+            self._rebuild_cycle_items_unlocked()
             self._touch(persist_backup=True)
             return True
 
@@ -212,6 +223,7 @@ class PlaylistStore:
             self.current_item = self.playlist.pop(index)
             self.current_item_started = False
             self._record_session_played_unlocked(self.current_item)
+            self._rebuild_cycle_items_unlocked()
             self._touch(persist_backup=True)
             return True
 
@@ -246,6 +258,15 @@ class PlaylistStore:
             self.is_muted = normalized
             self._touch(persist_backup=True)
             return normalized
+
+    def set_song_advance_delay_seconds(self, delay_seconds: int) -> int:
+        with self.lock:
+            bounded = max(0, min(MAX_SONG_ADVANCE_DELAY_SECONDS, int(delay_seconds)))
+            if self.song_advance_delay_seconds == bounded:
+                return bounded
+            self.song_advance_delay_seconds = bounded
+            self._touch(persist_backup=True)
+            return bounded
 
     def set_audio_variant(self, item_id: str, variant_id: str) -> bool:
         with self.lock:
@@ -365,6 +386,7 @@ class PlaylistStore:
             self.av_offset_ms = 0
             self.volume_percent = 100
             self.is_muted = False
+            self.song_advance_delay_seconds = DEFAULT_SONG_ADVANCE_DELAY_SECONDS
             self.current_item = None
             self.current_item_started = False
             self.playlist = []
@@ -566,11 +588,12 @@ class PlaylistStore:
             requester_name = self._normalize_session_user_name(item.requester_name)
             if requester_name not in order_index:
                 continue
-            if item.queue_slot_type == "cycle":
-                cycle_keys[item.id] = (
-                    requester_counts[requester_name],
-                    order_index[requester_name],
-                )
+            if item.queue_slot_type != "cycle":
+                continue
+            cycle_keys[item.id] = (
+                requester_counts[requester_name],
+                order_index[requester_name],
+            )
             requester_counts[requester_name] += 1
 
         return cycle_keys, requester_counts, order_index
@@ -596,6 +619,7 @@ class PlaylistStore:
                     "av_offset_ms": self.av_offset_ms,
                     "volume_percent": self.volume_percent,
                     "is_muted": self.is_muted,
+                    "song_advance_delay_seconds": self.song_advance_delay_seconds,
                 },
                 "updated_at": self.updated_at,
             },
@@ -728,6 +752,7 @@ class PlaylistStore:
                 self.av_offset_ms = self._load_av_offset_ms(player_payload)
                 self.volume_percent = self._load_volume_percent(player_payload)
                 self.is_muted = self._load_is_muted(player_payload)
+                self.song_advance_delay_seconds = self._load_song_advance_delay_seconds(player_payload)
 
             users_payload = self._read_json_payload_unlocked(self.session_users_state_file)
             if users_payload:
@@ -784,6 +809,21 @@ class PlaylistStore:
         if not isinstance(player_settings, dict):
             return False
         return bool(player_settings.get("is_muted", False))
+
+    @staticmethod
+    def _load_song_advance_delay_seconds(payload: dict[str, Any]) -> int:
+        player_settings = payload.get("player_settings")
+        if not isinstance(player_settings, dict):
+            return DEFAULT_SONG_ADVANCE_DELAY_SECONDS
+        raw_value = player_settings.get(
+            "song_advance_delay_seconds",
+            DEFAULT_SONG_ADVANCE_DELAY_SECONDS,
+        )
+        try:
+            value = int(raw_value)
+        except (TypeError, ValueError):
+            return DEFAULT_SONG_ADVANCE_DELAY_SECONDS
+        return max(0, min(MAX_SONG_ADVANCE_DELAY_SECONDS, value))
 
     @staticmethod
     def _history_key(item: PlaylistItem) -> str:
