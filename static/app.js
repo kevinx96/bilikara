@@ -4473,7 +4473,7 @@ elements.gatchaConfirmButton.addEventListener("click", async () => {
   if (!requesterName) {
     return;
   }
-  setGatchaMessage("Nozomi power注入！");
+  setGatchaMessage("Nozomi power 注入！");
   try {
     state.data = await submitAddRequest(url, "tail", { requesterName });
     setFormMessage(`点歌成功：${state.gatchaCandidate.title}`);

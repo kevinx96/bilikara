@@ -120,11 +120,13 @@ class PlaylistStore:
                 self._archive_current_item_unlocked()
                 self.current_item = None
                 self.current_item_started = False
+                self._rebuild_cycle_items_unlocked()
                 self._touch(persist_backup=True)
                 return True
             for index, item in enumerate(self.playlist):
                 if item.id == item_id:
                     self.playlist.pop(index)
+                    self._rebuild_cycle_items_unlocked()
                     self._touch(persist_backup=True)
                     return True
         return False
@@ -149,6 +151,7 @@ class PlaylistStore:
             self.current_item_started = False
             if self.current_item:
                 self._record_session_played_unlocked(self.current_item)
+            self._rebuild_cycle_items_unlocked()
             self._touch(persist_backup=True)
             return True
 
@@ -163,6 +166,7 @@ class PlaylistStore:
                     self.playlist[index],
                     self.playlist[index - 1],
                 )
+                self._rebuild_cycle_items_unlocked()
                 self._touch(persist_backup=True)
                 return True
             if direction == "down" and index < len(self.playlist) - 1:
@@ -171,6 +175,7 @@ class PlaylistStore:
                     self.playlist[index],
                     self.playlist[index + 1],
                 )
+                self._rebuild_cycle_items_unlocked()
                 self._touch(persist_backup=True)
                 return True
         return False
@@ -183,6 +188,7 @@ class PlaylistStore:
             item = self.playlist.pop(index)
             item.queue_slot_type = "priority"
             self.playlist.insert(0, item)
+            self._rebuild_cycle_items_unlocked()
             self._touch(persist_backup=True)
             return True
 
@@ -197,6 +203,7 @@ class PlaylistStore:
             item = self.playlist.pop(index)
             item.queue_slot_type = "manual"
             self.playlist.insert(bounded_index, item)
+            self._rebuild_cycle_items_unlocked()
             self._touch(persist_backup=True)
             return True
 
@@ -209,6 +216,7 @@ class PlaylistStore:
             self.current_item = self.playlist.pop(index)
             self.current_item_started = False
             self._record_session_played_unlocked(self.current_item)
+            self._rebuild_cycle_items_unlocked()
             self._touch(persist_backup=True)
             return True
 
@@ -562,11 +570,12 @@ class PlaylistStore:
             requester_name = self._normalize_session_user_name(item.requester_name)
             if requester_name not in order_index:
                 continue
-            if item.queue_slot_type == "cycle":
-                cycle_keys[item.id] = (
-                    requester_counts[requester_name],
-                    order_index[requester_name],
-                )
+            if item.queue_slot_type != "cycle":
+                continue
+            cycle_keys[item.id] = (
+                requester_counts[requester_name],
+                order_index[requester_name],
+            )
             requester_counts[requester_name] += 1
 
         return cycle_keys, requester_counts, order_index
