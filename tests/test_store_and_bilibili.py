@@ -13,7 +13,7 @@ from bilikara.bilibili import (
     select_matching_pages,
 )
 from bilikara.models import PlaylistItem
-from bilikara.store import PlaylistStore
+from bilikara.store import DEFAULT_SONG_ADVANCE_DELAY_SECONDS, PlaylistStore
 from bilikara.title_cleanup import clean_display_title
 
 
@@ -80,6 +80,32 @@ class PlaylistStoreTest(unittest.TestCase):
         snapshot = self.store.snapshot()["player_settings"]
         self.assertEqual(snapshot["song_advance_delay_seconds"], 8)
         self.assertEqual(restored_store.song_advance_delay_seconds, 8)
+
+    def test_reset_player_state_keeps_queue_and_runtime_data(self):
+        self.store.set_mode("online")
+        self.store.set_av_offset_ms(230)
+        self.store.set_volume_percent(35)
+        self.store.set_muted(True)
+        self.store.set_song_advance_delay_seconds(8)
+        self.add_item("a", requester_name="A")
+        self.add_item("b", requester_name="B")
+        self.mark_started("a")
+
+        self.store.reset_player_state()
+
+        snapshot = self.store.snapshot()
+        self.assertEqual(snapshot["playback_mode"], "local")
+        self.assertEqual(snapshot["player_settings"]["av_offset_ms"], 0)
+        self.assertEqual(snapshot["player_settings"]["volume_percent"], 100)
+        self.assertFalse(snapshot["player_settings"]["is_muted"])
+        self.assertEqual(
+            snapshot["player_settings"]["song_advance_delay_seconds"],
+            DEFAULT_SONG_ADVANCE_DELAY_SECONDS,
+        )
+        self.assertEqual(snapshot["current_item"]["id"], "a")
+        self.assertEqual([item["id"] for item in snapshot["playlist"]], ["b"])
+        self.assertEqual(snapshot["session_users"], ["A", "B", "C", "D"])
+        self.assertFalse(self.store.current_item_started)
 
     def test_legacy_state_file_is_ignored_and_removed(self):
         for name in ["player_state.json", "history.json", "session_users.json"]:

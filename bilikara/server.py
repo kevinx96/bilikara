@@ -287,6 +287,14 @@ class AppContext:
             self._player_status = None
         self._notify_state_changed()
 
+    def reset_player_state(self) -> None:
+        self.store.reset_player_state()
+        with self._player_control_lock:
+            self._player_control_ack_seq = self._player_control_seq
+            self._player_control_command = None
+        with self._player_status_lock:
+            self._player_status = None
+
     def bind_server(self, server: ThreadingHTTPServer, *, shutdown_on_last_client: bool) -> None:
         with self._client_lock:
             self._server = server
@@ -699,6 +707,10 @@ class BilikaraHandler(BaseHTTPRequestHandler):
                 return
             if route == "/api/backup/discard":
                 CONTEXT.discard_backup()
+                self._write_json({"ok": True, "data": CONTEXT.snapshot()})
+                return
+            if route == "/api/player/reset":
+                CONTEXT.reset_player_state()
                 self._write_json({"ok": True, "data": CONTEXT.snapshot()})
                 return
             if route == "/api/data/reset":

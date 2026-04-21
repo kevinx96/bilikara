@@ -397,6 +397,16 @@ class PlaylistStore:
             self._delete_runtime_json_files_unlocked()
         self._notify_change()
 
+    def reset_player_state(self) -> None:
+        with self.lock:
+            self.playback_mode = "local"
+            self.av_offset_ms = 0
+            self.volume_percent = 100
+            self.is_muted = False
+            self.song_advance_delay_seconds = DEFAULT_SONG_ADVANCE_DELAY_SECONDS
+            self.current_item_started = False
+            self._touch(persist_backup=False)
+
     def backup_summary(self) -> dict[str, Any]:
         with self.lock:
             return self._backup_summary_unlocked()

@@ -133,6 +133,7 @@ const elements = {
   cacheQualitySelect: document.getElementById("cache-quality-select"),
   cacheHiresCheckbox: document.getElementById("cache-hires-checkbox"),
   dataResetButton: document.getElementById("data-reset-button"),
+  playerResetButton: document.getElementById("player-reset-button"),
   currentTitle: document.getElementById("current-title"),
   playerPanel: document.querySelector(".player-panel"),
   playerFrame: document.getElementById("player-frame"),
@@ -3626,6 +3627,30 @@ async function resetRuntimeData() {
   }
 }
 
+async function resetPlayerState() {
+  try {
+    teardownMountedPlayer();
+    state.playerSignature = "";
+    state.playerContext = null;
+    state.localPlayerVolume = 1;
+    state.localPlayerMuted = false;
+    state.localAvOffsetMs = 0;
+    state.playerSettingsEchoSuppressUntil = 0;
+    state.avOffsetEchoSuppressUntil = 0;
+    state.volumeSaveSeq += 1;
+    state.avOffsetSaveSeq += 1;
+    state.avOffsetSaving = false;
+    persistLocalVolumePreferences();
+    writeLocalPreference(storageKeys.avOffsetMs, 0);
+    state.data = await apiPost("/api/player/reset");
+    closeConfirm();
+    render();
+    setAppMessage("\u64ad\u653e\u5668\u72b6\u6001\u5df2\u91cd\u7f6e\u3002");
+  } catch (error) {
+    setAppMessage(error.message, true);
+  }
+}
+
 /*
   const name = String(elements.sessionUserInput.value || "").trim();
   if (!name) {
@@ -4194,6 +4219,16 @@ elements.dataResetButton?.addEventListener("click", (event) => {
   });
 });
 
+elements.playerResetButton?.addEventListener("click", (event) => {
+  event.stopPropagation();
+  const point = anchorPointForEvent(event, elements.playerResetButton);
+  openConfirm({
+    type: "reset-player",
+    message: "\u786e\u8ba4\u91cd\u7f6e\u64ad\u653e\u5668\u72b6\u6001\uff1f\u4f1a\u91cd\u65b0\u8f7d\u5165\u5f53\u524d\u64ad\u653e\u5668\u5e76\u6062\u590d\u64ad\u653e\u5668\u8bbe\u7f6e\u3002\u6b4c\u5355\u3001\u5386\u53f2\u548c\u7f13\u5b58\u4e0d\u4f1a\u88ab\u6e05\u7a7a\u3002",
+    ...point,
+  });
+});
+
 elements.audioVariantBar.addEventListener("click", async (event) => {
   const toggleButton = event.target.closest('button[data-action="toggle-audio-variants"]');
   if (toggleButton) {
@@ -4365,6 +4400,10 @@ elements.confirmOk.addEventListener("click", async () => {
       await resetRuntimeData();
       return;
     }
+    if (intent.type === "reset-player") {
+      await resetPlayerState();
+      return;
+    }
     if (intent.type === "remove-item" && intent.itemId) {
       state.data = await apiPost("/api/playlist/remove", { item_id: intent.itemId });
       closeConfirm();
@@ -4406,6 +4445,7 @@ document.addEventListener("click", (event) => {
       event.target.closest('button[data-action="remove"]') ||
       event.target.closest("#queue-next-button") ||
       event.target.closest("#data-reset-button") ||
+      event.target.closest("#player-reset-button") ||
       event.target.closest("#add-form") ||
       event.target.closest("#history-list")
     ) {

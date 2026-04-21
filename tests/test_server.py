@@ -144,5 +144,27 @@ class HistoryRouteTest(unittest.TestCase):
         self.assertEqual(writes[1], {"ok": True, "data": {"history": []}})
 
 
+class PlayerResetRouteTest(unittest.TestCase):
+    def test_player_reset_route_returns_fresh_snapshot(self):
+        handler = BilikaraHandler.__new__(BilikaraHandler)
+        writes: list[dict] = []
+        context = SimpleNamespace(
+            touch_client=lambda client_id, is_host=True: None,
+            reset_player_state=lambda: writes.append({"reset_player": True}),
+            snapshot=lambda: {"playback_mode": "local"},
+        )
+
+        handler.path = "/api/player/reset"
+        handler.headers = {}
+        handler._read_json_body = lambda: {}
+        handler._write_json = lambda payload, status=None: writes.append(payload)
+
+        with patch("bilikara.server.CONTEXT", context):
+            handler.do_POST()
+
+        self.assertEqual(writes[0], {"reset_player": True})
+        self.assertEqual(writes[1], {"ok": True, "data": {"playback_mode": "local"}})
+
+
 if __name__ == "__main__":
     unittest.main()
