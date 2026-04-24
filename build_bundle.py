@@ -29,7 +29,7 @@ def main() -> None:
         static_arg,
         str(ROOT_DIR / "start_bilikara.py"),
     ]
-    command.extend(_bundled_binary_args(data_separator))
+    command.extend(_bundled_binary_args(data_separator, verbose=True))
 
     if platform.system() == "Darwin":
         command.extend(["--osx-bundle-identifier", "com.bilikara.app"])
@@ -39,7 +39,7 @@ def main() -> None:
     print(f"Build complete. Output directory: {ROOT_DIR / 'dist'}")
 
 
-def _bundled_binary_args(data_separator: str) -> list[str]:
+def _bundled_binary_args(data_separator: str, *, verbose: bool = False) -> list[str]:
     args: list[str] = []
     bundled: list[str] = []
     missing: list[str] = []
@@ -67,11 +67,12 @@ def _bundled_binary_args(data_separator: str) -> list[str]:
     for source in bundled:
         args.extend(["--add-binary", f"{source}{data_separator}vendor"])
 
-    print("Bundling external tools:")
-    for source in bundled:
-        print(f"  - {source}")
-    if optional_missing:
-        print(f"Optional tools not bundled: {', '.join(optional_missing)}")
+    if verbose:
+        print("Bundling external tools:")
+        for source in bundled:
+            print(f"  - {source}")
+        if optional_missing:
+            print(f"Optional tools not bundled: {', '.join(optional_missing)}")
 
     return args
 
@@ -79,12 +80,32 @@ def _bundled_binary_args(data_separator: str) -> list[str]:
 def _resolve_bundle_binary_path(binary_name: str) -> Path | None:
     direct = shutil.which(binary_name)
     if not direct:
+        if binary_name == "ffprobe":
+            return _resolve_ffprobe_from_ffmpeg()
         return None
 
     candidate = Path(direct)
     if platform.system() == "Windows":
-        return _resolve_windows_binary(binary_name, candidate)
+        resolved = _resolve_windows_binary(binary_name, candidate)
+        if resolved:
+            return resolved
+        if binary_name == "ffprobe":
+            return _resolve_ffprobe_from_ffmpeg()
+        return None
     return candidate
+
+
+def _resolve_ffprobe_from_ffmpeg() -> Path | None:
+    ffmpeg_path = _resolve_bundle_binary_path("ffmpeg")
+    if not ffmpeg_path:
+        return None
+
+    names = ["ffprobe.exe", "ffprobe"] if platform.system() == "Windows" else ["ffprobe"]
+    for name in names:
+        sibling = ffmpeg_path.with_name(name)
+        if sibling.exists():
+            return sibling
+    return None
 
 
 def _resolve_windows_binary(binary_name: str, candidate: Path) -> Path | None:

@@ -59,6 +59,25 @@ class BuildBundleTest(unittest.TestCase):
 
         self.assertIsNone(resolved)
 
+    def test_resolve_ffprobe_from_ffmpeg_sibling_when_not_on_path(self):
+        ffmpeg = Path("/tools/ffmpeg")
+        ffprobe = Path("/tools/ffprobe")
+
+        def fake_which(binary_name: str):
+            return str(ffmpeg) if binary_name == "ffmpeg" else None
+
+        with patch("build_bundle.platform.system", return_value="Linux"), patch(
+            "build_bundle.shutil.which",
+            side_effect=fake_which,
+        ), patch.object(
+            Path,
+            "exists",
+            lambda self: self == ffprobe,
+        ):
+            resolved = build_bundle._resolve_bundle_binary_path("ffprobe")
+
+        self.assertEqual(resolved, ffprobe)
+
     def test_bundled_binary_args_allows_missing_optional_ffprobe(self):
         ffmpeg = Path("/usr/bin/ffmpeg")
         data_separator = ";" if build_bundle.platform.system() == "Windows" else ":"
@@ -70,6 +89,27 @@ class BuildBundleTest(unittest.TestCase):
             args = build_bundle._bundled_binary_args(data_separator)
 
         self.assertEqual(args, ["--add-binary", f"{ffmpeg.resolve()}{data_separator}vendor"])
+
+    def test_bundled_binary_args_includes_resolved_optional_ffprobe(self):
+        ffmpeg = Path("/usr/bin/ffmpeg")
+        ffprobe = Path("/usr/bin/ffprobe")
+        data_separator = ";" if build_bundle.platform.system() == "Windows" else ":"
+
+        def fake_resolve(binary_name: str):
+            return {"ffmpeg": ffmpeg, "ffprobe": ffprobe}.get(binary_name)
+
+        with patch("build_bundle._resolve_bundle_binary_path", side_effect=fake_resolve):
+            args = build_bundle._bundled_binary_args(data_separator)
+
+        self.assertEqual(
+            args,
+            [
+                "--add-binary",
+                f"{ffmpeg.resolve()}{data_separator}vendor",
+                "--add-binary",
+                f"{ffprobe.resolve()}{data_separator}vendor",
+            ],
+        )
 
 
 if __name__ == "__main__":
