@@ -368,6 +368,49 @@ class CacheManagerPolicyTest(unittest.TestCase):
             finally:
                 manager.shutdown()
 
+    def test_validate_cache_result_logs_probe_failure_without_failing_cache(self):
+        log_dir = Path(self.temp_dir.name) / "logs"
+        media_file = self.cache_dir / "song-a" / "audio.m4a"
+        media_file.parent.mkdir(parents=True, exist_ok=True)
+        media_file.write_bytes(b"media")
+        probe_payload = {
+            "streams": [{"codec_type": "video", "duration": "12.34"}],
+            "format": {"duration": "12.34"},
+        }
+
+        with patch("bilikara.cache.CACHE_DIR", self.cache_dir), patch("bilikara.cache.LOG_DIR", log_dir):
+            manager = CacheManager(self.store, max_cache_items=3)
+            try:
+                log_path = manager._item_log_path("song-a")
+                with patch.object(manager, "_ffprobe_path_for_ffmpeg", return_value=Path("/tools/ffprobe")), patch(
+                    "bilikara.cache.subprocess.run",
+                    return_value=SimpleNamespace(
+                        returncode=0,
+                        stdout=json.dumps(probe_payload),
+                        stderr="",
+                    ),
+                ):
+                    manager._validate_cache_result(
+                        "song-a",
+                        {
+                            "validation_files": [
+                                {
+                                    "path": media_file,
+                                    "label": "音轨 P1",
+                                    "required_streams": {"audio"},
+                                }
+                            ]
+                        },
+                        Path("/tools/ffmpeg"),
+                        log_path,
+                    )
+                log_text = log_path.read_text(encoding="utf-8")
+            finally:
+                manager.shutdown()
+
+        self.assertIn("ffprobe validate 音轨 P1: failed", log_text)
+        self.assertIn("completed with 1 warning(s)", log_text)
+
     def test_ffprobe_path_for_ffmpeg_skips_broken_runtime_probe(self):
         suffix = ".exe" if os.name == "nt" else ""
         tools_dir = Path(self.temp_dir.name) / "runtime" / "tools" / "bbdown"
@@ -465,7 +508,7 @@ class CacheManagerPolicyTest(unittest.TestCase):
 
     def test_ensure_ffmpeg_syncs_bundled_binary_into_runtime_tools(self):
         vendor_dir = Path(self.temp_dir.name) / "vendor"
-        tools_dir = Path(self.temp_dir.name) / "tools" / "ffmpeg"
+        tools_dir = Path(self.temp_dir.name) / "tools" / "bbdown"
         suffix = ".exe" if os.name == "nt" else ""
         bundled_ffmpeg = vendor_dir / f"ffmpeg{suffix}"
         bundled_ffprobe = vendor_dir / f"ffprobe{suffix}"

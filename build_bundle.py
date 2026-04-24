@@ -8,6 +8,8 @@ from pathlib import Path
 
 APP_NAME = "bilikara"
 ROOT_DIR = Path(__file__).resolve().parent
+REQUIRED_TOOL_BINARIES = ("ffmpeg",)
+OPTIONAL_TOOL_BINARIES = ("ffprobe",)
 
 
 def main() -> None:
@@ -41,10 +43,17 @@ def _bundled_binary_args(data_separator: str) -> list[str]:
     args: list[str] = []
     bundled: list[str] = []
     missing: list[str] = []
-    for binary_name in ("ffmpeg", "ffprobe"):
+    optional_missing: list[str] = []
+    for binary_name in REQUIRED_TOOL_BINARIES:
         binary_path = _resolve_bundle_binary_path(binary_name)
         if not binary_path:
             missing.append(binary_name)
+            continue
+        bundled.append(str(binary_path.resolve()))
+    for binary_name in OPTIONAL_TOOL_BINARIES:
+        binary_path = _resolve_bundle_binary_path(binary_name)
+        if not binary_path:
+            optional_missing.append(binary_name)
             continue
         bundled.append(str(binary_path.resolve()))
 
@@ -52,7 +61,7 @@ def _bundled_binary_args(data_separator: str) -> list[str]:
         missing_text = ", ".join(missing)
         raise RuntimeError(
             f"Missing required external tools for bundle build: {missing_text}. "
-            "Install ffmpeg/ffprobe and ensure they are available on PATH."
+            "Install ffmpeg and ensure it is available on PATH."
         )
 
     for source in bundled:
@@ -61,6 +70,8 @@ def _bundled_binary_args(data_separator: str) -> list[str]:
     print("Bundling external tools:")
     for source in bundled:
         print(f"  - {source}")
+    if optional_missing:
+        print(f"Optional tools not bundled: {', '.join(optional_missing)}")
 
     return args
 

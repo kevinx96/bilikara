@@ -59,6 +59,17 @@ class BuildBundleTest(unittest.TestCase):
 
         self.assertIsNone(resolved)
 
+    def test_bundled_binary_args_allows_missing_optional_ffprobe(self):
+        ffmpeg = Path("/usr/bin/ffmpeg")
+
+        def fake_resolve(binary_name: str):
+            return ffmpeg if binary_name == "ffmpeg" else None
+
+        with patch("build_bundle._resolve_bundle_binary_path", side_effect=fake_resolve):
+            args = build_bundle._bundled_binary_args(":")
+
+        self.assertEqual(args, ["--add-binary", f"{ffmpeg}:vendor"])
+
 
 if __name__ == "__main__":
     unittest.main()

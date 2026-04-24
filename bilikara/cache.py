@@ -26,7 +26,6 @@ from .config import (
     CACHE_DIR,
     CACHE_POLICY_FILE,
     # COOKIE,
-    FFMPEG_BUNDLED_PATH,
     FFMPEG_RUNTIME_PATH,
     FFMPEG_PATH_OVERRIDE,
     FFMPEG_TOOLS_DIR,
@@ -1323,27 +1322,44 @@ class CacheManager:
             f"[{self._log_timestamp()}] ffprobe validate: start ({len(validation_files)} files)",
         )
 
+        failure_count = 0
         for entry in validation_files:
             self._raise_if_retry_requested(item_id)
             if not isinstance(entry, dict):
                 continue
-            path = entry.get("path")
             label = str(entry.get("label") or "媒体文件")
-            required_streams = entry.get("required_streams")
-            if not isinstance(path, Path):
-                raise DownloadCommandError(f"缓存校验失败: {label} 路径无效")
-            if not isinstance(required_streams, set):
-                required_streams = set(required_streams or [])
-            self._validate_media_file(
-                ffprobe_path,
-                ffmpeg_path,
-                path,
-                label=label,
-                required_streams={str(stream) for stream in required_streams},
-                log_path=log_path,
-            )
+            try:
+                path = entry.get("path")
+                required_streams = entry.get("required_streams")
+                if not isinstance(path, Path):
+                    raise DownloadCommandError(f"缓存校验失败: {label} 路径无效")
+                if not isinstance(required_streams, set):
+                    required_streams = set(required_streams or [])
+                self._validate_media_file(
+                    ffprobe_path,
+                    ffmpeg_path,
+                    path,
+                    label=label,
+                    required_streams={str(stream) for stream in required_streams},
+                    log_path=log_path,
+                )
+            except CacheCancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                failure_count += 1
+                self._append_log_line(
+                    log_path,
+                    f"[{self._log_timestamp()}] ffprobe validate {label}: failed: "
+                    f"{self._compact_probe_error(str(exc))}",
+                )
 
-        self._append_log_line(log_path, f"[{self._log_timestamp()}] ffprobe validate: ok")
+        if failure_count:
+            self._append_log_line(
+                log_path,
+                f"[{self._log_timestamp()}] ffprobe validate: completed with {failure_count} warning(s)",
+            )
+        else:
+            self._append_log_line(log_path, f"[{self._log_timestamp()}] ffprobe validate: ok")
 
     def _validate_media_file(
         self,
@@ -1474,21 +1490,7 @@ class CacheManager:
 
     @staticmethod
     def _is_usable_ffprobe(binary_path: Path) -> bool:
-        if not binary_path.exists():
-            return False
-        try:
-            process = subprocess.run(
-                [str(binary_path), "-version"],
-                capture_output=True,
-                text=True,
-                errors="replace",
-                check=False,
-                timeout=10,
-                **CacheManager._hidden_process_kwargs(),
-            )
-        except (OSError, subprocess.SubprocessError):
-            return False
-        return process.returncode == 0
+        return bool(CacheManager._read_tool_version(binary_path, "ffprobe"))
 
     @staticmethod
     def _variant_id(page: int, label: str, index: int) -> str:
@@ -1796,11 +1798,20 @@ class CacheManager:
             return runtime_ffmpeg
 
     def _preferred_ffmpeg_sources(self) -> tuple[Path | None, Path | None]:
-        for vendor_dir in (VENDOR_DIR, INTERNAL_VENDOR_DIR):
-            ffmpeg_path = vendor_dir / ("ffmpeg.exe" if os.name == "nt" else "ffmpeg")
+        tool_suffix = ".exe" if os.name == "nt" else ""
+        vendor_pairs = (
+            (
+                VENDOR_DIR / f"ffmpeg{tool_suffix}",
+                VENDOR_DIR / f"ffprobe{tool_suffix}",
+            ),
+            (
+                INTERNAL_VENDOR_DIR / f"ffmpeg{tool_suffix}",
+                INTERNAL_VENDOR_DIR / f"ffprobe{tool_suffix}",
+            ),
+        )
+        for ffmpeg_path, ffprobe_path in vendor_pairs:
             if not ffmpeg_path.exists():
                 continue
-            ffprobe_path = vendor_dir / ("ffprobe.exe" if os.name == "nt" else "ffprobe")
             return ffmpeg_path, ffprobe_path if ffprobe_path.exists() else None
 
         system_ffmpeg = shutil.which("ffmpeg")
@@ -1823,7 +1834,10 @@ class CacheManager:
         shutil.copy2(source_resolved, target)
         target.chmod(target.stat().st_mode | stat.S_IEXEC)
 
-    def _read_ffmpeg_version(self, binary_path: Path) -> str:
+    @staticmethod
+    def _read_tool_version(binary_path: Path, tool_name: str) -> str:
+        if not binary_path.exists():
+            return ""
         try:
             process = subprocess.run(
                 [str(binary_path), "-version"],
@@ -1832,7 +1846,7 @@ class CacheManager:
                 errors="replace",
                 check=False,
                 timeout=10,
-                **self._hidden_process_kwargs(),
+                **CacheManager._hidden_process_kwargs(),
             )
         except (OSError, subprocess.SubprocessError):
             return ""
@@ -1844,9 +1858,18 @@ class CacheManager:
         if not first_line:
             return ""
         parts = first_line[0].split()
-        if len(parts) >= 3 and parts[0].lower() == "ffmpeg" and parts[1] == "version":
+        executable_name = Path(parts[0]).name.lower()
+        normalized_tool_name = tool_name.lower()
+        if (
+            len(parts) >= 3
+            and executable_name in {normalized_tool_name, f"{normalized_tool_name}.exe"}
+            and parts[1] == "version"
+        ):
             return parts[2]
         return ""
+
+    def _read_ffmpeg_version(self, binary_path: Path) -> str:
+        return self._read_tool_version(binary_path, "ffmpeg")
 
     @staticmethod
     def _bbdown_ffmpeg_path_arg(binary_path: Path) -> str:
