@@ -8,6 +8,8 @@ from pathlib import Path
 
 APP_NAME = "bilikara"
 ROOT_DIR = Path(__file__).resolve().parent
+REQUIRED_TOOL_BINARIES = ("ffmpeg",)
+OPTIONAL_TOOL_BINARIES = ("ffprobe",)
 
 
 def main() -> None:
@@ -27,7 +29,7 @@ def main() -> None:
         static_arg,
         str(ROOT_DIR / "start_bilikara.py"),
     ]
-    command.extend(_bundled_binary_args(data_separator))
+    command.extend(_bundled_binary_args(data_separator, verbose=True))
 
     if platform.system() == "Darwin":
         command.extend(["--osx-bundle-identifier", "com.bilikara.app"])
@@ -37,14 +39,21 @@ def main() -> None:
     print(f"Build complete. Output directory: {ROOT_DIR / 'dist'}")
 
 
-def _bundled_binary_args(data_separator: str) -> list[str]:
+def _bundled_binary_args(data_separator: str, *, verbose: bool = False) -> list[str]:
     args: list[str] = []
     bundled: list[str] = []
     missing: list[str] = []
-    for binary_name in ("ffmpeg", "ffprobe"):
+    optional_missing: list[str] = []
+    for binary_name in REQUIRED_TOOL_BINARIES:
         binary_path = _resolve_bundle_binary_path(binary_name)
         if not binary_path:
             missing.append(binary_name)
+            continue
+        bundled.append(str(binary_path.resolve()))
+    for binary_name in OPTIONAL_TOOL_BINARIES:
+        binary_path = _resolve_bundle_binary_path(binary_name)
+        if not binary_path:
+            optional_missing.append(binary_name)
             continue
         bundled.append(str(binary_path.resolve()))
 
@@ -52,15 +61,18 @@ def _bundled_binary_args(data_separator: str) -> list[str]:
         missing_text = ", ".join(missing)
         raise RuntimeError(
             f"Missing required external tools for bundle build: {missing_text}. "
-            "Install ffmpeg/ffprobe and ensure they are available on PATH."
+            "Install ffmpeg and ensure it is available on PATH."
         )
 
     for source in bundled:
         args.extend(["--add-binary", f"{source}{data_separator}vendor"])
 
-    print("Bundling external tools:")
-    for source in bundled:
-        print(f"  - {source}")
+    if verbose:
+        print("Bundling external tools:")
+        for source in bundled:
+            print(f"  - {source}")
+        if optional_missing:
+            print(f"Optional tools not bundled: {', '.join(optional_missing)}")
 
     return args
 
@@ -68,6 +80,8 @@ def _bundled_binary_args(data_separator: str) -> list[str]:
 def _resolve_bundle_binary_path(binary_name: str) -> Path | None:
     direct = shutil.which(binary_name)
     if not direct:
+        if binary_name == "ffprobe":
+            return _resolve_ffprobe_from_ffmpeg()
         return None
 
     candidate = Path(direct)
@@ -75,7 +89,23 @@ def _resolve_bundle_binary_path(binary_name: str) -> Path | None:
         resolved = _resolve_windows_binary(binary_name, candidate)
         if resolved:
             return resolved
+        if binary_name == "ffprobe":
+            return _resolve_ffprobe_from_ffmpeg()
+        return None
     return candidate
+
+
+def _resolve_ffprobe_from_ffmpeg() -> Path | None:
+    ffmpeg_path = _resolve_bundle_binary_path("ffmpeg")
+    if not ffmpeg_path:
+        return None
+
+    names = ["ffprobe.exe", "ffprobe"] if platform.system() == "Windows" else ["ffprobe"]
+    for name in names:
+        sibling = ffmpeg_path.with_name(name)
+        if sibling.exists():
+            return sibling
+    return None
 
 
 def _resolve_windows_binary(binary_name: str, candidate: Path) -> Path | None:
@@ -83,20 +113,32 @@ def _resolve_windows_binary(binary_name: str, candidate: Path) -> Path | None:
     if "\\chocolatey\\bin\\" in candidate_str:
         root = candidate.parent.parent
         guesses = [
-            root / "lib" / binary_name / "tools" / binary_name / "bin" / f"{binary_name}.exe",
-            root / "lib" / binary_name / "tools" / "bin" / f"{binary_name}.exe",
+            root / "lib" / package_name / "tools" / package_name / "bin" / f"{binary_name}.exe"
+            for package_name in _windows_package_names(binary_name)
         ]
+        guesses.extend(
+            root / "lib" / package_name / "tools" / "bin" / f"{binary_name}.exe"
+            for package_name in _windows_package_names(binary_name)
+        )
         for guess in guesses:
             if guess.exists():
                 return guess
+        return None
 
     if "\\scoop\\shims\\" in candidate_str:
         root = candidate.parent.parent
-        guess = root / "apps" / binary_name / "current" / "bin" / f"{binary_name}.exe"
-        if guess.exists():
-            return guess
+        for package_name in _windows_package_names(binary_name):
+            guess = root / "apps" / package_name / "current" / "bin" / f"{binary_name}.exe"
+            if guess.exists():
+                return guess
+        return None
 
     return candidate
+
+
+def _windows_package_names(binary_name: str) -> list[str]:
+    names = ["ffmpeg", binary_name]
+    return list(dict.fromkeys(names))
 
 
 if __name__ == "__main__":

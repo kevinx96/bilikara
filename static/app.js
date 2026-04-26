@@ -3,9 +3,17 @@ const bannerAutoHideMs = 5000;
 const stalledRetrySeconds = 5;
 const gatchaCooldownMs = 15000;
 const localPlayerSyncIntervalMs = 120;
+const localPlayerHardSyncThresholdSeconds = 0.08;
+const localPlayerForceSyncEpsilonSeconds = 0.015;
+const localPlayerSeekSettlePollMs = 50;
+const localPlayerSeekSettleMaxMs = 1400;
 const audioVariantSwitchDebounceMs = 350;
+const playerSettingsEchoSuppressMs = 1800;
 const maxAvOffsetMs = 5000;
 const playerClickDelayMs = 220;
+const playerControlsAutoHideMs = 5000;
+const defaultSongAdvanceDelaySeconds = 3;
+const maxSongAdvanceDelaySeconds = 30;
 const storageKeys = {
   playerVolume: "bilikara.player.volume",
   playerMuted: "bilikara.player.muted",
@@ -17,13 +25,39 @@ const state = {
   clientId: createClientId(),
   disconnectSent: false,
   data: null,
+  lastPollRenderSignature: "",
+  currentTitleRenderSignature: "",
+  listHeaderRenderSignature: "",
+  requesterSelectRenderSignature: "",
+  sessionUsersRenderSignature: "",
+  remoteAccessRenderSignature: "",
+  cacheSettingsRenderSignature: "",
+  bbdownLoginRenderSignature: "",
+  gatchaCookieFaceRenderSignature: "",
+  historyRenderSignature: "",
+  playlistEmptyRenderSignature: "",
+  cacheSliderRenderSignature: "",
+  cachePolicyControlRenderSignature: "",
+  playerFullscreenButtonRenderSignature: "",
+  volumeControlsRenderSignature: "",
+  queueCurrentRenderSignature: "",
+  audioVariantBarRenderSignature: "",
   playerSignature: "",
   playerContext: null,
   localPlayerSyncTimer: null,
+  localPlayerControlsHideTimer: null,
   listView: "queue",
+  listStageView: "",
+  listFlipTimer: null,
   cacheSettingsOpen: false,
   cacheLimitSaving: false,
+  cachePolicySaving: false,
   avOffsetSaving: false,
+  avOffsetSaveSeq: 0,
+  avOffsetEchoSuppressUntil: 0,
+  localAvOffsetMs: null,
+  volumeSaveSeq: 0,
+  playerSettingsEchoSuppressUntil: 0,
   localPreferencesHydrated: false,
   localOffsetRestoreApplied: false,
   audioVariantSwitchInFlight: false,
@@ -40,8 +74,18 @@ const state = {
   backupBannerPaused: false,
   backupDismissHover: false,
   localAdvanceInFlight: false,
+  localAdvanceDelayTimer: null,
+  localAdvanceCountdownTimer: null,
+  localAdvanceDelayDeadline: 0,
+  localAdvanceDelayToken: 0,
+  localAdvanceDelayItemId: "",
   localShouldBePlaying: false,
   localSeekResumePending: false,
+  localSeekSettling: false,
+  localSeekResumeAfterSettle: false,
+  localSeekSettleStartedAt: 0,
+  localSeekSettleTimer: null,
+  localSeekSettleCallback: null,
   localPlayerVolume: 1,
   localPlayerMuted: false,
   pendingPlaybackRestore: null,
@@ -86,6 +130,11 @@ const elements = {
   cacheLimitValue: document.getElementById("cache-limit-value"),
   cacheLimitSlider: document.getElementById("cache-limit-slider"),
   cacheLimitScale: document.getElementById("cache-limit-scale"),
+  cacheQualitySelect: document.getElementById("cache-quality-select"),
+  cacheHiresCheckbox: document.getElementById("cache-hires-checkbox"),
+  dataResetButton: document.getElementById("data-reset-button"),
+  currentCacheRetryButton: document.getElementById("current-cache-retry-button"),
+  playerResetButton: document.getElementById("player-reset-button"),
   currentTitle: document.getElementById("current-title"),
   playerPanel: document.querySelector(".player-panel"),
   playerFrame: document.getElementById("player-frame"),
@@ -125,8 +174,10 @@ const elements = {
   layoutModeSwitch: document.getElementById("layout-mode-switch"),
   nextButton: document.getElementById("next-button"),
   queueNextButton: document.getElementById("queue-next-button"),
+  resortPlaylistButton: document.getElementById("resort-playlist-button"),
   historyToggleButton: document.getElementById("history-toggle-button"),
   clearPlaylistButton: document.getElementById("clear-playlist-button"),
+  clearHistoryButton: document.getElementById("clear-history-button"),
   playlistTemplate: document.getElementById("playlist-item-template"),
   historyTemplate: document.getElementById("history-item-template"),
   confirmPopover: document.getElementById("confirm-popover"),
@@ -214,8 +265,65 @@ function requesterBadgeText(requesterName) {
   return normalized ? `点歌人 ${normalized}` : "";
 }
 
+function setTextContent(element, value) {
+  if (!element) {
+    return;
+  }
+  const nextValue = String(value ?? "");
+  if (element.textContent !== nextValue) {
+    element.textContent = nextValue;
+  }
+}
+
+function setClassToggle(element, className, force) {
+  if (!element) {
+    return;
+  }
+  const shouldHaveClass = Boolean(force);
+  if (element.classList.contains(className) !== shouldHaveClass) {
+    element.classList.toggle(className, shouldHaveClass);
+  }
+}
+
+function setElementAttribute(element, name, value) {
+  if (!element) {
+    return;
+  }
+  const nextValue = String(value ?? "");
+  if (element.getAttribute(name) !== nextValue) {
+    element.setAttribute(name, nextValue);
+  }
+}
+
+function setElementTitle(element, value) {
+  if (!element) {
+    return;
+  }
+  const nextValue = String(value ?? "");
+  if (element.title !== nextValue) {
+    element.title = nextValue;
+  }
+}
+
 function selectedRequesterName() {
   return String(elements.requesterSelect?.value || "").trim();
+}
+
+function hasSessionUsers() {
+  return Array.isArray(state.data?.session_users) && state.data.session_users.length > 0;
+}
+
+function validatedRequesterNameForAdd(showMessage = setFormMessage) {
+  if (!hasSessionUsers()) {
+    showMessage("请先在服务端添加本场 KTV 用户", true);
+    return "";
+  }
+  const requesterName = selectedRequesterName();
+  if (!requesterName) {
+    showMessage("请先选择点歌人。", true);
+    return "";
+  }
+  return requesterName;
 }
 
 function createClientId() {
@@ -258,14 +366,25 @@ function renderPlayerFullscreenButton() {
   }
   const active = isPlayerPanelFullscreen();
   const enabled = canTogglePlayerFullscreen();
-  button.disabled = !enabled;
-  button.textContent = active ? "退出全屏" : "全屏显示";
-  button.setAttribute("aria-pressed", String(active));
-  button.title = enabled
+  const label = active ? "退出全屏" : "全屏显示";
+  const title = enabled
     ? (active ? "退出播放器区域全屏" : "将播放器区域切换为全屏")
     : supportsPlayerFullscreen()
       ? "当前没有可全屏的播放内容"
       : "当前环境不支持区域全屏";
+  const signature = JSON.stringify({ active, enabled, label, title });
+
+  if (signature === state.playerFullscreenButtonRenderSignature) {
+    return;
+  }
+  state.playerFullscreenButtonRenderSignature = signature;
+
+  if (button.disabled !== !enabled) {
+    button.disabled = !enabled;
+  }
+  setTextContent(button, label);
+  setElementAttribute(button, "aria-pressed", String(active));
+  setElementTitle(button, title);
 }
 
 function requestElementFullscreen(element) {
@@ -317,6 +436,51 @@ function clearPlayerFrameClickTimer() {
   }
   window.clearTimeout(state.playerFrameClickTimer);
   state.playerFrameClickTimer = null;
+}
+
+function clearLocalPlayerControlsHideTimer() {
+  if (!state.localPlayerControlsHideTimer) {
+    return;
+  }
+  window.clearTimeout(state.localPlayerControlsHideTimer);
+  state.localPlayerControlsHideTimer = null;
+}
+
+function mountedLocalVideoElement() {
+  return elements.playerFrame.querySelector('video[data-player-role="video"]')
+    || elements.playerFrame.querySelector("video");
+}
+
+function hideMountedPlayerControls() {
+  clearLocalPlayerControlsHideTimer();
+  const video = mountedLocalVideoElement();
+  if (!video) {
+    return;
+  }
+  video.controls = false;
+  video.removeAttribute("controls");
+}
+
+function scheduleMountedPlayerControlsHide() {
+  clearLocalPlayerControlsHideTimer();
+  const video = mountedLocalVideoElement();
+  if (!video || !video.controls) {
+    return;
+  }
+  state.localPlayerControlsHideTimer = window.setTimeout(() => {
+    state.localPlayerControlsHideTimer = null;
+    hideMountedPlayerControls();
+  }, playerControlsAutoHideMs);
+}
+
+function showMountedPlayerControls() {
+  const video = mountedLocalVideoElement();
+  if (!video) {
+    return;
+  }
+  video.controls = true;
+  video.setAttribute("controls", "");
+  scheduleMountedPlayerControlsHide();
 }
 
 function toggleMountedLocalPlayback() {
@@ -448,10 +612,26 @@ function rememberedMuted() {
 }
 
 function syncLocalPlayerSettingsFromSnapshot(playerSettings) {
+  if (Date.now() < state.playerSettingsEchoSuppressUntil) {
+    return;
+  }
   const volumePercent = Math.max(0, Math.min(100, Number(playerSettings?.volume_percent ?? 100)));
   state.localPlayerVolume = volumePercent / 100;
   state.localPlayerMuted = Boolean(playerSettings?.is_muted);
   persistLocalVolumePreferences();
+}
+
+function markLocalVolumeWrite() {
+  state.playerSettingsEchoSuppressUntil = Date.now() + playerSettingsEchoSuppressMs;
+  state.volumeSaveSeq += 1;
+  return state.volumeSaveSeq;
+}
+
+function markLocalAvOffsetWrite(offsetMs) {
+  state.localAvOffsetMs = boundedAvOffsetMs(offsetMs);
+  state.avOffsetEchoSuppressUntil = Date.now() + playerSettingsEchoSuppressMs;
+  state.avOffsetSaveSeq += 1;
+  return state.avOffsetSaveSeq;
 }
 
 function clientHeaders(extraHeaders = {}) {
@@ -513,10 +693,35 @@ async function fetchState() {
       syncLocalPlayerSettingsFromSnapshot(state.data?.player_settings);
     }
   }
-  render();
+  const renderSignature = renderSignatureForData(state.data);
+  if (renderSignature !== state.lastPollRenderSignature) {
+    state.lastPollRenderSignature = renderSignature;
+    render();
+  } else if (hasDownloadingItems(state.data)) {
+    refreshRetryButtons();
+  }
   if (previousOffsetMs !== currentAvOffsetMs()) {
     syncMountedLocalPlayer(true);
   }
+}
+
+function renderSignatureForData(data) {
+  if (!data) {
+    return "";
+  }
+  const { player_status: _playerStatus, ...renderedData } = data;
+  return JSON.stringify(renderedData);
+}
+
+function hasDownloadingItems(data) {
+  if (!data) {
+    return false;
+  }
+  const items = [
+    data.current_item,
+    ...(Array.isArray(data.playlist) ? data.playlist : []),
+  ];
+  return items.some((item) => item?.cache_status === "downloading");
 }
 
 async function searchGatchaCache(query) {
@@ -619,16 +824,18 @@ function setCookieMessage(message, isError = false) {
 
 function renderGatchaCookieFace() {
   const showCookie = Boolean(state.gatchaCookieVisible);
-  elements.gatchaPanel?.classList.toggle("is-cookie-view", showCookie);
-  elements.gatchaStage?.classList.toggle("is-cookie-view", showCookie);
-  if (elements.gatchaTag) {
-    elements.gatchaTag.textContent = showCookie ? "Cookie Config" : "gatcha Draw";
+  const signature = showCookie ? "cookie" : "gatcha";
+  if (signature === state.gatchaCookieFaceRenderSignature) {
+    return;
   }
-  if (elements.gatchaTitle) {
-    elements.gatchaTitle.textContent = showCookie ? "Cookie" : "试试运气";
-  }
-  if (elements.gatchaCookieToggle) {
-    elements.gatchaCookieToggle.textContent = showCookie ? "返回抽卡" : "输入 Cookie";
+  state.gatchaCookieFaceRenderSignature = signature;
+
+  setClassToggle(elements.gatchaPanel, "is-cookie-view", showCookie);
+  setClassToggle(elements.gatchaStage, "is-cookie-view", showCookie);
+  setTextContent(elements.gatchaTag, showCookie ? "Cookie Config" : "gatcha Draw");
+  setTextContent(elements.gatchaTitle, showCookie ? "Cookie" : "试试运气");
+  setTextContent(elements.gatchaCookieToggle, showCookie ? "返回抽卡" : "输入 Cookie");
+  if (elements.gatchaCookieToggle?.getAttribute("aria-pressed") !== String(showCookie)) {
     elements.gatchaCookieToggle.setAttribute("aria-pressed", String(showCookie));
   }
 }
@@ -692,13 +899,16 @@ function render() {
   }
 
   const currentItem = data.current_item;
-  elements.currentTitle.textContent = currentItem
-    ? currentItem.display_title
-    : "还没有歌曲";
+  const currentTitle = currentItem ? currentItem.display_title : "还没有歌曲";
+  if (currentTitle !== state.currentTitleRenderSignature) {
+    state.currentTitleRenderSignature = currentTitle;
+    setTextContent(elements.currentTitle, currentTitle);
+  }
   renderListHeader(data.playlist, data.history || []);
   renderRequesterSelect(data.session_users || []);
   renderSessionUsers(data.session_users || []);
   renderCacheSettings(data.bbdown, data.ffmpeg, data.cache_policy);
+  renderPlaybackRepairControls(currentItem);
   renderRemoteAccess(data.remote_access);
   renderLayoutMode();
 
@@ -720,9 +930,36 @@ function render() {
     data.playlist.length,
     Boolean(data.session_flags?.auto_restored_backup),
   );
-  elements.listStage.classList.toggle("is-history-view", state.listView === "history");
+  syncListStageView();
   renderGatchaCookieFace();
   renderConfirmPopover();
+  state.lastPollRenderSignature = renderSignatureForData(data);
+}
+
+function syncListStageView() {
+  const nextView = state.listView === "history" ? "history" : "queue";
+  const isInitialRender = !state.listStageView;
+  if (state.listStageView === nextView) {
+    return;
+  }
+  state.listStageView = nextView;
+
+  if (state.listFlipTimer) {
+    window.clearTimeout(state.listFlipTimer);
+    state.listFlipTimer = null;
+  }
+
+  setClassToggle(elements.listStage, "is-history-view", nextView === "history");
+  if (isInitialRender) {
+    elements.listStage?.classList.remove("is-flipping");
+    return;
+  }
+
+  elements.listStage?.classList.add("is-flipping");
+  state.listFlipTimer = window.setTimeout(() => {
+    elements.listStage?.classList.remove("is-flipping");
+    state.listFlipTimer = null;
+  }, 460);
 }
 
 function activeScrollableList() {
@@ -741,6 +978,12 @@ function normalizeWheelDelta(event, container) {
 
 function renderRequesterSelect(sessionUsers) {
   const users = Array.isArray(sessionUsers) ? sessionUsers : [];
+  const signature = JSON.stringify(users);
+  if (signature === state.requesterSelectRenderSignature) {
+    return;
+  }
+  state.requesterSelectRenderSignature = signature;
+
   const previousValue = selectedRequesterName();
   elements.requesterSelect.innerHTML = "";
 
@@ -768,6 +1011,12 @@ function renderRequesterSelect(sessionUsers) {
 
 function renderSessionUsers(sessionUsers) {
   const users = Array.isArray(sessionUsers) ? sessionUsers : [];
+  const signature = JSON.stringify(users);
+  if (signature === state.sessionUsersRenderSignature) {
+    return;
+  }
+  state.sessionUsersRenderSignature = signature;
+
   elements.sessionUserList.innerHTML = "";
 
   if (!users.length) {
@@ -854,19 +1103,24 @@ function renderRemoteAccess(remoteAccess) {
     : lanUrls.length === 1
       ? "请确保手机和服务端在同一个局域网内。"
       : "暂未检测到局域网地址，可稍后刷新或手动检查网络。";
+  const signature = JSON.stringify({ displayUrl, displayHint });
+  if (signature === state.remoteAccessRenderSignature) {
+    return;
+  }
+  state.remoteAccessRenderSignature = signature;
 
   [elements.remoteUrlLink, elements.remotePopoverUrlLink].forEach((link) => {
     if (!link) {
       return;
     }
-    link.href = displayUrl;
-    link.textContent = displayUrl;
+    if (link.getAttribute("href") !== displayUrl) {
+      link.href = displayUrl;
+    }
+    setTextContent(link, displayUrl);
   });
 
   [elements.remoteUrlHint, elements.remotePopoverUrlHint].forEach((hint) => {
-    if (hint) {
-      hint.textContent = displayHint;
-    }
+    setTextContent(hint, displayHint);
   });
 
   renderRemoteQr(displayUrl, [
@@ -942,75 +1196,121 @@ async function copyRemoteUrl() {
 
 function renderListHeader(playlist, history) {
   const isHistoryView = state.listView === "history";
-  elements.listTag.textContent = isHistoryView ? "History" : "Queue";
-  elements.listTitle.textContent = isHistoryView ? "历史记录" : "播放列表";
-  elements.queueCount.textContent = isHistoryView
-    ? `(${history.length}首)`
-    : `(${playlist.length}首)`;
-  elements.historyToggleButton.textContent = isHistoryView ? "返回队列" : "历史记录";
-  elements.clearPlaylistButton.classList.toggle("hidden", isHistoryView);
-  elements.nextButton.classList.toggle("hidden", isHistoryView);
+  const listTag = isHistoryView ? "History" : "Requests";
+  const listTitle = isHistoryView ? "历史记录" : "点歌列表";
+  const queueCount = isHistoryView ? `(${history.length}首)` : `(${playlist.length}首)`;
+  const historyButtonText = isHistoryView ? "返回点歌列表" : "历史记录";
+  const signature = JSON.stringify({
+    isHistoryView,
+    queueCount,
+  });
+
+  if (signature === state.listHeaderRenderSignature) {
+    return;
+  }
+  state.listHeaderRenderSignature = signature;
+
+  setTextContent(elements.listTag, listTag);
+  setTextContent(elements.listTitle, listTitle);
+  setTextContent(elements.queueCount, queueCount);
+  setTextContent(elements.historyToggleButton, historyButtonText);
+  setClassToggle(elements.clearPlaylistButton, "hidden", isHistoryView);
+  setClassToggle(elements.clearHistoryButton, "hidden", !isHistoryView || !history.length);
+  setClassToggle(elements.nextButton, "hidden", isHistoryView);
 }
 
 function renderCacheSettings(bbdown, ffmpeg, cachePolicy) {
-  syncToolIndicator(elements.serviceStatusIndicator, aggregateToolStatusState(bbdown, ffmpeg));
-  if (elements.playbackModeSummary) {
-    elements.playbackModeSummary.textContent = formatPlaybackMode(state.data?.playback_mode);
-  }
-  if (elements.playbackModeCurrent) {
-    elements.playbackModeCurrent.textContent = formatPlaybackMode(state.data?.playback_mode);
-  }
-  elements.cacheChipMeta.textContent = formatCacheChipMeta(cachePolicy);
-  elements.cacheUsageDetail.textContent = formatCacheUsage(cachePolicy);
-  syncToolIndicator(elements.bbdownPanelStatusIndicator, bbdown?.state);
-  syncToolIndicator(elements.ffmpegPanelStatusIndicator, ffmpeg?.state);
-  renderBBDownLogin(bbdown?.login || { logged_in: Boolean(bbdown?.logged_in) });
-  if (elements.bbdownStatusRow) {
-    elements.bbdownStatusRow.title = `BBDown ${formatBBDownHint(bbdown)}`;
-  }
-  if (elements.ffmpegStatusRow) {
-    elements.ffmpegStatusRow.title = `FFmpeg ${formatFFmpegHint(ffmpeg)}`;
+  const serviceState = aggregateToolStatusState(bbdown, ffmpeg);
+  const playbackModeText = formatPlaybackMode(state.data?.playback_mode);
+  const cacheChipMeta = formatCacheChipMeta(cachePolicy);
+  const cacheUsageDetail = formatCacheUsage(cachePolicy);
+  const bbdownTitle = `BBDown ${formatBBDownHint(bbdown)}`;
+  const ffmpegTitle = `FFmpeg ${formatFFmpegHint(ffmpeg)}`;
+  const signature = JSON.stringify({
+    serviceState,
+    playbackModeText,
+    bbdownState: bbdown?.state,
+    ffmpegState: ffmpeg?.state,
+    bbdownTitle,
+    ffmpegTitle,
+    login: bbdown?.login || { logged_in: Boolean(bbdown?.logged_in) },
+  });
+
+  if (signature !== state.cacheSettingsRenderSignature) {
+    state.cacheSettingsRenderSignature = signature;
+
+    syncToolIndicator(elements.serviceStatusIndicator, serviceState);
+    setTextContent(elements.playbackModeSummary, playbackModeText);
+    setTextContent(elements.playbackModeCurrent, playbackModeText);
+    syncToolIndicator(elements.bbdownPanelStatusIndicator, bbdown?.state);
+    syncToolIndicator(elements.ffmpegPanelStatusIndicator, ffmpeg?.state);
+    renderBBDownLogin(bbdown?.login || { logged_in: Boolean(bbdown?.logged_in) });
+    if (elements.bbdownStatusRow && elements.bbdownStatusRow.title !== bbdownTitle) {
+      elements.bbdownStatusRow.title = bbdownTitle;
+    }
+    if (elements.ffmpegStatusRow && elements.ffmpegStatusRow.title !== ffmpegTitle) {
+      elements.ffmpegStatusRow.title = ffmpegTitle;
+    }
   }
 
+  setTextContent(elements.cacheChipMeta, cacheChipMeta);
+  setTextContent(elements.cacheUsageDetail, cacheUsageDetail);
   renderCacheSlider(cachePolicy);
+  renderCachePolicyControls(cachePolicy);
   syncCachePanelVisibility();
+}
+
+function renderPlaybackRepairControls(currentItem) {
+  const button = elements.currentCacheRetryButton;
+  if (!button) {
+    return;
+  }
+  const hasCurrentItem = Boolean(currentItem?.id);
+  button.disabled = !hasCurrentItem;
+  button.title = hasCurrentItem
+    ? "重新缓存当前歌曲"
+    : "当前没有正在播放的歌曲";
 }
 
 function renderBBDownLogin(login) {
   const loggedIn = Boolean(login?.logged_in);
-  if (elements.bbdownLoginButton) {
-    elements.bbdownLoginButton.classList.toggle("is-logged", loggedIn);
-    elements.bbdownLoginButton.classList.toggle("is-unlogged", !loggedIn);
-    elements.bbdownLoginButton.classList.remove("is-unknown");
-    const label = elements.bbdownLoginButton.querySelector(".bbdown-login-label");
-    if (label) {
-      label.textContent = loggedIn ? "已登录" : "未登录";
+  const signature = JSON.stringify(login || {});
+  if (signature !== state.bbdownLoginRenderSignature) {
+    state.bbdownLoginRenderSignature = signature;
+    if (elements.bbdownLoginButton) {
+      setClassToggle(elements.bbdownLoginButton, "is-logged", loggedIn);
+      setClassToggle(elements.bbdownLoginButton, "is-unlogged", !loggedIn);
+      elements.bbdownLoginButton.classList.remove("is-unknown");
+      const label = elements.bbdownLoginButton.querySelector(".bbdown-login-label");
+      setTextContent(label, loggedIn ? "已登录" : "未登录");
+      elements.bbdownLoginButton.title = loggedIn ? "点击退出 BBDown 登录" : "点击生成 BBDown 登录二维码";
     }
-    elements.bbdownLoginButton.title = loggedIn ? "点击退出 BBDown 登录" : "点击生成 BBDown 登录二维码";
+
+    setClassToggle(elements.bbdownLoginPanel, "hidden", loggedIn);
+    if (!loggedIn) {
+      const qrImage = String(login?.qr_image || "");
+      const qrText = String(login?.qr_text || "");
+      if (elements.bbdownLoginQrImage) {
+        setClassToggle(elements.bbdownLoginQrImage, "hidden", !qrImage);
+        if (qrImage && elements.bbdownLoginQrImage.src !== qrImage) {
+          elements.bbdownLoginQrImage.src = qrImage;
+        } else if (!qrImage && elements.bbdownLoginQrImage.hasAttribute("src")) {
+          elements.bbdownLoginQrImage.removeAttribute("src");
+        }
+      }
+      if (elements.bbdownLoginQrText) {
+        setClassToggle(elements.bbdownLoginQrText, "hidden", Boolean(qrImage) || !qrText);
+        setTextContent(elements.bbdownLoginQrText, qrText);
+      }
+      if (elements.bbdownLoginMessage) {
+        setTextContent(elements.bbdownLoginMessage, login?.message || "正在准备二维码...");
+        setClassToggle(elements.bbdownLoginMessage, "is-error", login?.state === "failed");
+      }
+    }
   }
 
-  elements.bbdownLoginPanel?.classList.toggle("hidden", loggedIn);
   if (loggedIn) {
     return;
-  }
-
-  const qrImage = String(login?.qr_image || "");
-  const qrText = String(login?.qr_text || "");
-  if (elements.bbdownLoginQrImage) {
-    elements.bbdownLoginQrImage.classList.toggle("hidden", !qrImage);
-    if (qrImage && elements.bbdownLoginQrImage.src !== qrImage) {
-      elements.bbdownLoginQrImage.src = qrImage;
-    } else if (!qrImage) {
-      elements.bbdownLoginQrImage.removeAttribute("src");
-    }
-  }
-  if (elements.bbdownLoginQrText) {
-    elements.bbdownLoginQrText.classList.toggle("hidden", Boolean(qrImage) || !qrText);
-    elements.bbdownLoginQrText.textContent = qrText;
-  }
-  if (elements.bbdownLoginMessage) {
-    elements.bbdownLoginMessage.textContent = login?.message || "正在准备二维码...";
-    elements.bbdownLoginMessage.classList.toggle("is-error", login?.state === "failed");
   }
   maybeStartBBDownLogin(login);
 }
@@ -1049,19 +1349,23 @@ function syncToolIndicator(indicator, state) {
     return;
   }
   const normalizedState = String(state || "idle");
+  if (indicator.dataset.toolState === normalizedState) {
+    return;
+  }
+  indicator.dataset.toolState = normalizedState;
   indicator.classList.remove("is-ready", "is-failed", "is-loading", "is-pending");
-  indicator.textContent = "";
+  setTextContent(indicator, "");
   if (normalizedState === "ready") {
     indicator.classList.add("is-ready");
-    indicator.textContent = "✓";
+    setTextContent(indicator, "✓");
   } else if (normalizedState === "failed") {
     indicator.classList.add("is-failed");
-    indicator.textContent = "×";
+    setTextContent(indicator, "×");
   } else if (normalizedState === "checking" || normalizedState === "installing" || normalizedState === "loading") {
     indicator.classList.add("is-loading");
   } else {
     indicator.classList.add("is-pending");
-    indicator.textContent = "·";
+    setTextContent(indicator, "·");
   }
 }
 
@@ -1087,6 +1391,16 @@ function renderCacheSlider(cachePolicy) {
   const minValue = Number(choices[0] || 1);
   const maxValue = Number(choices[choices.length - 1] || 5);
   const currentValue = Number(cachePolicy?.max_cache_items || minValue);
+  const signature = JSON.stringify({
+    choices,
+    currentValue,
+    saving: state.cacheLimitSaving,
+  });
+
+  if (signature === state.cacheSliderRenderSignature) {
+    return;
+  }
+  state.cacheSliderRenderSignature = signature;
 
   elements.cacheLimitSlider.min = String(minValue);
   elements.cacheLimitSlider.max = String(maxValue);
@@ -1105,9 +1419,69 @@ function renderCacheSlider(cachePolicy) {
   });
 }
 
+function renderCachePolicyControls(cachePolicy) {
+  const rawChoices = Array.isArray(cachePolicy?.video_quality_choices)
+    ? cachePolicy.video_quality_choices
+    : [];
+  const choices = rawChoices.length
+    ? rawChoices.map((choice) => {
+      if (typeof choice === "string") {
+        return { value: choice, label: choice };
+      }
+      return {
+        value: String(choice?.value || ""),
+        label: String(choice?.label || choice?.value || ""),
+      };
+    }).filter((choice) => choice.value)
+    : [
+      { value: "1080P 高码率", label: "1080P 高码率" },
+      { value: "1080P 高清", label: "1080P 高清" },
+      { value: "720P 高清", label: "720P 高清" },
+      { value: "480P 清晰", label: "480P 清晰" },
+      { value: "360P 流畅", label: "360P 流畅" },
+    ];
+  const currentQuality = String(cachePolicy?.video_quality || choices[0]?.value || "1080P 高码率");
+  const audioHires = Boolean(cachePolicy?.audio_hires);
+  const signature = JSON.stringify({
+    choices,
+    currentQuality,
+    audioHires,
+    saving: state.cachePolicySaving,
+  });
+
+  if (signature === state.cachePolicyControlRenderSignature) {
+    return;
+  }
+  state.cachePolicyControlRenderSignature = signature;
+
+  if (elements.cacheQualitySelect) {
+    const choicesSignature = JSON.stringify(choices);
+    if (elements.cacheQualitySelect.dataset.choicesSignature !== choicesSignature) {
+      elements.cacheQualitySelect.innerHTML = "";
+      choices.forEach((choice) => {
+        const option = document.createElement("option");
+        option.value = choice.value;
+        option.textContent = choice.label;
+        elements.cacheQualitySelect.appendChild(option);
+      });
+      elements.cacheQualitySelect.dataset.choicesSignature = choicesSignature;
+    }
+    elements.cacheQualitySelect.value = currentQuality;
+    elements.cacheQualitySelect.disabled = state.cachePolicySaving;
+  }
+
+  if (elements.cacheHiresCheckbox) {
+    elements.cacheHiresCheckbox.checked = audioHires;
+    elements.cacheHiresCheckbox.disabled = state.cachePolicySaving;
+  }
+}
+
 function syncCachePanelVisibility(options = {}) {
-  elements.cacheSettingsToggle.setAttribute("aria-expanded", String(state.cacheSettingsOpen));
-  elements.cachePanel.classList.toggle("hidden", !state.cacheSettingsOpen);
+  const expanded = String(state.cacheSettingsOpen);
+  if (elements.cacheSettingsToggle.getAttribute("aria-expanded") !== expanded) {
+    elements.cacheSettingsToggle.setAttribute("aria-expanded", expanded);
+  }
+  setClassToggle(elements.cachePanel, "hidden", !state.cacheSettingsOpen);
   maybeStartBBDownLogin(state.data?.bbdown?.login, {
     force: Boolean(options.forceLoginRefresh),
   });
@@ -1115,23 +1489,45 @@ function syncCachePanelVisibility(options = {}) {
 
 function renderQueueCurrent(currentItem) {
   if (!currentItem) {
-    elements.queueCurrent.classList.add("hidden");
-    elements.queueCurrent.dataset.state = "idle";
-    elements.queueCurrentTag.textContent = "播放中";
-    elements.queueCurrentTitle.textContent = "还没有歌曲";
-    elements.queueCurrentRetry.classList.add("hidden");
+    const signature = "empty";
+    if (signature === state.queueCurrentRenderSignature) {
+      return;
+    }
+    state.queueCurrentRenderSignature = signature;
+    setClassToggle(elements.queueCurrent, "hidden", true);
+    if (elements.queueCurrent.dataset.state !== "idle") {
+      elements.queueCurrent.dataset.state = "idle";
+    }
+    setTextContent(elements.queueCurrentTag, "播放中");
+    setTextContent(elements.queueCurrentTitle, "还没有歌曲");
+    setElementTitle(elements.queueCurrentTitle, "");
+    setClassToggle(elements.queueCurrentRetry, "hidden", true);
     elements.queueCurrentRetry.removeAttribute("data-id");
     return;
   }
 
-  elements.queueCurrent.classList.remove("hidden");
   const currentState = currentStatusForItem(currentItem);
-  elements.queueCurrent.dataset.state = currentState.state;
-  elements.queueCurrentTag.textContent = currentState.label;
-  elements.queueCurrentTitle.textContent = currentItem.display_title;
   const requesterText = requesterBadgeText(currentItem.requester_name);
-  elements.queueCurrentRequester.textContent = requesterText;
-  elements.queueCurrentRequester.classList.toggle("hidden", !requesterText);
+  const signature = JSON.stringify({
+    id: currentItem.id,
+    state: currentState.state,
+    label: currentState.label,
+    title: currentItem.display_title,
+    requesterText,
+  });
+
+  if (signature !== state.queueCurrentRenderSignature) {
+    state.queueCurrentRenderSignature = signature;
+    setClassToggle(elements.queueCurrent, "hidden", false);
+    if (elements.queueCurrent.dataset.state !== currentState.state) {
+      elements.queueCurrent.dataset.state = currentState.state;
+    }
+    setTextContent(elements.queueCurrentTag, currentState.label);
+    setTextContent(elements.queueCurrentTitle, currentItem.display_title);
+    setElementTitle(elements.queueCurrentTitle, ownerTooltipForEntry(currentItem));
+    setTextContent(elements.queueCurrentRequester, requesterText);
+    setClassToggle(elements.queueCurrentRequester, "hidden", !requesterText);
+  }
   syncRetryButton(elements.queueCurrentRetry, currentItem);
 }
 
@@ -1139,7 +1535,7 @@ function currentStatusForItem(item) {
   if (!item) {
     return { state: "idle", label: "播放中" };
   }
-  if (item.local_media_url || item.cache_status === "ready") {
+  if (item.cache_status === "ready") {
     return { state: "playing", label: "播放中" };
   }
   if (item.cache_status === "failed") {
@@ -1160,7 +1556,7 @@ function audioVariantsForItem(item) {
     return [];
   }
   return item.audio_variants.filter(
-    (variant) => variant && (variant.audio_url || variant.media_url),
+    (variant) => variant && variant.audio_url,
   );
 }
 
@@ -1186,24 +1582,26 @@ function availablePartEntriesForItem(item) {
   const durations = Array.isArray(item.available_durations) && item.available_durations.length
     ? item.available_durations
     : item.selected_durations;
-  if (!Array.isArray(pages) || !Array.isArray(parts) || pages.length <= 1) {
-    return [];
-  }
-  return pages
+
+  const normalizedPages = Array.isArray(pages) && pages.length
+    ? pages
+    : [Number(item.page || 1)];
+
+  return normalizedPages
     .map((page, index) => {
       const numericPage = Number(page || 0);
       if (!numericPage) {
         return null;
       }
-      const label = String(parts[index] || `P${numericPage}`).trim() || `P${numericPage}`;
+      const label = String(parts?.[index] || item.part_title || `P${numericPage}`).trim() || `P${numericPage}`;
       return {
         page: numericPage,
         label,
-        duration: Number(durations[index] || 0),
+        duration: Number(durations?.[index] || 0),
         id: variantIdForLabel(numericPage, label, index),
         bound: Array.isArray(item.selected_pages)
           ? item.selected_pages.some((selectedPage) => Number(selectedPage) === numericPage)
-          : false,
+          : numericPage === Number(item.page || 0),
       };
     })
     .filter(Boolean);
@@ -1223,8 +1621,10 @@ function partOptionsForItem(item) {
     const cachedVariant = cachedVariantsById.get(entry.id);
     return {
       ...entry,
-      media_url: String(cachedVariant?.media_url || ""),
       audio_url: String(cachedVariant?.audio_url || ""),
+      // LEGACY: cachedVariant.media_url used to point to a muxed MP4 variant.
+      // The host player now uses video_media_url + audio_url split playback.
+      // media_url: String(cachedVariant?.media_url || ""),
     };
   });
 }
@@ -1251,26 +1651,48 @@ function selectedAudioVariantForItem(item) {
   return variants[0];
 }
 
-function selectedMediaUrlForItem(item) {
-  const selectedVariant = selectedAudioVariantForItem(item);
-  return selectedVariant?.media_url || item.local_media_url || "";
-}
+// LEGACY: single-file/muxed playback helper. Current local playback reads
+// selectedVideoUrlForItem() and selectedAudioUrlForItem() separately.
+// function selectedMediaUrlForItem(item) {
+//   const selectedVariant = selectedAudioVariantForItem(item);
+//   return String(selectedVariant?.media_url || "").trim();
+// }
 
 function selectedVideoUrlForItem(item) {
-  return String(item?.video_media_url || item?.local_media_url || "").trim();
+  return String(item?.video_media_url || "").trim();
 }
 
 function selectedAudioUrlForItem(item) {
   const selectedVariant = selectedAudioVariantForItem(item);
-  return String(selectedVariant?.audio_url || selectedVariant?.media_url || "").trim();
+  return String(selectedVariant?.audio_url || "").trim();
+}
+function serverAvOffsetMs(playerSettings = state.data?.player_settings) {
+  return boundedAvOffsetMs(playerSettings?.av_offset_ms || 0);
 }
 
 function currentAvOffsetMs() {
-  return Number(state.data?.player_settings?.av_offset_ms || 0);
+  if (state.localAvOffsetMs !== null && Date.now() < state.avOffsetEchoSuppressUntil) {
+    return state.localAvOffsetMs;
+  }
+  state.localAvOffsetMs = null;
+  return serverAvOffsetMs();
 }
 
 function currentAvOffsetSeconds() {
   return currentAvOffsetMs() / 1000;
+}
+
+function currentSongAdvanceDelaySeconds(playerSettings = state.data?.player_settings) {
+  const rawValue = Number(playerSettings?.song_advance_delay_seconds ?? defaultSongAdvanceDelaySeconds);
+  if (!Number.isFinite(rawValue)) {
+    return defaultSongAdvanceDelaySeconds;
+  }
+  return Math.max(0, Math.min(maxSongAdvanceDelaySeconds, Math.round(rawValue)));
+}
+
+function queuedNextItem() {
+  const playlist = state.data?.playlist;
+  return Array.isArray(playlist) && playlist.length ? playlist[0] : null;
 }
 
 function boundedAvOffsetMs(rawValue) {
@@ -1289,6 +1711,23 @@ function clampMediaTime(media, nextTime) {
   return Math.min(target, Number(media.duration));
 }
 
+function setMediaCurrentTime(media, nextTime, toleranceSeconds = localPlayerForceSyncEpsilonSeconds) {
+  if (!media) {
+    return false;
+  }
+  const target = clampMediaTime(media, nextTime);
+  const currentTime = Number(media.currentTime || 0);
+  if (Number.isFinite(currentTime) && Math.abs(currentTime - target) <= toleranceSeconds) {
+    return false;
+  }
+  try {
+    media.currentTime = target;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function clearLocalPlayerSyncTimer() {
   if (state.localPlayerSyncTimer) {
     window.clearInterval(state.localPlayerSyncTimer);
@@ -1296,8 +1735,109 @@ function clearLocalPlayerSyncTimer() {
   }
 }
 
+function clearLocalPlayerSeekState() {
+  if (state.localSeekSettleTimer) {
+    window.clearTimeout(state.localSeekSettleTimer);
+    state.localSeekSettleTimer = null;
+  }
+  state.localSeekSettling = false;
+  state.localSeekResumeAfterSettle = false;
+  state.localSeekSettleStartedAt = 0;
+  state.localSeekSettleCallback = null;
+  state.localSeekResumePending = false;
+}
+
+function playerDelayOverlay() {
+  return elements.playerFrame?.querySelector(".player-delay-overlay") || null;
+}
+
+function ensurePlayerDelayOverlay() {
+  let overlay = playerDelayOverlay();
+  if (overlay) {
+    return overlay;
+  }
+
+  overlay = document.createElement("div");
+  overlay.className = "player-delay-overlay hidden";
+  overlay.setAttribute("aria-live", "polite");
+  overlay.innerHTML = `
+    <div class="player-delay-copy">
+      <p class="player-delay-label">\u4e0b\u4e00\u9996\u5012\u8ba1\u65f6</p>
+      <p class="player-delay-count" data-delay-count>0</p>
+      <p class="player-delay-next" data-delay-next>\u51c6\u5907\u4e0b\u4e00\u9996</p>
+    </div>
+  `;
+  elements.playerFrame.appendChild(overlay);
+  return overlay;
+}
+
+function updateLocalAdvanceDelayOverlay() {
+  const overlay = ensurePlayerDelayOverlay();
+  const remainingSeconds = Math.max(
+    0,
+    Math.ceil((state.localAdvanceDelayDeadline - Date.now()) / 1000),
+  );
+  const countNode = overlay.querySelector("[data-delay-count]");
+  const nextNode = overlay.querySelector("[data-delay-next]");
+  const nextItem = queuedNextItem();
+  setTextContent(countNode, String(remainingSeconds));
+  setTextContent(nextNode, nextItem?.display_title ? `\u63a5\u4e0b\u6765\uff1a${nextItem.display_title}` : "\u51c6\u5907\u4e0b\u4e00\u9996");
+  overlay.classList.toggle("hidden", state.localAdvanceDelayDeadline <= 0);
+}
+
+function clearLocalAdvanceDelay({ resetInFlight = false } = {}) {
+  if (state.localAdvanceDelayTimer) {
+    window.clearTimeout(state.localAdvanceDelayTimer);
+    state.localAdvanceDelayTimer = null;
+  }
+  if (state.localAdvanceCountdownTimer) {
+    window.clearInterval(state.localAdvanceCountdownTimer);
+    state.localAdvanceCountdownTimer = null;
+  }
+  state.localAdvanceDelayDeadline = 0;
+  state.localAdvanceDelayItemId = "";
+  state.localAdvanceDelayToken += 1;
+  const overlay = playerDelayOverlay();
+  if (overlay) {
+    overlay.classList.add("hidden");
+  }
+  if (resetInFlight) {
+    state.localAdvanceInFlight = false;
+  }
+}
+
+function startLocalAdvanceDelay(delaySeconds) {
+  const currentItemId = String(state.data?.current_item?.id || "");
+  if (!currentItemId) {
+    return;
+  }
+  clearLocalAdvanceDelay();
+  state.localAdvanceInFlight = true;
+  state.localAdvanceDelayItemId = currentItemId;
+  state.localAdvanceDelayToken += 1;
+  const token = state.localAdvanceDelayToken;
+  state.localAdvanceDelayDeadline = Date.now() + delaySeconds * 1000;
+  updateLocalAdvanceDelayOverlay();
+  showMountedPlayerControls();
+  state.localAdvanceCountdownTimer = window.setInterval(updateLocalAdvanceDelayOverlay, 250);
+  state.localAdvanceDelayTimer = window.setTimeout(() => {
+    finishLocalAdvanceDelay(token, currentItemId).catch(() => {});
+  }, delaySeconds * 1000);
+}
+
+async function finishLocalAdvanceDelay(token, itemId) {
+  if (token !== state.localAdvanceDelayToken || itemId !== state.localAdvanceDelayItemId) {
+    return;
+  }
+  clearLocalAdvanceDelay({ resetInFlight: true });
+  await advanceLocalPlayerNow();
+}
+
 function teardownMountedPlayer() {
   clearLocalPlayerSyncTimer();
+  clearLocalPlayerControlsHideTimer();
+  clearLocalPlayerSeekState();
+  clearLocalAdvanceDelay({ resetInFlight: true });
   elements.playerFrame.querySelectorAll("video, audio").forEach((media) => {
     try {
       media.pause();
@@ -1321,7 +1861,16 @@ function activeLocalPlayerElements() {
 }
 
 function activePrimaryVideoElement() {
-  return elements.playerFrame.querySelector("video");
+  return mountedLocalVideoElement();
+}
+
+function isActiveSplitPlayer(video, audio) {
+  const active = activeLocalPlayerElements();
+  return active.video === video && active.audio === audio;
+}
+
+function isSplitPlayerSeekSettling(video, audio) {
+  return state.localSeekSettling && isActiveSplitPlayer(video, audio);
 }
 
 function captureLocalPlayerPreferences() {
@@ -1336,7 +1885,7 @@ function captureLocalPlayerPreferences() {
     state.localPlayerMuted = Boolean(mediaWithVolume.muted);
     persistLocalVolumePreferences();
   }
-  if (primaryVideo) {
+  if (primaryVideo && !state.localSeekSettling) {
     state.localShouldBePlaying = !primaryVideo.paused;
   }
 }
@@ -1355,14 +1904,115 @@ function syncSplitPlayerVolumeFromVideo(video, audio) {
   if (!video || !audio) {
     return;
   }
-  state.localPlayerVolume = Number.isFinite(video.volume)
+  const nextVolume = Number.isFinite(video.volume)
     ? Math.max(0, Math.min(1, Number(video.volume)))
     : state.localPlayerVolume;
-  state.localPlayerMuted = Boolean(video.muted);
-  persistLocalVolumePreferences();
-  audio.volume = state.localPlayerVolume;
-  audio.muted = state.localPlayerMuted;
-  renderVolumeControls(state.data?.playback_mode || "local");
+  const nextMuted = Boolean(video.muted);
+  const changed = Math.abs(nextVolume - state.localPlayerVolume) > 0.001
+    || nextMuted !== state.localPlayerMuted;
+
+  if (changed) {
+    state.localPlayerVolume = nextVolume;
+    state.localPlayerMuted = nextMuted;
+    persistLocalVolumePreferences();
+    renderVolumeControls(state.data?.playback_mode || "local");
+  }
+
+  if (Math.abs(audio.volume - state.localPlayerVolume) > 0.001) {
+    audio.volume = state.localPlayerVolume;
+  }
+  if (audio.muted !== state.localPlayerMuted) {
+    audio.muted = state.localPlayerMuted;
+  }
+}
+
+function syncSplitSeekAudioTarget(video, audio) {
+  if (!video || !audio || audio.readyState < 1) {
+    return 0;
+  }
+  const targetAudioTime = clampMediaTime(audio, Number(video.currentTime || 0) - currentAvOffsetSeconds());
+  setMediaCurrentTime(audio, targetAudioTime);
+  return targetAudioTime;
+}
+
+function scheduleSplitPlayerSeekSettle(video, audio) {
+  if (!isSplitPlayerSeekSettling(video, audio)) {
+    return;
+  }
+  if (state.localSeekSettleTimer) {
+    window.clearTimeout(state.localSeekSettleTimer);
+    state.localSeekSettleTimer = null;
+  }
+  state.localSeekSettleTimer = window.setTimeout(() => {
+    state.localSeekSettleTimer = null;
+    settleSplitPlayerSeek(video, audio);
+  }, localPlayerSeekSettlePollMs);
+}
+
+function beginSplitPlayerSeek(video, audio, options = {}) {
+  if (!video || !audio || !isActiveSplitPlayer(video, audio)) {
+    return;
+  }
+
+  const resumeAfterSeek = Boolean(options.resumeAfterSeek);
+  state.localSeekSettling = true;
+  state.localSeekResumeAfterSettle = resumeAfterSeek;
+  state.localSeekSettleStartedAt = Date.now();
+  state.localSeekResumePending = resumeAfterSeek;
+  state.localShouldBePlaying = resumeAfterSeek;
+  if (typeof options.onSettled === "function") {
+    state.localSeekSettleCallback = options.onSettled;
+  }
+
+  if (!audio.paused) {
+    audio.pause();
+  }
+  if (!video.paused) {
+    video.pause();
+  }
+  if (Number.isFinite(options.targetTime)) {
+    setMediaCurrentTime(video, options.targetTime);
+  }
+
+  syncSplitSeekAudioTarget(video, audio);
+  scheduleSplitPlayerSeekSettle(video, audio);
+}
+
+function settleSplitPlayerSeek(video, audio, force = false) {
+  if (!isSplitPlayerSeekSettling(video, audio)) {
+    return false;
+  }
+
+  const targetAudioTime = syncSplitSeekAudioTarget(video, audio);
+  const elapsedMs = Date.now() - state.localSeekSettleStartedAt;
+  const audioNeedsData = targetAudioTime > 0 && audio.readyState < 2;
+  const waitingForMedia = video.seeking || audio.seeking || video.readyState < 2 || audio.readyState < 1 || audioNeedsData;
+  if (!force && waitingForMedia && elapsedMs < localPlayerSeekSettleMaxMs) {
+    scheduleSplitPlayerSeekSettle(video, audio);
+    return false;
+  }
+
+  const resumeAfterSettle = state.localSeekResumeAfterSettle && !video.ended;
+  const onSettled = state.localSeekSettleCallback;
+  clearLocalPlayerSeekState();
+
+  syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
+  if (resumeAfterSettle) {
+    state.localShouldBePlaying = true;
+    video.play()
+      .then(() => syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true))
+      .catch(() => {});
+  } else {
+    state.localShouldBePlaying = false;
+    if (!audio.paused) {
+      audio.pause();
+    }
+  }
+
+  if (typeof onSettled === "function") {
+    onSettled();
+  }
+  return true;
 }
 
 function syncSplitPlayer(video, audio, offsetSeconds, forceSeek = false) {
@@ -1372,11 +2022,38 @@ function syncSplitPlayer(video, audio, offsetSeconds, forceSeek = false) {
 
   syncSplitPlayerVolumeFromVideo(video, audio);
   audio.playbackRate = Number(video.playbackRate || 1) || 1;
+
+  if (isSplitPlayerSeekSettling(video, audio)) {
+    if (!audio.paused) {
+      audio.pause();
+    }
+    return;
+  }
+
+  if (video.seeking) {
+    if (!audio.paused) {
+      audio.pause();
+    }
+    return;
+  }
+  if (!video.paused && video.readyState < 2) {
+    if (!audio.paused) {
+      audio.pause();
+    }
+    return;
+  }
+  if (audio.seeking && !forceSeek) {
+    return;
+  }
+
   const targetAudioTime = clampMediaTime(audio, Number(video.currentTime || 0) - offsetSeconds);
   const drift = Math.abs(Number(audio.currentTime || 0) - targetAudioTime);
 
-  if (forceSeek || drift > 0.08) {
-    audio.currentTime = targetAudioTime;
+  if (
+    (forceSeek && drift > localPlayerForceSyncEpsilonSeconds)
+    || (!forceSeek && drift > localPlayerHardSyncThresholdSeconds)
+  ) {
+    setMediaCurrentTime(audio, targetAudioTime);
   }
 
   if (video.paused) {
@@ -1432,7 +2109,10 @@ function setRangeFillPercent(input, percent) {
     return;
   }
   const normalizedPercent = Math.max(0, Math.min(100, Number(percent || 0)));
-  input.style.setProperty("--range-fill-percent", `${normalizedPercent}%`);
+  const nextValue = `${normalizedPercent}%`;
+  if (input.style.getPropertyValue("--range-fill-percent") !== nextValue) {
+    input.style.setProperty("--range-fill-percent", nextValue);
+  }
 }
 
 function renderVolumeControls(playbackMode) {
@@ -1442,12 +2122,29 @@ function renderVolumeControls(playbackMode) {
 
   const isLocalMode = playbackMode === "local";
   const volumePercent = Math.round(state.localPlayerVolume * 100);
-  elements.volumePanel.classList.toggle("hidden", !isLocalMode);
-  elements.volumeSlider.value = String(volumePercent);
+  const label = volumePercentText();
+  const muteLabel = state.localPlayerMuted ? "取消静音" : "静音";
+  const signature = JSON.stringify({
+    isLocalMode,
+    volumePercent,
+    label,
+    muteLabel,
+    muted: state.localPlayerMuted,
+  });
+
+  if (signature === state.volumeControlsRenderSignature) {
+    return;
+  }
+  state.volumeControlsRenderSignature = signature;
+
+  setClassToggle(elements.volumePanel, "hidden", !isLocalMode);
+  if (elements.volumeSlider.value !== String(volumePercent)) {
+    elements.volumeSlider.value = String(volumePercent);
+  }
   setRangeFillPercent(elements.volumeSlider, volumePercent);
-  elements.volumeValue.textContent = volumePercentText();
-  elements.volumeMuteButton.textContent = state.localPlayerMuted ? "取消静音" : "静音";
-  elements.volumeMuteButton.classList.toggle("is-muted", state.localPlayerMuted);
+  setTextContent(elements.volumeValue, label);
+  setTextContent(elements.volumeMuteButton, muteLabel);
+  setClassToggle(elements.volumeMuteButton, "is-muted", state.localPlayerMuted);
 }
 
 function persistLocalVolumePreferences() {
@@ -1459,6 +2156,7 @@ async function setLocalPlayerVolume(nextVolume, { unmute = true } = {}) {
   const normalizedVolume = Math.max(0, Math.min(1, Number(nextVolume || 0)));
   const previousVolume = state.localPlayerVolume;
   const previousMuted = state.localPlayerMuted;
+  const requestSeq = markLocalVolumeWrite();
   state.localPlayerVolume = normalizedVolume;
   if (unmute && normalizedVolume > 0) {
     state.localPlayerMuted = false;
@@ -1467,13 +2165,20 @@ async function setLocalPlayerVolume(nextVolume, { unmute = true } = {}) {
   applyStoredVolumeToMountedPlayer();
   renderVolumeControls(state.data?.playback_mode || "local");
   try {
-    state.data = await apiPost("/api/player/volume", {
+    const nextData = await apiPost("/api/player/volume", {
       volume_percent: Math.round(normalizedVolume * 100),
       is_muted: state.localPlayerMuted,
     });
-    syncLocalPlayerSettingsFromSnapshot(state.data?.player_settings);
+    if (requestSeq !== state.volumeSaveSeq) {
+      return;
+    }
+    state.data = nextData;
     render();
   } catch (error) {
+    if (requestSeq !== state.volumeSaveSeq) {
+      return;
+    }
+    state.playerSettingsEchoSuppressUntil = 0;
     state.localPlayerVolume = previousVolume;
     state.localPlayerMuted = previousMuted;
     persistLocalVolumePreferences();
@@ -1485,18 +2190,26 @@ async function setLocalPlayerVolume(nextVolume, { unmute = true } = {}) {
 
 async function toggleLocalPlayerMute() {
   const previousMuted = state.localPlayerMuted;
+  const requestSeq = markLocalVolumeWrite();
   state.localPlayerMuted = !state.localPlayerMuted;
   persistLocalVolumePreferences();
   applyStoredVolumeToMountedPlayer();
   renderVolumeControls(state.data?.playback_mode || "local");
   try {
-    state.data = await apiPost("/api/player/volume", {
+    const nextData = await apiPost("/api/player/volume", {
       volume_percent: Math.round(state.localPlayerVolume * 100),
       is_muted: state.localPlayerMuted,
     });
-    syncLocalPlayerSettingsFromSnapshot(state.data?.player_settings);
+    if (requestSeq !== state.volumeSaveSeq) {
+      return;
+    }
+    state.data = nextData;
     render();
   } catch (error) {
+    if (requestSeq !== state.volumeSaveSeq) {
+      return;
+    }
+    state.playerSettingsEchoSuppressUntil = 0;
     state.localPlayerMuted = previousMuted;
     persistLocalVolumePreferences();
     applyStoredVolumeToMountedPlayer();
@@ -1526,8 +2239,15 @@ function scheduleAudioVariantSwitchUnlock() {
 
 function renderAudioVariantBar(currentItem, playbackMode) {
   if (playbackMode !== "local" || !currentItem) {
-    elements.audioVariantBar.innerHTML = "";
-    elements.audioVariantBar.classList.add("hidden");
+    const signature = JSON.stringify({ hidden: true, playbackMode, itemId: currentItem?.id || "" });
+    if (signature === state.audioVariantBarRenderSignature) {
+      return;
+    }
+    state.audioVariantBarRenderSignature = signature;
+    if (elements.audioVariantBar.childElementCount) {
+      elements.audioVariantBar.innerHTML = "";
+    }
+    setClassToggle(elements.audioVariantBar, "hidden", true);
     state.audioVariantBarExpanded = false;
     state.audioVariantBarItemId = "";
     return;
@@ -1535,8 +2255,20 @@ function renderAudioVariantBar(currentItem, playbackMode) {
 
   const variants = partOptionsForItem(currentItem);
   if (variants.length <= 1) {
-    elements.audioVariantBar.innerHTML = "";
-    elements.audioVariantBar.classList.add("hidden");
+    const signature = JSON.stringify({
+      hidden: true,
+      playbackMode,
+      itemId: currentItem.id,
+      variantCount: variants.length,
+    });
+    if (signature === state.audioVariantBarRenderSignature) {
+      return;
+    }
+    state.audioVariantBarRenderSignature = signature;
+    if (elements.audioVariantBar.childElementCount) {
+      elements.audioVariantBar.innerHTML = "";
+    }
+    setClassToggle(elements.audioVariantBar, "hidden", true);
     state.audioVariantBarExpanded = false;
     state.audioVariantBarItemId = currentItem.id;
     return;
@@ -1549,6 +2281,24 @@ function renderAudioVariantBar(currentItem, playbackMode) {
 
   const selectedVariant = selectedAudioVariantForItem(currentItem);
   const buttonsDisabled = audioVariantSwitchLocked();
+  const signature = JSON.stringify({
+    hidden: false,
+    itemId: currentItem.id,
+    selectedVariantId: selectedVariant?.id || "",
+    buttonsDisabled,
+    expanded: state.audioVariantBarExpanded,
+    variants: variants.map((variant) => ({
+      id: variant.id,
+      label: variant.label || variant.id,
+      page: variant.page || "",
+      bound: Boolean(variant.bound),
+    })),
+  });
+  if (signature === state.audioVariantBarRenderSignature) {
+    return;
+  }
+  state.audioVariantBarRenderSignature = signature;
+
   elements.audioVariantBar.innerHTML = "";
   const list = document.createElement("div");
   list.className = "audio-variant-list";
@@ -1592,7 +2342,7 @@ function renderAudioVariantBar(currentItem, playbackMode) {
   } else {
     state.audioVariantBarExpanded = false;
   }
-  elements.audioVariantBar.classList.remove("hidden");
+  setClassToggle(elements.audioVariantBar, "hidden", false);
 }
 
 function renderAvSyncControls(playbackMode, playerSettings) {
@@ -1602,7 +2352,7 @@ function renderAvSyncControls(playbackMode, playerSettings) {
 
   const isLocalMode = playbackMode === "local";
   elements.avSyncPanel.classList.toggle("hidden", !isLocalMode);
-  const offsetMs = boundedAvOffsetMs(playerSettings?.av_offset_ms || 0);
+  const offsetMs = currentAvOffsetMs();
   elements.avOffsetInput.disabled = state.avOffsetSaving;
   if (document.activeElement !== elements.avOffsetInput || state.avOffsetSaving) {
     elements.avOffsetInput.value = String(offsetMs);
@@ -1610,15 +2360,15 @@ function renderAvSyncControls(playbackMode, playerSettings) {
 }
 
 function renderPlayer(currentItem, playbackMode) {
-  const selectedMediaUrl = currentItem ? selectedMediaUrlForItem(currentItem) : "";
   const selectedVideoUrl = currentItem ? selectedVideoUrlForItem(currentItem) : "";
   const selectedAudioUrl = currentItem ? selectedAudioUrlForItem(currentItem) : "";
   const hasSplitPlayback = Boolean(selectedVideoUrl && selectedAudioUrl);
+
   const signature = [
     currentItem ? currentItem.id : "none",
     playbackMode,
-    hasSplitPlayback ? selectedVideoUrl : selectedMediaUrl,
-    hasSplitPlayback ? selectedAudioUrl : "",
+    selectedVideoUrl,
+    selectedAudioUrl,
     currentItem ? currentItem.cache_status : "",
   ].join("|");
 
@@ -1634,16 +2384,17 @@ function renderPlayer(currentItem, playbackMode) {
     !state.pendingPlaybackRestore
     && playbackMode === "local"
     && currentItem
-    && (hasSplitPlayback || selectedMediaUrl)
+    && hasSplitPlayback
     && previousPlayerContext?.playbackMode === "local"
     && previousPlayerContext.itemId === currentItem.id
     && (
-      previousPlayerContext.mediaUrl !== selectedMediaUrl
-      || previousPlayerContext.videoUrl !== selectedVideoUrl
+      previousPlayerContext.videoUrl !== selectedVideoUrl
       || previousPlayerContext.audioUrl !== selectedAudioUrl
     )
   ) {
-    const currentVideo = elements.playerFrame.querySelector("video");
+    const currentVideo = elements.playerFrame.querySelector('video[data-player-role="video"]')
+      || elements.playerFrame.querySelector("video");
+
     if (currentVideo) {
       captureLocalPlayerPreferences();
       state.pendingPlaybackRestore = {
@@ -1658,17 +2409,17 @@ function renderPlayer(currentItem, playbackMode) {
   state.playerSignature = signature;
   state.playerContext = {
     itemId: currentItem ? currentItem.id : "",
-    mediaUrl: selectedMediaUrl,
     videoUrl: selectedVideoUrl,
     audioUrl: selectedAudioUrl,
     playbackMode,
   };
+
   captureLocalPlayerPreferences();
   teardownMountedPlayer();
 
   if (!currentItem) {
     elements.playerFrame.innerHTML =
-      '<div class="empty-state"><p>把 B 站视频链接加入列表后，这里会开始播放。</p></div>';
+      '<div class="empty-state"><p>把 B 站视频链接加入点歌列表后，这里会开始播放。</p></div>';
     return;
   }
 
@@ -1686,217 +2437,210 @@ function renderPlayer(currentItem, playbackMode) {
     return;
   }
 
-  if (hasSplitPlayback) {
+  if (!hasSplitPlayback) {
     elements.playerFrame.innerHTML = `
-      <video
-        data-player-role="video"
-        controls
-        controlsList="nofullscreen"
-        autoplay
-        playsinline
-        preload="metadata"
-        src="${escapeHtml(selectedVideoUrl)}"
-      ></video>
-      <audio
-        data-player-role="audio"
-        preload="auto"
-        src="${escapeHtml(selectedAudioUrl)}"
-      ></audio>
+      <div class="empty-state">
+        <p>当前歌曲正在准备独立音视频轨。</p>
+        <p class="empty-hint">${escapeHtml(currentItem.cache_message || "正在后台缓存")}</p>
+      </div>
     `;
-    const video = elements.playerFrame.querySelector('video[data-player-role="video"]');
-    const audio = elements.playerFrame.querySelector('audio[data-player-role="audio"]');
-    if (video && audio) {
-      applyStoredVolumeToSplitPlayer(video, audio);
-      const reportCurrentVideoStatus = () => {
-        reportPlayerStatus(currentItem.id, video);
-      };
-      let restoreApplied = false;
-      const maybeRestorePlayback = () => {
-        const pendingRestore = state.pendingPlaybackRestore;
-        if (
-          restoreApplied
-          || !pendingRestore
-          || pendingRestore.itemId !== currentItem.id
-          || pendingRestore.variantId !== selectedAudioVariantForItem(currentItem)?.id
-          || video.readyState < 1
-          || audio.readyState < 1
-        ) {
-          return;
-        }
-
-        restoreApplied = true;
-        if (Number.isFinite(pendingRestore.currentTime)) {
-          video.currentTime = clampMediaTime(video, pendingRestore.currentTime);
-        }
-        state.localShouldBePlaying = Boolean(pendingRestore.wasPlaying);
-        syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
-        if (pendingRestore.wasPlaying) {
-          video.play().catch(() => {});
-        }
-        state.pendingPlaybackRestore = null;
-        reportCurrentVideoStatus();
-      };
-
-      video.addEventListener("loadedmetadata", () => {
-        maybeRestorePlayback();
-        syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
-        reportCurrentVideoStatus();
-      });
-      audio.addEventListener("loadedmetadata", () => {
-        maybeRestorePlayback();
-        syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
-      });
-      video.addEventListener("play", () => {
-        state.localShouldBePlaying = true;
-        state.localSeekResumePending = false;
-        syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
-        reportCurrentVideoStatus();
-      });
-      video.addEventListener("pause", () => {
-        if (state.localSeekResumePending) {
-          return;
-        }
-        if (document.hidden && state.localShouldBePlaying) {
-          window.setTimeout(() => {
-            video.play().catch(() => {});
-            syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
-          }, 0);
-          return;
-        }
-        state.localShouldBePlaying = false;
-        if (!audio.paused) {
-          audio.pause();
-        }
-        reportCurrentVideoStatus();
-      });
-      video.addEventListener("seeking", () => {
-        state.localSeekResumePending = !video.paused || state.localShouldBePlaying;
-      });
-      video.addEventListener("seeked", () => {
-        syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
-        if (state.localSeekResumePending) {
-          video.play().catch(() => {});
-        }
-        state.localSeekResumePending = false;
-        reportCurrentVideoStatus();
-      });
-      video.addEventListener("ratechange", () => {
-        syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
-      });
-      video.addEventListener("volumechange", () => {
-        syncSplitPlayerVolumeFromVideo(video, audio);
-      });
-      video.addEventListener("ended", async () => {
-        state.localShouldBePlaying = false;
-        state.localSeekResumePending = false;
-        audio.pause();
-        reportCurrentVideoStatus();
-        await handleLocalPlaybackEnded();
-      });
-      audio.addEventListener("ended", () => {
-        syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
-      });
-      state.localPlayerSyncTimer = window.setInterval(() => {
-        syncSplitPlayer(video, audio, currentAvOffsetSeconds(), false);
-      }, localPlayerSyncIntervalMs);
-      window.setTimeout(() => {
-        maybeRestorePlayback();
-        syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
-        reportCurrentVideoStatus();
-      }, 0);
-    }
-    return;
-  }
-
-  if (selectedMediaUrl) {
-    elements.playerFrame.innerHTML = `
-      <video
-        controls
-        controlsList="nofullscreen"
-        autoplay
-        playsinline
-        preload="metadata"
-        src="${escapeHtml(selectedMediaUrl)}"
-      ></video>
-    `;
-    const video = elements.playerFrame.querySelector("video");
-    if (video) {
-      video.volume = state.localPlayerVolume;
-      video.muted = state.localPlayerMuted;
-      const reportCurrentVideoStatus = () => {
-        reportPlayerStatus(currentItem.id, video);
-      };
-      const pendingRestore = state.pendingPlaybackRestore;
-      if (
-        pendingRestore
-        && pendingRestore.itemId === currentItem.id
-        && pendingRestore.variantId === selectedAudioVariantForItem(currentItem)?.id
-      ) {
-        video.addEventListener("loadedmetadata", () => {
-          if (Number.isFinite(pendingRestore.currentTime)) {
-            video.currentTime = clampMediaTime(video, pendingRestore.currentTime);
-          }
-          if (pendingRestore.wasPlaying) {
-            video.play().catch(() => {});
-          }
-          state.pendingPlaybackRestore = null;
-          reportCurrentVideoStatus();
-        }, { once: true });
-      }
-      video.addEventListener("loadedmetadata", reportCurrentVideoStatus);
-      video.addEventListener("play", () => {
-        state.localShouldBePlaying = true;
-        state.localSeekResumePending = false;
-        reportCurrentVideoStatus();
-      });
-      video.addEventListener("pause", () => {
-        if (state.localSeekResumePending) {
-          return;
-        }
-        if (document.hidden && state.localShouldBePlaying) {
-          window.setTimeout(() => {
-            video.play().catch(() => {});
-          }, 0);
-          return;
-        }
-        state.localShouldBePlaying = false;
-        reportCurrentVideoStatus();
-      });
-      video.addEventListener("seeking", () => {
-        state.localSeekResumePending = !video.paused || state.localShouldBePlaying;
-      });
-      video.addEventListener("seeked", () => {
-        if (state.localSeekResumePending) {
-          video.play().catch(() => {});
-        }
-        state.localSeekResumePending = false;
-        reportCurrentVideoStatus();
-      });
-      video.addEventListener("volumechange", () => {
-        state.localPlayerVolume = Number.isFinite(video.volume)
-          ? Math.max(0, Math.min(1, Number(video.volume)))
-          : state.localPlayerVolume;
-        state.localPlayerMuted = Boolean(video.muted);
-        persistLocalVolumePreferences();
-        renderVolumeControls(state.data?.playback_mode || "local");
-      });
-      video.addEventListener("ended", async () => {
-        state.localShouldBePlaying = false;
-        state.localSeekResumePending = false;
-        reportCurrentVideoStatus();
-        await handleLocalPlaybackEnded();
-      });
-      window.setTimeout(reportCurrentVideoStatus, 0);
-    }
     return;
   }
 
   elements.playerFrame.innerHTML = `
-    <div class="empty-state">
-      <p>当前歌曲还没有完成本地缓存。</p>
-      <p class="empty-hint">${escapeHtml(currentItem.cache_message || "正在后台缓存")}</p>
-    </div>
+    <video
+      data-player-role="video"
+      controls
+      controlsList="nofullscreen"
+      autoplay
+      playsinline
+      preload="metadata"
+      src="${escapeHtml(selectedVideoUrl)}"
+    ></video>
+    <audio
+      data-player-role="audio"
+      preload="auto"
+      src="${escapeHtml(selectedAudioUrl)}"
+    ></audio>
   `;
+
+  const video = elements.playerFrame.querySelector('video[data-player-role="video"]');
+  const audio = elements.playerFrame.querySelector('audio[data-player-role="audio"]');
+
+  if (!video || !audio) {
+    return;
+  }
+
+  applyStoredVolumeToSplitPlayer(video, audio);
+  showMountedPlayerControls();
+
+  const reportCurrentVideoStatus = () => {
+    reportPlayerStatus(currentItem.id, video);
+  };
+
+  let restoreApplied = false;
+  const maybeRestorePlayback = () => {
+    const pendingRestore = state.pendingPlaybackRestore;
+    if (
+      restoreApplied
+      || !pendingRestore
+      || pendingRestore.itemId !== currentItem.id
+      || pendingRestore.variantId !== selectedAudioVariantForItem(currentItem)?.id
+      || video.readyState < 1
+      || audio.readyState < 1
+    ) {
+      return;
+    }
+
+    restoreApplied = true;
+    state.pendingPlaybackRestore = null;
+    beginSplitPlayerSeek(video, audio, {
+      resumeAfterSeek: Boolean(pendingRestore.wasPlaying),
+      targetTime: pendingRestore.currentTime,
+      onSettled: reportCurrentVideoStatus,
+    });
+  };
+
+  video.addEventListener("loadedmetadata", () => {
+    showMountedPlayerControls();
+    maybeRestorePlayback();
+    if (isSplitPlayerSeekSettling(video, audio)) {
+      settleSplitPlayerSeek(video, audio);
+    } else {
+      syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
+    }
+    reportCurrentVideoStatus();
+  });
+
+  audio.addEventListener("loadedmetadata", () => {
+    maybeRestorePlayback();
+    if (isSplitPlayerSeekSettling(video, audio)) {
+      settleSplitPlayerSeek(video, audio);
+    } else {
+      syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
+    }
+  });
+
+  video.addEventListener("play", () => {
+    if (isSplitPlayerSeekSettling(video, audio)) {
+      state.localSeekResumeAfterSettle = true;
+      state.localShouldBePlaying = true;
+      state.localSeekResumePending = true;
+      video.pause();
+      return;
+    }
+    state.localShouldBePlaying = true;
+    state.localSeekResumePending = false;
+    showMountedPlayerControls();
+    syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
+    reportCurrentVideoStatus();
+  });
+
+  video.addEventListener("pause", () => {
+    if (state.localSeekResumePending) {
+      return;
+    }
+    if (document.hidden && state.localShouldBePlaying) {
+      window.setTimeout(() => {
+        video.play().catch(() => {});
+        syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
+      }, 0);
+      return;
+    }
+    state.localShouldBePlaying = false;
+    if (!audio.paused) {
+      audio.pause();
+    }
+    showMountedPlayerControls();
+    reportCurrentVideoStatus();
+  });
+
+  video.addEventListener("seeking", () => {
+    beginSplitPlayerSeek(video, audio, {
+      resumeAfterSeek: !video.paused || state.localShouldBePlaying,
+      onSettled: reportCurrentVideoStatus,
+    });
+  });
+
+  video.addEventListener("seeked", () => {
+    showMountedPlayerControls();
+    if (!settleSplitPlayerSeek(video, audio)) {
+      reportCurrentVideoStatus();
+    }
+  });
+
+  video.addEventListener("canplay", () => {
+    settleSplitPlayerSeek(video, audio);
+  });
+
+  audio.addEventListener("seeked", () => {
+    settleSplitPlayerSeek(video, audio);
+  });
+
+  audio.addEventListener("canplay", () => {
+    settleSplitPlayerSeek(video, audio);
+  });
+
+  video.addEventListener("waiting", () => {
+    if (!audio.paused) {
+      audio.pause();
+    }
+  });
+
+  video.addEventListener("playing", () => {
+    syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
+  });
+
+  video.addEventListener("ratechange", () => {
+    showMountedPlayerControls();
+    syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
+  });
+
+  video.addEventListener("volumechange", () => {
+    showMountedPlayerControls();
+    syncSplitPlayerVolumeFromVideo(video, audio);
+  });
+
+  ["pointermove", "pointerdown", "touchstart"].forEach((eventName) => {
+    video.addEventListener(eventName, () => {
+      showMountedPlayerControls();
+    }, { passive: true });
+  });
+
+  video.addEventListener("ended", async () => {
+    state.localShouldBePlaying = false;
+    state.localSeekResumePending = false;
+    audio.pause();
+    showMountedPlayerControls();
+    reportCurrentVideoStatus();
+    await handleLocalPlaybackEnded();
+  });
+
+  audio.addEventListener("ended", () => {
+    if (isSplitPlayerSeekSettling(video, audio)) {
+      return;
+    }
+    syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
+  });
+
+  state.localPlayerSyncTimer = window.setInterval(() => {
+    if (isSplitPlayerSeekSettling(video, audio)) {
+      settleSplitPlayerSeek(video, audio);
+      return;
+    }
+    syncSplitPlayer(video, audio, currentAvOffsetSeconds(), false);
+  }, localPlayerSyncIntervalMs);
+
+  window.setTimeout(() => {
+    showMountedPlayerControls();
+    maybeRestorePlayback();
+    if (isSplitPlayerSeekSettling(video, audio)) {
+      settleSplitPlayerSeek(video, audio);
+    } else {
+      syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
+    }
+    reportCurrentVideoStatus();
+  }, 0);
 }
 
 function applyRemotePlayerControl(command, currentItem, playbackMode) {
@@ -1917,7 +2661,16 @@ function applyRemotePlayerControl(command, currentItem, playbackMode) {
     const audio = elements.playerFrame.querySelector('audio[data-player-role="audio"]');
     if (video) {
       if (action === "toggle-play") {
-        if (video.paused) {
+        if (audio && isSplitPlayerSeekSettling(video, audio)) {
+          const shouldResume = !state.localSeekResumeAfterSettle;
+          state.localSeekResumeAfterSettle = shouldResume;
+          state.localShouldBePlaying = shouldResume;
+          state.localSeekResumePending = shouldResume;
+          if (!shouldResume) {
+            video.pause();
+            audio.pause();
+          }
+        } else if (video.paused) {
           state.localShouldBePlaying = true;
           video.play().catch(() => {});
         } else {
@@ -1927,16 +2680,23 @@ function applyRemotePlayerControl(command, currentItem, playbackMode) {
       } else if (action === "seek-relative") {
         const deltaSeconds = Number(command?.delta_seconds || 0);
         if (Number.isFinite(deltaSeconds) && deltaSeconds !== 0) {
-          state.localSeekResumePending = !video.paused || state.localShouldBePlaying;
+          const resumeAfterSeek = !video.paused || state.localShouldBePlaying;
           const duration = Number.isFinite(video.duration) ? video.duration : Number.POSITIVE_INFINITY;
           const nextTime = Math.max(0, Number(video.currentTime || 0) + deltaSeconds);
-          video.currentTime = Number.isFinite(duration)
+          const clampedNextTime = Number.isFinite(duration)
             ? Math.min(nextTime, duration)
             : nextTime;
           if (audio) {
-            syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
+            beginSplitPlayerSeek(video, audio, {
+              resumeAfterSeek,
+              targetTime: clampedNextTime,
+              onSettled: () => reportPlayerStatus(currentItem.id, video),
+            });
+          } else {
+            state.localSeekResumePending = resumeAfterSeek;
+            setMediaCurrentTime(video, clampedNextTime);
           }
-          if (state.localSeekResumePending) {
+          if (!audio && state.localSeekResumePending) {
             video.play().catch(() => {});
           }
         }
@@ -1985,18 +2745,23 @@ function reportPlayerStatus(itemId, video) {
 }
 
 function renderPlaylist(playlist, currentItem, cachePolicy) {
-  const existingNodes = new Map(
-    [...elements.playlist.querySelectorAll(".song-item")].map((node) => [node.dataset.id, node]),
-  );
-
   if (!playlist.length) {
-    elements.playlist.innerHTML = "";
     const emptyMessage = state.data?.current_item
-      ? '<div class="queue-empty"><p>待播队列已经空了。</p><p>可以继续从左侧加入下一首。</p></div>'
-      : '<div class="queue-empty"><p>播放列表还是空的。</p><p>把链接加到左侧输入框里就行。</p></div>';
+      ? '<div class="queue-empty"><p>点歌列表已经空了。</p><p>可以继续从左侧点下一首。</p></div>'
+      : '<div class="queue-empty"><p>点歌列表还是空的。</p><p>把链接加到左侧输入框里就行。</p></div>';
+    const signature = state.data?.current_item ? "empty-with-current" : "empty";
+    if (signature === state.playlistEmptyRenderSignature) {
+      return;
+    }
+    state.playlistEmptyRenderSignature = signature;
     elements.playlist.innerHTML = emptyMessage;
     return;
   }
+
+  state.playlistEmptyRenderSignature = "";
+  const existingNodes = new Map(
+    [...elements.playlist.querySelectorAll(".song-item")].map((node) => [node.dataset.id, node]),
+  );
 
   elements.playlist.querySelectorAll(".queue-empty").forEach((node) => {
     node.remove();
@@ -2005,8 +2770,9 @@ function renderPlaylist(playlist, currentItem, cachePolicy) {
   playlist.forEach((item, index) => {
     const node = existingNodes.get(item.id)
       || elements.playlistTemplate.content.firstElementChild.cloneNode(true);
-    node.dataset.id = item.id;
-    node.title = item.display_title;
+    if (node.dataset.id !== item.id) {
+      node.dataset.id = item.id;
+    }
 
     const badge = node.querySelector(".song-progress-badge");
     const indexLabel = node.querySelector(".song-index-label");
@@ -2017,39 +2783,63 @@ function renderPlaylist(playlist, currentItem, cachePolicy) {
     const titleNode = node.querySelector(".song-title");
     const requesterNode = node.querySelector(".song-requester");
 
-    indexLabel.textContent = String(index + 1);
-
     const badgeState = badgeStateForItem(item, index, currentItem, cachePolicy);
-    badge.classList.toggle("active", badgeState === "active");
-    badge.classList.toggle("idle", badgeState === "idle");
-    badge.classList.toggle("ready", item.cache_status === "ready");
-    badge.classList.toggle("failed", item.cache_status === "failed");
-    badge.style.setProperty("--badge-delay", badgeAnimationDelay(item.id));
-    readyIndicator.classList.toggle("hidden", item.cache_status !== "ready");
-    badge.setAttribute("title", badgeTitleForItem(item));
-
     const sizeText = cacheSizeLabelForItem(item);
-    sizeLabel.textContent = sizeText;
-    sizeLabel.classList.toggle("hidden", !sizeText);
+    const ownerTooltip = ownerTooltipForEntry(item);
+    const requesterText = requesterBadgeText(item.requester_name);
+    const noteText = noteForItem(item);
+    const staticSignature = JSON.stringify({
+      title: item.display_title,
+      ownerTooltip,
+      requesterText,
+    });
+    if (node.dataset.staticSignature !== staticSignature) {
+      node.dataset.staticSignature = staticSignature;
+      setTextContent(titleNode, item.display_title);
+      setElementTitle(node, "");
+      setElementTitle(titleNode, ownerTooltip);
+      setTextContent(requesterNode, requesterText);
+      setClassToggle(requesterNode, "hidden", !requesterText);
+      node.querySelectorAll("button").forEach((button) => {
+        if (button.dataset.id !== item.id) {
+          button.dataset.id = item.id;
+        }
+      });
+    }
+
+    const badgeDelay = badgeAnimationDelay(item.id);
+    const dynamicSignature = JSON.stringify({
+      index,
+      badgeState,
+      cacheStatus: item.cache_status,
+      badgeDelay,
+      badgeTitle: badgeTitleForItem(item),
+      sizeText,
+      noteText,
+    });
+    if (node.dataset.dynamicSignature !== dynamicSignature) {
+      node.dataset.dynamicSignature = dynamicSignature;
+      setTextContent(indexLabel, String(index + 1));
+      setClassToggle(badge, "active", badgeState === "active");
+      setClassToggle(badge, "idle", badgeState === "idle");
+      setClassToggle(badge, "ready", item.cache_status === "ready");
+      setClassToggle(badge, "failed", item.cache_status === "failed");
+      if (badge.style.getPropertyValue("--badge-delay") !== badgeDelay) {
+        badge.style.setProperty("--badge-delay", badgeDelay);
+      }
+      setClassToggle(readyIndicator, "hidden", item.cache_status !== "ready");
+      setElementTitle(badge, badgeTitleForItem(item));
+      setTextContent(sizeLabel, sizeText);
+      setClassToggle(sizeLabel, "hidden", !sizeText);
+      setTextContent(note, noteText);
+      setClassToggle(note, "hidden", !noteText);
+    }
     syncRetryButton(retryButton, item);
 
-    titleNode.textContent = item.display_title;
-    const ownerTooltip = ownerTooltipForEntry(item);
-    node.title = ownerTooltip;
-    titleNode.title = ownerTooltip;
-    const requesterText = requesterBadgeText(item.requester_name);
-    requesterNode.textContent = requesterText;
-    requesterNode.classList.toggle("hidden", !requesterText);
-
-    const noteText = noteForItem(item);
-    note.textContent = noteText;
-    note.classList.toggle("hidden", !noteText);
-
-    node.querySelectorAll("button").forEach((button) => {
-      button.dataset.id = item.id;
-    });
-
-    elements.playlist.appendChild(node);
+    const referenceNode = elements.playlist.children[index] || null;
+    if (node !== referenceNode) {
+      elements.playlist.insertBefore(node, referenceNode);
+    }
     existingNodes.delete(item.id);
   });
 
@@ -2077,7 +2867,7 @@ function shouldShowRetryButton(item) {
   if (!itemId) {
     return false;
   }
-  if (item.local_media_url || item.cache_status === "ready") {
+  if (item.cache_status === "ready") {
     delete state.retryActivityById[itemId];
     return false;
   }
@@ -2125,20 +2915,52 @@ function syncRetryButton(button, item) {
     return;
   }
   const visible = shouldShowRetryButton(item);
-  button.classList.toggle("hidden", !visible);
+  setClassToggle(button, "hidden", !visible);
   if (!visible) {
-    button.removeAttribute("data-id");
-    button.removeAttribute("title");
-    button.removeAttribute("aria-label");
+    if (button.hasAttribute("data-id")) {
+      button.removeAttribute("data-id");
+    }
+    if (button.hasAttribute("title")) {
+      button.removeAttribute("title");
+    }
+    if (button.hasAttribute("aria-label")) {
+      button.removeAttribute("aria-label");
+    }
     return;
   }
   const tooltip = "点击重新下载";
-  button.dataset.id = item.id;
-  button.title = tooltip;
-  button.setAttribute("aria-label", tooltip);
+  if (button.dataset.id !== item.id) {
+    button.dataset.id = item.id;
+  }
+  setElementTitle(button, tooltip);
+  setElementAttribute(button, "aria-label", tooltip);
+}
+
+function refreshRetryButtons() {
+  const data = state.data;
+  if (!data) {
+    return;
+  }
+
+  syncRetryButton(elements.queueCurrentRetry, data.current_item);
+  const itemsById = new Map(
+    (Array.isArray(data.playlist) ? data.playlist : []).map((item) => [String(item.id || ""), item]),
+  );
+  elements.playlist.querySelectorAll(".song-item").forEach((node) => {
+    const item = itemsById.get(String(node.dataset.id || ""));
+    if (!item) {
+      return;
+    }
+    syncRetryButton(node.querySelector(".song-retry-button"), item);
+  });
 }
 
 function renderHistory(history) {
+  const signature = JSON.stringify(history || []);
+  if (signature === state.historyRenderSignature) {
+    return;
+  }
+  state.historyRenderSignature = signature;
   elements.historyList.innerHTML = "";
 
   if (!history.length) {
@@ -2153,7 +2975,7 @@ function renderHistory(history) {
     const requester = node.querySelector(".history-requester");
     title.textContent = entry.display_title;
     const ownerTooltip = ownerTooltipForEntry(entry);
-    node.title = ownerTooltip;
+    node.title = "";
     title.title = ownerTooltip;
     const requesterText = requesterBadgeText(entry.requester_name);
     requester.textContent = requesterText;
@@ -2293,12 +3115,11 @@ function formatCompactBytes(value) {
 
 function badgeAnimationDelay(itemId) {
   const duration = 1.45;
-  const nowSeconds = Date.now() / 1000;
   let hash = 0;
   for (const char of String(itemId || "")) {
     hash = (hash * 31 + char.charCodeAt(0)) % 997;
   }
-  const phase = (nowSeconds + hash * 0.013) % duration;
+  const phase = (hash * 0.013) % duration;
   return `${-phase}s`;
 }
 
@@ -2496,14 +3317,6 @@ function syncDropIndicators() {
     }
     return;
   }
-
-  const candidates = [...elements.playlist.querySelectorAll(".song-item")].filter(
-    (node) => node.dataset.id !== state.dragItemId,
-  );
-  const lastNode = candidates[candidates.length - 1];
-  if (lastNode) {
-    lastNode.classList.add("drop-after");
-  }
 }
 
 function escapeHtml(value) {
@@ -2518,10 +3331,10 @@ function duplicateConfirmMessage(duplicateItem, sessionEntry, activeItem) {
   const title = duplicateItem?.display_title || activeItem?.display_title || sessionEntry?.display_title || "这首歌";
   const count = Number(sessionEntry?.request_count || 0);
   if (activeItem && count > 0) {
-    return `《${title}》当前列表里已经有了，而且本次已点过 ${count} 次，仍要继续点歌吗？`;
+    return `《${title}》当前点歌列表里已经有了，而且本次已点过 ${count} 次，仍要继续点歌吗？`;
   }
   if (activeItem) {
-    return `《${title}》当前列表里已经有了，仍要继续点歌吗？`;
+    return `《${title}》当前点歌列表里已经有了，仍要继续点歌吗？`;
   }
   return `《${title}》本次已经点过 ${count || 1} 次，仍要继续点歌吗？`;
 }
@@ -2637,7 +3450,7 @@ async function confirmBindingModal() {
     if (!intent.preserveInput) {
       elements.urlInput.value = "";
     }
-    setFormMessage(intent.position === "next" ? "已按绑定关系顶歌到下一首" : "已按绑定关系加入列表");
+    setFormMessage(intent.position === "next" ? "已按绑定关系顶歌到下一首" : "已按绑定关系加入点歌列表");
     render();
   } catch (error) {
     if (error.code === "manual_binding_required") {
@@ -2680,23 +3493,20 @@ async function confirmBindingModal() {
 
 async function handleAdd(position, anchorPoint) {
   const url = elements.urlInput.value.trim();
-  const requesterName = selectedRequesterName();
-  console.log({
-    selectValue: elements.requesterSelect?.value,
-    selectOptions: [...(elements.requesterSelect?.options || [])].map((o) => o.value),
-    selectedRequesterName: selectedRequesterName(),
-    sessionUsers: state.data?.session_users,
-  });
   if (!url) {
     setFormMessage("请输入 B 站视频链接或 BV 号", true);
     return;
   }
+  const requesterName = validatedRequesterNameForAdd();
+  if (!requesterName) {
+    return;
+  }
 
-  setFormMessage("正在解析视频信息并加入列表...");
+  setFormMessage("正在解析视频信息并加入点歌列表...");
   try {
     state.data = await submitAddRequest(url, position, { requesterName });
     elements.urlInput.value = "";
-    setFormMessage(position === "next" ? "已顶歌到下一首" : "已加入列表末尾");
+    setFormMessage(position === "next" ? "已顶歌到下一首" : "已加入点歌列表末尾");
     render();
   } catch (error) {
     if (error.code === "manual_binding_required") {
@@ -2726,7 +3536,7 @@ async function handleAdd(position, anchorPoint) {
         x: anchorPoint?.x ?? anchorPointForEvent({}, elements.addForm).x,
         y: anchorPoint?.y ?? anchorPointForEvent({}, elements.addForm).y,
       });
-      setFormMessage("这首歌已经在当前列表中，或本次已经点过，确认后可继续加入。");
+      setFormMessage("这首歌已经在当前点歌列表中，或本次已经点过，确认后可继续加入。");
       return;
     }
     setFormMessage(error.message, true);
@@ -2734,11 +3544,14 @@ async function handleAdd(position, anchorPoint) {
 }
 
 async function handleAddByUrl(url, position, anchorPoint) {
-  const requesterName = selectedRequesterName();
-  setFormMessage("正在从历史记录加入列表...");
+  const requesterName = validatedRequesterNameForAdd();
+  if (!requesterName) {
+    return;
+  }
+  setFormMessage("正在从历史记录加入点歌列表...");
   try {
     state.data = await submitAddRequest(url, position, { requesterName });
-    setFormMessage(position === "next" ? "已从历史顶歌到下一首" : "已从历史加入列表");
+    setFormMessage(position === "next" ? "已从历史顶歌到下一首" : "已从历史加入点歌列表");
     render();
   } catch (error) {
     if (error.code === "manual_binding_required") {
@@ -2768,7 +3581,7 @@ async function handleAddByUrl(url, position, anchorPoint) {
         x: anchorPoint?.x ?? anchorPointForEvent({}, elements.historyList).x,
         y: anchorPoint?.y ?? anchorPointForEvent({}, elements.historyList).y,
       });
-      setFormMessage("这首歌已经在当前列表中，或本次已经点过，确认后可继续加入。");
+      setFormMessage("这首歌已经在当前点歌列表中，或本次已经点过，确认后可继续加入。");
       return;
     }
     setFormMessage(error.message, true);
@@ -2791,8 +3604,59 @@ async function clearPlaylist() {
   try {
     state.data = await apiPost("/api/playlist/clear");
     closeConfirm();
-    setAppMessage("播放列表已清空。");
+    setAppMessage("点歌列表已清空。");
     render();
+  } catch (error) {
+    setAppMessage(error.message, true);
+  }
+}
+
+async function clearHistory() {
+  try {
+    state.data = await apiPost("/api/history/clear");
+    closeConfirm();
+    setAppMessage("\u5386\u53f2\u8bb0\u5f55\u5df2\u6e05\u7a7a\u3002");
+    render();
+  } catch (error) {
+    setAppMessage(error.message, true);
+  }
+}
+
+async function resetRuntimeData() {
+  try {
+    teardownMountedPlayer();
+    state.playerSignature = "";
+    state.playerContext = null;
+    state.data = await apiPost("/api/data/reset");
+    closeConfirm();
+    dismissBackupBanner();
+    state.listView = "queue";
+    setAppMessage("已清空 data，保留已唱归档和抽卡缓存。");
+    render();
+  } catch (error) {
+    setAppMessage(error.message, true);
+  }
+}
+
+async function resetPlayerState() {
+  try {
+    teardownMountedPlayer();
+    state.playerSignature = "";
+    state.playerContext = null;
+    state.localPlayerVolume = 1;
+    state.localPlayerMuted = false;
+    state.localAvOffsetMs = 0;
+    state.playerSettingsEchoSuppressUntil = 0;
+    state.avOffsetEchoSuppressUntil = 0;
+    state.volumeSaveSeq += 1;
+    state.avOffsetSaveSeq += 1;
+    state.avOffsetSaving = false;
+    persistLocalVolumePreferences();
+    writeLocalPreference(storageKeys.avOffsetMs, 0);
+    state.data = await apiPost("/api/player/reset");
+    closeConfirm();
+    render();
+    setAppMessage("\u64ad\u653e\u5668\u72b6\u6001\u5df2\u91cd\u7f6e\u3002");
   } catch (error) {
     setAppMessage(error.message, true);
   }
@@ -2878,10 +3742,11 @@ async function removeSessionUser(name) {
   }
 }
 
-async function handleLocalPlaybackEnded() {
+async function advanceLocalPlayerNow() {
   if (state.localAdvanceInFlight) {
     return;
   }
+  clearLocalAdvanceDelay();
   state.localAdvanceInFlight = true;
   try {
     state.data = await apiPost("/api/player/next");
@@ -2893,8 +3758,26 @@ async function handleLocalPlaybackEnded() {
   }
 }
 
+async function handleLocalPlaybackEnded() {
+  if (state.localAdvanceInFlight) {
+    return;
+  }
+  const delaySeconds = currentSongAdvanceDelaySeconds();
+  if (delaySeconds <= 0 || !queuedNextItem()) {
+    await advanceLocalPlayerNow();
+    return;
+  }
+  startLocalAdvanceDelay(delaySeconds);
+}
+
 async function reorderPlaylist(itemId, index) {
   state.data = await apiPost("/api/playlist/reorder", { item_id: itemId, index });
+  render();
+}
+
+async function resortPlaylistByCycle() {
+  state.data = await apiPost("/api/playlist/resort");
+  setAppMessage("已按本场用户座次重新排序点歌列表。");
   render();
 }
 
@@ -2925,6 +3808,27 @@ async function setCacheLimit(maxCacheItems) {
   }
 }
 
+async function setCachePolicyPreference(payload, successMessage) {
+  if (state.cachePolicySaving) {
+    return;
+  }
+  state.cachePolicySaving = true;
+  renderCachePolicyControls(state.data?.cache_policy);
+  try {
+    state.data = await apiPost("/api/cache-policy", payload);
+    setAppMessage(successMessage);
+    render();
+  } catch (error) {
+    setAppMessage(error.message, true);
+    render();
+  } finally {
+    state.cachePolicySaving = false;
+    if (state.data) {
+      renderCachePolicyControls(state.data.cache_policy);
+    }
+  }
+}
+
 async function setAvOffset(offsetMs) {
   if (state.avOffsetSaving) {
     return;
@@ -2934,25 +3838,45 @@ async function setAvOffset(offsetMs) {
   const currentValue = currentAvOffsetMs();
   if (boundedOffsetMs === currentValue) {
     writeLocalPreference(storageKeys.avOffsetMs, boundedOffsetMs);
+    markLocalAvOffsetWrite(boundedOffsetMs);
     if (elements.avOffsetInput) {
       elements.avOffsetInput.value = String(boundedOffsetMs);
     }
+    syncMountedLocalPlayer(true);
     return;
   }
 
+  const previousOffsetMs = currentValue;
+  const requestSeq = markLocalAvOffsetWrite(boundedOffsetMs);
+  writeLocalPreference(storageKeys.avOffsetMs, boundedOffsetMs);
+  if (elements.avOffsetInput) {
+    elements.avOffsetInput.value = String(boundedOffsetMs);
+  }
+  syncMountedLocalPlayer(true);
   state.avOffsetSaving = true;
   renderAvSyncControls(state.data?.playback_mode, state.data?.player_settings);
   try {
-    state.data = await apiPost("/api/player/av-offset", { offset_ms: boundedOffsetMs });
-    writeLocalPreference(storageKeys.avOffsetMs, boundedOffsetMs);
+    const nextData = await apiPost("/api/player/av-offset", { offset_ms: boundedOffsetMs });
+    if (requestSeq !== state.avOffsetSaveSeq) {
+      return;
+    }
+    state.data = nextData;
     render();
-    syncMountedLocalPlayer(true)
+    syncMountedLocalPlayer(true);
   } catch (error) {
+    if (requestSeq !== state.avOffsetSaveSeq) {
+      return;
+    }
+    state.localAvOffsetMs = previousOffsetMs;
+    state.avOffsetEchoSuppressUntil = 0;
+    writeLocalPreference(storageKeys.avOffsetMs, previousOffsetMs);
     setAppMessage(error.message, true);
     render();
   } finally {
-    state.avOffsetSaving = false;
-    renderAvSyncControls(state.data?.playback_mode, state.data?.player_settings);
+    if (requestSeq === state.avOffsetSaveSeq) {
+      state.avOffsetSaving = false;
+      renderAvSyncControls(state.data?.playback_mode, state.data?.player_settings);
+    }
   }
 }
 
@@ -3075,6 +3999,14 @@ elements.queueNextButton.addEventListener("click", async (event) => {
   await handleAdd("next", point);
 });
 
+elements.resortPlaylistButton?.addEventListener("click", async () => {
+  try {
+    await resortPlaylistByCycle();
+  } catch (error) {
+    setAppMessage(error.message, true);
+  }
+});
+
 elements.copyRemoteUrlButton.addEventListener("click", async () => {
   await copyRemoteUrl();
 });
@@ -3128,6 +4060,7 @@ elements.bbdownLoginButton?.addEventListener("click", async () => {
   }
   try {
     state.data = await apiPost("/api/bbdown/logout");
+    setAppMessage("BBDown 已退出登录。");
     render();
   } catch (error) {
     setAppMessage(error.message, true);
@@ -3151,6 +4084,28 @@ elements.cacheLimitSlider.addEventListener("input", (event) => {
 
 elements.cacheLimitSlider.addEventListener("change", async (event) => {
   await setCacheLimit(Number(event.target.value || "1"));
+});
+
+elements.cacheQualitySelect?.addEventListener("change", async (event) => {
+  const quality = String(event.target.value || "").trim();
+  if (!quality || quality === String(state.data?.cache_policy?.video_quality || "")) {
+    return;
+  }
+  await setCachePolicyPreference(
+    { video_quality: quality },
+    `默认清晰度已调整为 ${quality}。`,
+  );
+});
+
+elements.cacheHiresCheckbox?.addEventListener("change", async (event) => {
+  const audioHires = Boolean(event.target.checked);
+  if (audioHires === Boolean(state.data?.cache_policy?.audio_hires)) {
+    return;
+  }
+  await setCachePolicyPreference(
+    { audio_hires: audioHires },
+    audioHires ? "已启用 Hi-Res 音频优先。" : "已关闭 Hi-Res 音频优先。",
+  );
 });
 
 elements.avSyncPanel?.addEventListener("click", async (event) => {
@@ -3190,7 +4145,17 @@ elements.clearPlaylistButton.addEventListener("click", (event) => {
   const point = anchorPointForEvent(event, elements.clearPlaylistButton);
   openConfirm({
     type: "clear-playlist",
-    message: "确定清空播放列表吗？当前正在播放的歌曲不会受影响。",
+    message: "确定清空点歌列表吗？当前正在播放的歌曲不会受影响。",
+    x: point.x,
+    y: point.y,
+  });
+});
+
+elements.clearHistoryButton?.addEventListener("click", (event) => {
+  const point = anchorPointForEvent(event, elements.clearHistoryButton);
+  openConfirm({
+    type: "clear-history",
+    message: "\u786e\u5b9a\u6e05\u7a7a\u5386\u53f2\u8bb0\u5f55\u5417\uff1f\u8fd9\u4e0d\u4f1a\u5f71\u54cd\u5f53\u524d\u64ad\u653e\u6216\u6392\u961f\u4e2d\u7684\u6b4c\u66f2\u3002",
     x: point.x,
     y: point.y,
   });
@@ -3225,6 +4190,7 @@ elements.playerFrame?.addEventListener("dblclick", (event) => {
 
 elements.nextButton.addEventListener("click", async () => {
   try {
+    clearLocalAdvanceDelay({ resetInFlight: true });
     state.data = await apiPost("/api/player/next");
     render();
   } catch (error) {
@@ -3268,6 +4234,47 @@ elements.layoutModeSwitch?.addEventListener("click", (event) => {
   setLayoutMode(button.dataset.layoutMode);
 });
 
+elements.dataResetButton?.addEventListener("click", (event) => {
+  event.stopPropagation();
+  const point = anchorPointForEvent(event, elements.dataResetButton);
+  openConfirm({
+    type: "reset-data",
+    message: "确认清空 data？会清空当前点歌列表、用户、历史记录和缓存，但保留已唱归档与抽卡缓存。",
+    ...point,
+  });
+});
+
+elements.currentCacheRetryButton?.addEventListener("click", async (event) => {
+  event.stopPropagation();
+  const currentItem = state.data?.current_item;
+  if (!currentItem?.id) {
+    setAppMessage("当前没有正在播放的歌曲。", true);
+    return;
+  }
+  try {
+    elements.currentCacheRetryButton.disabled = true;
+    state.data = await apiPost("/api/cache/retry", {
+      item_id: currentItem.id,
+      force: true,
+    });
+    setAppMessage("已重新开始缓存当前歌曲。");
+    render();
+  } catch (error) {
+    setAppMessage(error.message, true);
+    renderPlaybackRepairControls(state.data?.current_item);
+  }
+});
+
+elements.playerResetButton?.addEventListener("click", (event) => {
+  event.stopPropagation();
+  const point = anchorPointForEvent(event, elements.playerResetButton);
+  openConfirm({
+    type: "reset-player",
+    message: "\u786e\u8ba4\u91cd\u7f6e\u64ad\u653e\u5668\u72b6\u6001\uff1f\u4f1a\u91cd\u65b0\u8f7d\u5165\u5f53\u524d\u64ad\u653e\u5668\u5e76\u6062\u590d\u64ad\u653e\u5668\u8bbe\u7f6e\u3002\u6b4c\u5355\u3001\u5386\u53f2\u548c\u7f13\u5b58\u4e0d\u4f1a\u88ab\u6e05\u7a7a\u3002",
+    ...point,
+  });
+});
+
 elements.audioVariantBar.addEventListener("click", async (event) => {
   const toggleButton = event.target.closest('button[data-action="toggle-audio-variants"]');
   if (toggleButton) {
@@ -3293,13 +4300,17 @@ elements.audioVariantBar.addEventListener("click", async (event) => {
     if (!page) {
       return;
     }
+    const requesterName = validatedRequesterNameForAdd(setAppMessage);
+    if (!requesterName) {
+      return;
+    }
     try {
       state.data = await submitAddRequest(currentItem.original_url || currentItem.resolved_url, "tail", {
-        requesterName: selectedRequesterName(),
+        requesterName,
         selectedVideoPage: page,
         selectedAudioPages: [page],
       });
-      setAppMessage("已将分P加入下载列表");
+      setAppMessage("已将分P加入缓存任务");
       render();
     } catch (error) {
       if (error.code === "duplicate_session_request") {
@@ -3308,7 +4319,7 @@ elements.audioVariantBar.addEventListener("click", async (event) => {
           type: "duplicate-add",
           url: currentItem.original_url || currentItem.resolved_url,
           position: "tail",
-          requesterName: selectedRequesterName(),
+          requesterName,
           preserveInput: false,
           selectedVideoPage: page,
           selectedAudioPages: [page],
@@ -3374,7 +4385,7 @@ elements.playlist.addEventListener("click", async (event) => {
     openConfirm({
       type: "remove-item",
       itemId: button.dataset.id,
-      message: "确定从播放列表移除这首歌吗？",
+      message: "确定从点歌列表移除这首歌吗？",
       x: point.x,
       y: point.y,
     });
@@ -3427,6 +4438,18 @@ elements.confirmOk.addEventListener("click", async () => {
       await clearPlaylist();
       return;
     }
+    if (intent.type === "clear-history") {
+      await clearHistory();
+      return;
+    }
+    if (intent.type === "reset-data") {
+      await resetRuntimeData();
+      return;
+    }
+    if (intent.type === "reset-player") {
+      await resetPlayerState();
+      return;
+    }
     if (intent.type === "remove-item" && intent.itemId) {
       state.data = await apiPost("/api/playlist/remove", { item_id: intent.itemId });
       closeConfirm();
@@ -3447,7 +4470,7 @@ elements.confirmOk.addEventListener("click", async () => {
       } else {
         elements.urlInput.value = "";
       }
-      setFormMessage(intent.position === "next" ? "已确认插队到下一首" : "已确认加入列表");
+      setFormMessage(intent.position === "next" ? "已确认插队到下一首" : "已确认加入点歌列表");
       render();
     }
   } catch (error) {
@@ -3464,8 +4487,12 @@ document.addEventListener("click", (event) => {
     if (
       event.target.closest("#confirm-popover") ||
       event.target.closest("#clear-playlist-button") ||
+      event.target.closest("#clear-history-button") ||
       event.target.closest('button[data-action="remove"]') ||
       event.target.closest("#queue-next-button") ||
+      event.target.closest("#data-reset-button") ||
+      event.target.closest("#current-cache-retry-button") ||
+      event.target.closest("#player-reset-button") ||
       event.target.closest("#add-form") ||
       event.target.closest("#history-list")
     ) {
@@ -3497,6 +4524,9 @@ document.addEventListener("keydown", (event) => {
 });
 
 document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) {
+    showMountedPlayerControls();
+  }
   if (!state.localShouldBePlaying) {
     return;
   }
@@ -3518,7 +4548,8 @@ elements.playlist.addEventListener("dragstart", (event) => {
   if (!item) {
     return;
   }
-  if (event.target.closest("button")) {
+  const dragHandle = event.target.closest("[data-drag-handle]");
+  if (!dragHandle || event.target.closest("button")) {
     event.preventDefault();
     return;
   }
@@ -3530,6 +4561,14 @@ elements.playlist.addEventListener("dragstart", (event) => {
   if (event.dataTransfer) {
     event.dataTransfer.effectAllowed = "move";
     event.dataTransfer.setData("text/plain", state.dragItemId);
+    if (typeof event.dataTransfer.setDragImage === "function") {
+      const rect = item.getBoundingClientRect();
+      event.dataTransfer.setDragImage(
+        item,
+        Math.max(0, event.clientX - rect.left),
+        Math.max(0, event.clientY - rect.top),
+      );
+    }
   }
 
   syncDropIndicators();
@@ -3580,20 +4619,18 @@ elements.playlist.addEventListener("drop", async (event) => {
   const draggedId = state.dragItemId;
   const playlist = state.data.playlist;
   const sourceIndex = playlist.findIndex((item) => item.id === draggedId);
-  if (sourceIndex === -1) {
+  if (sourceIndex === -1 || !state.dragTargetId) {
     clearDragState();
     render();
     return;
   }
 
-  let targetIndex = playlist.length - 1;
-  if (state.dragTargetId) {
-    const hoverIndex = playlist.findIndex((item) => item.id === state.dragTargetId);
-    if (hoverIndex !== -1) {
-      targetIndex = hoverIndex + (state.dragTargetAfter ? 1 : 0);
-      if (sourceIndex < targetIndex) {
-        targetIndex -= 1;
-      }
+  let targetIndex = sourceIndex;
+  const hoverIndex = playlist.findIndex((item) => item.id === state.dragTargetId);
+  if (hoverIndex !== -1) {
+    targetIndex = hoverIndex + (state.dragTargetAfter ? 1 : 0);
+    if (sourceIndex < targetIndex) {
+      targetIndex -= 1;
     }
   }
 
@@ -3647,8 +4684,11 @@ elements.gatchaConfirmButton.addEventListener("click", async () => {
   if (!state.gatchaCandidate) return;
 
   const url = state.gatchaCandidate.url;
-  const requesterName = selectedRequesterName();
-  setGatchaMessage("Nozomi power注入！");
+  const requesterName = validatedRequesterNameForAdd(setGatchaMessage);
+  if (!requesterName) {
+    return;
+  }
+  setGatchaMessage("Nozomi power 注入！");
   try {
     state.data = await submitAddRequest(url, "tail", { requesterName });
     setFormMessage(`点歌成功：${state.gatchaCandidate.title}`);
@@ -3732,5 +4772,8 @@ window.addEventListener("pagehide", () => {
   disconnectClient();
 });
 window.addEventListener("beforeunload", disconnectClient);
+window.addEventListener("pageshow", () => {
+  showMountedPlayerControls();
+});
 
 startPolling();

@@ -11,7 +11,7 @@
       <section class="backup-banner hidden" id="backup-banner">
         <div class="backup-copy">
           <p class="backup-title">Auto Restore</p>
-          <p class="backup-text" id="backup-text">检测到上次未完成的播放列表</p>
+          <p class="backup-text" id="backup-text">检测到上次未完成的点歌列表</p>
         </div>
         <div class="backup-actions">
           <button type="button" id="discard-backup-button" class="banner-action">清空备份</button>
@@ -147,6 +147,19 @@
                   </div>
                 </div>
               </div>
+              <div class="cache-panel-row cache-policy-row">
+                <label class="cache-quality-field" for="cache-quality-select">
+                  <span class="cache-panel-label">默认清晰度</span>
+                  <select id="cache-quality-select" class="cache-quality-select"></select>
+                </label>
+                <label class="cache-hires-field" for="cache-hires-checkbox">
+                  <span class="cache-panel-label">Hi-Res 无损</span>
+                  <input id="cache-hires-checkbox" type="checkbox" />
+                  <span class="cache-hires-switch" aria-hidden="true">
+                    <span class="cache-hires-switch-thumb"></span>
+                  </span>
+                </label>
+              </div>
               <div class="bbdown-login-panel hidden" id="bbdown-login-panel">
                 <div class="bbdown-login-copy">
                   <p class="cache-panel-label">BBDown 登录</p>
@@ -170,6 +183,45 @@
                   <span id="playback-mode-current">本地缓存</span>
                   <button type="button" class="toolbar-button cache-mode-toggle" id="mode-switch">
                     切换
+                  </button>
+                </div>
+              </div>
+              <div class="cache-panel-row cache-panel-danger-row">
+                <div>
+                  <p class="cache-panel-label">数据维护</p>
+                  <p class="cache-panel-hint">保留已唱归档和抽卡缓存</p>
+                </div>
+                <button
+                  type="button"
+                  class="toolbar-button cache-data-reset-button"
+                  id="data-reset-button"
+                  title="清空 data"
+                >
+                  清空
+                </button>
+              </div>
+              <div class="cache-panel-row cache-panel-danger-row">
+                <div>
+                  <p class="cache-panel-label">播放异常处理</p>
+                  <p class="cache-panel-hint">本地播放出错时重新缓存或重置播放器</p>
+                </div>
+                <div class="cache-panel-actions">
+                  <button
+                    type="button"
+                    class="toolbar-button cache-retry-current-button"
+                    id="current-cache-retry-button"
+                    title="重新缓存当前歌曲"
+                    disabled
+                  >
+                    重新缓存
+                  </button>
+                  <button
+                    type="button"
+                    class="toolbar-button cache-data-reset-button"
+                    id="player-reset-button"
+                    title="重置播放器状态"
+                  >
+                    重置
                   </button>
                 </div>
               </div>
@@ -199,7 +251,7 @@
 
             <div class="player-frame" id="player-frame">
               <div class="empty-state">
-                <p>把 Bilibili 视频链接加入列表后，这里会开始播放。</p>
+                <p>把 Bilibili 视频链接加入点歌列表后，这里会开始播放。</p>
               </div>
             </div>
             <div class="audio-variant-bar hidden" id="audio-variant-bar"></div>
@@ -246,6 +298,7 @@
                 <p class="section-tag">Song Request</p>
                 <h2>点歌</h2>
               </div>
+              <button type="button" id="resort-playlist-button" class="toolbar-button ghost">重新排序</button>
             </div>
 
             <form id="add-form" class="add-form compact-form">
@@ -395,11 +448,12 @@
         <aside class="queue-card list-card">
           <div class="queue-card-head">
             <div>
-              <p class="section-tag" id="list-tag">Queue</p>
-              <h2><span id="list-title">播放列表</span> <span class="queue-count" id="queue-count">(0首)</span></h2>
+              <p class="section-tag" id="list-tag">Requests</p>
+              <h2><span id="list-title">点歌列表</span> <span class="queue-count" id="queue-count">(0首)</span></h2>
             </div>
             <div class="queue-toolbar">
-              <button type="button" id="clear-playlist-button" class="toolbar-button ghost">清空列表</button>
+              <button type="button" id="clear-playlist-button" class="toolbar-button ghost">清空点歌列表</button>
+              <button type="button" id="clear-history-button" class="toolbar-button ghost hidden">清空历史</button>
               <button type="button" id="history-toggle-button" class="toolbar-button ghost">历史记录</button>
             </div>
           </div>
@@ -454,8 +508,8 @@
 
     <!-- Templates -->
     <template id="playlist-item-template">
-      <article class="song-item" draggable="true">
-        <div class="song-badge-column">
+      <article class="song-item">
+        <div class="song-badge-column" draggable="true" data-drag-handle title="拖动调整顺序">
           <div class="song-progress-badge">
             <span class="song-index-label"></span>
             <span class="song-badge-check hidden">✓</span>
@@ -463,6 +517,7 @@
               type="button"
               class="cache-retry-button song-retry-button hidden"
               data-action="retry-cache"
+              draggable="false"
               title="重新下载缓存"
               aria-label="重新下载缓存"
             >
@@ -552,7 +607,7 @@
         </div>
         <div class="selection-modal-actions">
           <button type="button" id="binding-modal-cancel" class="toolbar-button">取消</button>
-          <button type="button" id="binding-modal-confirm" class="next-button">加入列表</button>
+          <button type="button" id="binding-modal-confirm" class="next-button">加入点歌列表</button>
         </div>
       </div>
     </div>

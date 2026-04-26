@@ -1,6 +1,10 @@
-const pollIntervalMs = 1500;
 const audioVariantSwitchDebounceMs = 350;
 const gatchaCooldownMs = 15000;
+const playerSettingsEchoSuppressMs = 1800;
+const remoteVolumeCommitDebounceMs = 160;
+const viewportScaleResetDelaysMs = [0, 120, 360];
+const eventStreamInitialRetryMs = 1000;
+const eventStreamMaxRetryMs = 15000;
 const storageKeys = {
   layoutMode: "bilikara.remote.layout.mode",
 };
@@ -15,6 +19,14 @@ const state = {
   audioVariantSwitchInFlight: false,
   audioVariantSwitchUnlockAt: 0,
   audioVariantSwitchTimer: null,
+  remoteAvOffsetSaveSeq: 0,
+  remoteAvOffsetEchoSuppressUntil: 0,
+  remoteLocalAvOffsetMs: null,
+  remoteVolumeSaveSeq: 0,
+  remoteSettingsEchoSuppressUntil: 0,
+  remoteLocalVolumePercent: null,
+  remoteLocalMuted: null,
+  remoteVolumeCommitTimer: null,
   audioVariantBarExpanded: false,
   audioVariantBarItemId: "",
   bindingSheetOpen: false,
@@ -23,15 +35,32 @@ const state = {
     video: false,
     audio: false,
   },
+  eventSource: null,
+  eventStreamReconnectTimer: null,
+  eventStreamRetryMs: eventStreamInitialRetryMs,
   gatchaCandidate: null,
   gatchaCooldownUntil: 0,
   gatchaCooldownTimer: null,
   layoutMode: "full",
+  remoteAccessRenderSignature: "",
+  remoteQrPopoverOpen: false,
+  viewportScaleResetTimers: [],
 };
 
 const elements = {
+  viewportMeta: document.getElementById("viewport-meta"),
   remoteShell: document.getElementById("remote-shell"),
   layoutModeSwitch: document.getElementById("layout-mode-switch"),
+  remoteQrControl: document.getElementById("remote-qr-control"),
+  remoteQrToggle: document.getElementById("remote-qr-toggle"),
+  remoteMiniQrImage: document.getElementById("remote-mini-qr-image"),
+  remoteMiniQrPlaceholder: document.getElementById("remote-mini-qr-placeholder"),
+  remoteQrPopover: document.getElementById("remote-qr-popover"),
+  remoteQrPopoverClose: document.getElementById("remote-qr-popover-close"),
+  remotePopoverQrImage: document.getElementById("remote-popover-qr-image"),
+  remotePopoverQrPlaceholder: document.getElementById("remote-popover-qr-placeholder"),
+  remotePopoverUrlLink: document.getElementById("remote-popover-url-link"),
+  remotePopoverUrlHint: document.getElementById("remote-popover-url-hint"),
   currentTitle: document.getElementById("current-title"),
   currentRequester: document.getElementById("current-requester"),
   currentMeta: document.getElementById("current-meta"),
@@ -65,6 +94,7 @@ const elements = {
   searchButton: document.getElementById("search-button"),
   searchResults: document.getElementById("search-results"),
   addNextButton: document.getElementById("add-next-button"),
+  resortPlaylistButton: document.getElementById("resort-playlist-button"),
   refreshButton: document.getElementById("refresh-button"),
   gatchaButton: document.getElementById("gatcha-button"),
   gatchaConfirmButton: document.getElementById("gatcha-confirm-button"),
@@ -124,6 +154,84 @@ function writeLocalPreference(key, value) {
   }
 }
 
+function isEditableElement(element) {
+  return element instanceof HTMLElement
+    && (
+      element.tagName === "INPUT"
+      || element.tagName === "TEXTAREA"
+      || element.tagName === "SELECT"
+      || element.isContentEditable
+    );
+}
+
+function blurActiveEditableElement() {
+  const activeElement = document.activeElement;
+  if (!isEditableElement(activeElement) || typeof activeElement.blur !== "function") {
+    return;
+  }
+  activeElement.blur();
+}
+
+function isAppleTabletClient() {
+  const userAgent = String(window.navigator?.userAgent || "");
+  if (/iPad/i.test(userAgent)) {
+    return true;
+  }
+  return window.navigator?.platform === "MacIntel" && Number(window.navigator?.maxTouchPoints || 0) > 1;
+}
+
+function currentViewportScale() {
+  const scale = Number(window.visualViewport?.scale || 1);
+  return Number.isFinite(scale) && scale > 0 ? scale : 1;
+}
+
+function clearViewportScaleResetTimers() {
+  state.viewportScaleResetTimers.forEach((timerId) => {
+    window.clearTimeout(timerId);
+  });
+  state.viewportScaleResetTimers = [];
+}
+
+function forceViewportScaleReset(force = false) {
+  if (!isAppleTabletClient() || isEditableElement(document.activeElement) || document.hidden) {
+    return;
+  }
+  const viewportMeta = elements.viewportMeta;
+  if (!viewportMeta) {
+    return;
+  }
+  const currentScale = currentViewportScale();
+  if (!force && currentScale <= 1.01) {
+    return;
+  }
+
+  const baseContent = viewportMeta.dataset.baseContent || viewportMeta.getAttribute("content") || "";
+  if (!baseContent) {
+    return;
+  }
+
+  viewportMeta.dataset.baseContent = baseContent;
+  viewportMeta.setAttribute("content", `${baseContent}, maximum-scale=1, user-scalable=no`);
+
+  window.requestAnimationFrame(() => {
+    window.requestAnimationFrame(() => {
+      viewportMeta.setAttribute("content", baseContent);
+    });
+  });
+}
+
+function scheduleViewportScaleReset(force = false) {
+  if (!isAppleTabletClient()) {
+    return;
+  }
+  clearViewportScaleResetTimers();
+  state.viewportScaleResetTimers = viewportScaleResetDelaysMs.map((delayMs) => (
+    window.setTimeout(() => {
+      forceViewportScaleReset(force);
+    }, delayMs)
+  ));
+}
+
 function normalizeLayoutMode(value) {
   if (value === "basic" || value === "normal") {
     return "basic";
@@ -155,6 +263,80 @@ function setLayoutMode(mode) {
   renderLayoutMode();
 }
 
+function setRemoteQrPopoverOpen(open) {
+  state.remoteQrPopoverOpen = Boolean(open);
+  elements.remoteQrPopover?.classList.toggle("hidden", !state.remoteQrPopoverOpen);
+  elements.remoteQrToggle?.setAttribute("aria-expanded", String(state.remoteQrPopoverOpen));
+}
+
+function renderRemoteAccess(remoteAccess) {
+  const preferredUrl = String(remoteAccess?.preferred_url || "");
+  const lanUrls = Array.isArray(remoteAccess?.lan_urls) ? remoteAccess.lan_urls : [];
+  const localUrl = String(remoteAccess?.local_url || "");
+  const displayUrl = preferredUrl || localUrl || `${window.location.origin}/remote`;
+  const displayHint = lanUrls.length > 1
+    ? `可用局域网地址: ${lanUrls.join(" · ")}`
+    : lanUrls.length === 1
+      ? "请确保手机和服务端在同一个局域网内。"
+      : "暂未检测到局域网地址，可稍后刷新或手动检查网络。";
+  const signature = JSON.stringify({ displayUrl, displayHint });
+  if (signature === state.remoteAccessRenderSignature) {
+    return;
+  }
+  state.remoteAccessRenderSignature = signature;
+
+  if (elements.remotePopoverUrlLink) {
+    elements.remotePopoverUrlLink.href = displayUrl;
+    elements.remotePopoverUrlLink.textContent = displayUrl;
+  }
+  if (elements.remotePopoverUrlHint) {
+    elements.remotePopoverUrlHint.textContent = displayHint;
+  }
+  renderRemoteQr(displayUrl, [
+    { image: elements.remoteMiniQrImage, placeholder: elements.remoteMiniQrPlaceholder, size: 132 },
+    { image: elements.remotePopoverQrImage, placeholder: elements.remotePopoverQrPlaceholder, size: 220 },
+  ]);
+}
+
+function renderRemoteQr(url, targets = []) {
+  const normalizedUrl = String(url || "").trim();
+  if (!normalizedUrl) {
+    targets.forEach(({ image, placeholder }) => {
+      image?.classList.add("hidden");
+      if (placeholder) {
+        placeholder.textContent = "暂无可用访问地址";
+        placeholder.classList.remove("hidden");
+      }
+    });
+    return;
+  }
+
+  targets.forEach(({ image, placeholder, size = 220 }) => {
+    if (!image || !placeholder) {
+      return;
+    }
+    const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=${size}x${size}&margin=0&data=${encodeURIComponent(normalizedUrl)}`;
+    if (image.dataset.qrUrl === qrUrl) {
+      return;
+    }
+
+    image.dataset.qrUrl = qrUrl;
+    image.classList.add("hidden");
+    placeholder.textContent = "正在生成二维码...";
+    placeholder.classList.remove("hidden");
+    image.onload = () => {
+      placeholder.classList.add("hidden");
+      image.classList.remove("hidden");
+    };
+    image.onerror = () => {
+      image.classList.add("hidden");
+      placeholder.textContent = "二维码生成失败";
+      placeholder.classList.remove("hidden");
+    };
+    image.src = qrUrl;
+  });
+}
+
 function setFormMessage(message, isError = false) {
   elements.formMessage.textContent = message;
   elements.formMessage.classList.toggle("error", isError);
@@ -164,10 +346,10 @@ function duplicateConfirmMessage(duplicateItem, sessionEntry, activeItem) {
   const title = duplicateItem?.display_title || activeItem?.display_title || sessionEntry?.display_title || "这首歌";
   const count = Number(sessionEntry?.request_count || 0);
   if (activeItem && count > 0) {
-    return `《${title}》当前列表里已经有了，而且本次已点过 ${count} 次，仍要继续点歌吗？`;
+    return `《${title}》当前点歌列表里已经有了，而且本次已点过 ${count} 次，仍要继续点歌吗？`;
   }
   if (activeItem) {
-    return `《${title}》当前列表里已经有了，仍要继续点歌吗？`;
+    return `《${title}》当前点歌列表里已经有了，仍要继续点歌吗？`;
   }
   return `《${title}》本次已经点过 ${count || 1} 次，仍要继续点歌吗？`;
 }
@@ -238,8 +420,93 @@ async function fetchState() {
   if (!response.ok || !payload.ok) {
     throw new Error(payload.error || "获取状态失败");
   }
-  state.data = payload.data;
+  applyStateSnapshot(payload.data, { forceRender: !state.data });
+}
+function currentStateRevision(snapshot = state.data) {
+  const revision = Number(snapshot?.state_revision || 0);
+  return Number.isFinite(revision) && revision >= 0 ? revision : 0;
+}
+
+function applyStateSnapshot(snapshot, { forceRender = false } = {}) {
+  if (!snapshot || typeof snapshot !== "object") {
+    return false;
+  }
+  const nextRevision = currentStateRevision(snapshot);
+  const currentRevision = currentStateRevision(state.data);
+  if (!forceRender && state.data) {
+    if (nextRevision > 0 && nextRevision <= currentRevision) {
+      return false;
+    }
+    if (nextRevision === 0 && currentRevision > 0) {
+      return false;
+    }
+  }
+  state.data = snapshot;
   render();
+  return true;
+}
+
+function clearEventStreamReconnectTimer() {
+  if (!state.eventStreamReconnectTimer) {
+    return;
+  }
+  window.clearTimeout(state.eventStreamReconnectTimer);
+  state.eventStreamReconnectTimer = null;
+}
+
+function closeEventStream() {
+  clearEventStreamReconnectTimer();
+  if (!state.eventSource) {
+    return;
+  }
+  state.eventSource.close();
+  state.eventSource = null;
+}
+
+function scheduleEventStreamReconnect() {
+  clearEventStreamReconnectTimer();
+  const delayMs = state.eventStreamRetryMs;
+  state.eventStreamReconnectTimer = window.setTimeout(() => {
+    state.eventStreamReconnectTimer = null;
+    connectStateStream();
+  }, delayMs);
+  state.eventStreamRetryMs = Math.min(eventStreamMaxRetryMs, delayMs * 2);
+}
+
+function connectStateStream() {
+  if (typeof window.EventSource !== "function") {
+    return;
+  }
+  closeEventStream();
+  const source = new window.EventSource(`/api/events?client_id=${encodeURIComponent(state.clientId)}`);
+  state.eventSource = source;
+
+  source.addEventListener("open", () => {
+    state.eventStreamRetryMs = eventStreamInitialRetryMs;
+  });
+
+  source.addEventListener("state", (event) => {
+    try {
+      const snapshot = JSON.parse(event.data);
+      applyStateSnapshot(snapshot);
+      state.eventStreamRetryMs = eventStreamInitialRetryMs;
+    } catch {
+      // Ignore malformed events and wait for the next valid snapshot.
+    }
+  });
+
+  source.addEventListener("error", async () => {
+    if (state.eventSource !== source) {
+      return;
+    }
+    closeEventStream();
+    try {
+      await fetchState();
+    } catch {
+      // Keep the last successful state on screen while reconnecting.
+    }
+    scheduleEventStreamReconnect();
+  });
 }
 
 async function searchGatchaCache(query) {
@@ -374,6 +641,7 @@ function render() {
   renderPlayerControls(data.current_item, data.playback_mode);
   renderRemoteAvSyncControls(data.playback_mode, data.player_settings);
   renderRemoteVolumeControls(data.playback_mode, data.player_settings);
+  renderRemoteAccess(data.remote_access);
   renderListHeader(data.playlist || [], data.history || []);
   renderQueue(Array.isArray(data.playlist) ? data.playlist : []);
   renderHistory(Array.isArray(data.history) ? data.history : []);
@@ -423,7 +691,7 @@ function renderCurrentItem(current, playbackMode) {
   elements.currentTitle.textContent = "当前还没有正在播放的歌曲";
   elements.currentRequester.textContent = "";
   elements.currentRequester.classList.add("hidden");
-  elements.currentMeta.textContent = "点歌后会进入主队列，轮到时由服务端页面播放。";
+  elements.currentMeta.textContent = "点歌后会进入点歌列表，轮到时由服务端页面播放。";
 }
 
 function audioVariantsForItem(item) {
@@ -431,7 +699,7 @@ function audioVariantsForItem(item) {
     return [];
   }
   return item.audio_variants.filter(
-    (variant) => variant && (variant.media_url || variant.audio_url),
+    (variant) => variant && variant.audio_url,
   );
 }
 
@@ -492,8 +760,10 @@ function partOptionsForItem(item) {
     const cachedVariant = cachedVariantsById.get(entry.id);
     return {
       ...entry,
-      media_url: String(cachedVariant?.media_url || ""),
       audio_url: String(cachedVariant?.audio_url || ""),
+      // LEGACY: cachedVariant.media_url used to point to a muxed MP4 variant.
+      // Remote controls only need to know whether split audio_url exists.
+      // media_url: String(cachedVariant?.media_url || ""),
     };
   });
 }
@@ -599,16 +869,75 @@ function renderAudioVariantBar(currentItem, playbackMode) {
   elements.audioVariantBar.classList.remove("hidden");
 }
 
-function currentRemoteAvOffsetMs(playerSettings) {
-  return Number(playerSettings?.av_offset_ms || 0);
+function boundedRemoteAvOffsetMs(offsetMs) {
+  const numeric = Number(offsetMs || 0);
+  if (!Number.isFinite(numeric)) {
+    return 0;
+  }
+  return Math.max(-5000, Math.min(5000, Math.round(numeric)));
 }
 
-function currentRemoteVolumePercent(playerSettings) {
+function boundedRemoteVolumePercent(volumePercent) {
+  const numeric = Number(volumePercent);
+  if (!Number.isFinite(numeric)) {
+    return null;
+  }
+  return Math.max(0, Math.min(100, Math.round(numeric)));
+}
+
+function serverRemoteAvOffsetMs(playerSettings = state.data?.player_settings) {
+  return boundedRemoteAvOffsetMs(playerSettings?.av_offset_ms || 0);
+}
+
+function currentRemoteAvOffsetMs(playerSettings = state.data?.player_settings) {
+  if (state.remoteLocalAvOffsetMs !== null && Date.now() < state.remoteAvOffsetEchoSuppressUntil) {
+    return state.remoteLocalAvOffsetMs;
+  }
+  state.remoteLocalAvOffsetMs = null;
+  return serverRemoteAvOffsetMs(playerSettings);
+}
+
+function serverRemoteVolumePercent(playerSettings = state.data?.player_settings) {
   return Math.max(0, Math.min(100, Number(playerSettings?.volume_percent ?? 100)));
 }
 
-function currentRemoteMuted(playerSettings) {
+function currentRemoteVolumePercent(playerSettings = state.data?.player_settings) {
+  if (state.remoteLocalVolumePercent !== null && Date.now() < state.remoteSettingsEchoSuppressUntil) {
+    return state.remoteLocalVolumePercent;
+  }
+  state.remoteLocalVolumePercent = null;
+  return serverRemoteVolumePercent(playerSettings);
+}
+
+function serverRemoteMuted(playerSettings = state.data?.player_settings) {
   return Boolean(playerSettings?.is_muted);
+}
+
+function currentRemoteMuted(playerSettings = state.data?.player_settings) {
+  if (state.remoteLocalMuted !== null && Date.now() < state.remoteSettingsEchoSuppressUntil) {
+    return state.remoteLocalMuted;
+  }
+  state.remoteLocalMuted = null;
+  return serverRemoteMuted(playerSettings);
+}
+
+function markRemoteAvOffsetWrite(offsetMs) {
+  state.remoteLocalAvOffsetMs = boundedRemoteAvOffsetMs(offsetMs);
+  state.remoteAvOffsetEchoSuppressUntil = Date.now() + playerSettingsEchoSuppressMs;
+  state.remoteAvOffsetSaveSeq += 1;
+  return state.remoteAvOffsetSaveSeq;
+}
+
+function markRemoteVolumeWrite(payload) {
+  if (payload.volume_percent !== undefined) {
+    state.remoteLocalVolumePercent = payload.volume_percent;
+  }
+  if (payload.is_muted !== undefined) {
+    state.remoteLocalMuted = payload.is_muted;
+  }
+  state.remoteSettingsEchoSuppressUntil = Date.now() + playerSettingsEchoSuppressMs;
+  state.remoteVolumeSaveSeq += 1;
+  return state.remoteVolumeSaveSeq;
 }
 
 function setRangeFillPercent(input, percent) {
@@ -625,7 +954,9 @@ function renderRemoteAvSyncControls(playbackMode, playerSettings) {
   }
   const isLocalMode = playbackMode === "local" && normalizeLayoutMode(state.layoutMode) === "full";
   elements.remoteAvSyncPanel.classList.toggle("hidden", !isLocalMode);
-  elements.remoteAvOffsetInput.value = String(currentRemoteAvOffsetMs(playerSettings));
+  if (document.activeElement !== elements.remoteAvOffsetInput) {
+    elements.remoteAvOffsetInput.value = String(currentRemoteAvOffsetMs(playerSettings));
+  }
 }
 
 function renderRemoteVolumeControls(playbackMode, playerSettings) {
@@ -765,7 +1096,7 @@ async function confirmBindingSheet() {
   }
 
   state.submitting = true;
-  setFormMessage(intent.position === "next" ? "正在按绑定关系顶歌..." : "正在按绑定关系加入列表...");
+  setFormMessage(intent.position === "next" ? "正在按绑定关系顶歌..." : "正在按绑定关系加入点歌列表...");
   try {
     const result = await submitAddRequestWithDuplicateConfirm(
       intent.url,
@@ -780,7 +1111,7 @@ async function confirmBindingSheet() {
       setFormMessage("已取消重复添加");
       return;
     }
-    state.data = result.data;
+    applyStateSnapshot(result.data, { forceRender: true });
     closeBindingSheet();
     if (intent.clearInput) {
       elements.urlInput.value = "";
@@ -794,8 +1125,7 @@ async function confirmBindingSheet() {
       elements.gatchaResultView.classList.add("hidden");
       elements.gatchaInitView.classList.remove("hidden");
     }
-    setFormMessage(intent.position === "next" ? "已按绑定关系顶歌到下一首" : "已按绑定关系加入列表");
-    render();
+    setFormMessage(intent.position === "next" ? "已按绑定关系顶歌到下一首" : "已按绑定关系加入点歌列表");
   } catch (error) {
     if (error.code === "manual_binding_required") {
       openBindingSheet(intent, error.payload?.binding);
@@ -808,26 +1138,73 @@ async function confirmBindingSheet() {
 }
 
 async function setRemoteAvOffset(offsetMs) {
-  const numeric = Number(offsetMs || 0);
-  if (!Number.isFinite(numeric)) {
+  const boundedOffsetMs = boundedRemoteAvOffsetMs(offsetMs);
+  const currentValue = currentRemoteAvOffsetMs();
+  if (boundedOffsetMs === currentValue) {
+    markRemoteAvOffsetWrite(boundedOffsetMs);
+    if (elements.remoteAvOffsetInput) {
+      elements.remoteAvOffsetInput.value = String(boundedOffsetMs);
+    }
     return;
   }
+
+  const requestSeq = markRemoteAvOffsetWrite(boundedOffsetMs);
+  if (elements.remoteAvOffsetInput) {
+    elements.remoteAvOffsetInput.value = String(boundedOffsetMs);
+  }
+  renderRemoteAvSyncControls(state.data?.playback_mode, state.data?.player_settings);
   try {
-    state.data = await apiPost("/api/player/av-offset", { offset_ms: Math.max(-5000, Math.min(5000, Math.round(numeric))) });
-    render();
+    const nextData = await apiPost("/api/player/av-offset", { offset_ms: boundedOffsetMs });
+    if (requestSeq !== state.remoteAvOffsetSaveSeq) {
+      return;
+    }
+    applyStateSnapshot(nextData);
   } catch (error) {
+    if (requestSeq !== state.remoteAvOffsetSaveSeq) {
+      return;
+    }
+    state.remoteLocalAvOffsetMs = null;
+    state.remoteAvOffsetEchoSuppressUntil = 0;
     setFormMessage(error.message, true);
+    renderRemoteAvSyncControls(state.data?.playback_mode, state.data?.player_settings);
   }
 }
 
-async function setRemoteVolumeSettings({ volumePercent, isMuted } = {}) {
-  const payload = {};
-  if (volumePercent !== undefined) {
-    const numeric = Number(volumePercent);
-    if (!Number.isFinite(numeric)) {
+function clearRemoteVolumeCommitTimer() {
+  if (!state.remoteVolumeCommitTimer) {
+    return;
+  }
+  window.clearTimeout(state.remoteVolumeCommitTimer);
+  state.remoteVolumeCommitTimer = null;
+}
+
+async function commitRemoteVolumeSettings(payload, requestSeq) {
+  try {
+    const nextData = await apiPost("/api/player/volume", payload);
+    if (requestSeq !== state.remoteVolumeSaveSeq) {
       return;
     }
-    payload.volume_percent = Math.max(0, Math.min(100, Math.round(numeric)));
+    applyStateSnapshot(nextData);
+  } catch (error) {
+    if (requestSeq !== state.remoteVolumeSaveSeq) {
+      return;
+    }
+    state.remoteLocalVolumePercent = null;
+    state.remoteLocalMuted = null;
+    state.remoteSettingsEchoSuppressUntil = 0;
+    setFormMessage(error.message, true);
+    renderRemoteVolumeControls(state.data?.playback_mode, state.data?.player_settings);
+  }
+}
+
+async function setRemoteVolumeSettings({ volumePercent, isMuted } = {}, options = {}) {
+  const payload = {};
+  if (volumePercent !== undefined) {
+    const boundedVolumePercent = boundedRemoteVolumePercent(volumePercent);
+    if (boundedVolumePercent === null) {
+      return;
+    }
+    payload.volume_percent = boundedVolumePercent;
   }
   if (isMuted !== undefined) {
     payload.is_muted = Boolean(isMuted);
@@ -835,16 +1212,35 @@ async function setRemoteVolumeSettings({ volumePercent, isMuted } = {}) {
   if (!Object.keys(payload).length) {
     return;
   }
-  try {
-    state.data = await apiPost("/api/player/volume", payload);
-    render();
-  } catch (error) {
-    setFormMessage(error.message, true);
+
+  const requestSeq = markRemoteVolumeWrite(payload);
+  renderRemoteVolumeControls(state.data?.playback_mode, state.data?.player_settings);
+  if (options.debounce) {
+    clearRemoteVolumeCommitTimer();
+    state.remoteVolumeCommitTimer = window.setTimeout(() => {
+      state.remoteVolumeCommitTimer = null;
+      commitRemoteVolumeSettings(payload, requestSeq);
+    }, remoteVolumeCommitDebounceMs);
+    return;
   }
+
+  clearRemoteVolumeCommitTimer();
+  await commitRemoteVolumeSettings(payload, requestSeq);
+}
+
+function hasLocalSplitMedia(item) {
+  return Boolean(
+    item
+      && item.video_media_url
+      && Array.isArray(item.audio_variants)
+      && item.audio_variants.some((variant) => (
+        variant && String(variant.audio_url || "").trim()
+      ))
+  );
 }
 
 function canRemoteControlPlayer(currentItem, playbackMode) {
-  return Boolean(currentItem && playbackMode === "local" && currentItem.local_media_url);
+  return Boolean(currentItem && playbackMode === "local" && hasLocalSplitMedia(currentItem));
 }
 
 function currentPlayerStatus(currentItem) {
@@ -891,7 +1287,7 @@ function renderPlayerControls(currentItem, playbackMode) {
     elements.playerControlHint.textContent = "当前是在线外挂，暂不支持远程控制播放。";
     return;
   }
-  if (!currentItem.local_media_url) {
+  if (!hasLocalSplitMedia(currentItem)) {
     elements.playerControlHint.textContent = "当前歌曲还没有完成本地缓存，暂时无法远程控制。";
     return;
   }
@@ -902,8 +1298,8 @@ function renderPlayerControls(currentItem, playbackMode) {
 
 function renderListHeader(playlist, history) {
   const isHistoryView = state.listView === "history";
-  elements.listTag.textContent = isHistoryView ? "History" : "Queue";
-  elements.listTitle.textContent = isHistoryView ? "点歌历史" : "播放队列";
+  elements.listTag.textContent = isHistoryView ? "History" : "Requests";
+  elements.listTitle.textContent = isHistoryView ? "历史记录" : "点歌列表";
   elements.listCount.textContent = `${isHistoryView ? history.length : playlist.length} 首`;
 
   elements.queueViewButton.classList.toggle("active", !isHistoryView);
@@ -921,7 +1317,7 @@ function syncListView() {
 function renderQueue(playlist) {
   elements.queueList.innerHTML = "";
   if (!playlist.length) {
-    elements.queueList.innerHTML = '<div class="queue-empty">队列暂时是空的，可以继续点下一首歌。</div>';
+    elements.queueList.innerHTML = '<div class="queue-empty">点歌列表暂时是空的，可以继续点下一首歌。</div>';
     return;
   }
 
@@ -1032,17 +1428,16 @@ async function submitRequest(position) {
   }
 
   state.submitting = true;
-  setFormMessage(position === "next" ? "正在顶歌..." : "正在加入队列...");
+  setFormMessage(position === "next" ? "正在顶歌..." : "正在加入点歌列表...");
   try {
     const result = await submitAddRequestWithDuplicateConfirm(url, position, requesterName);
     if (result.cancelled) {
       setFormMessage("已取消重复点歌。");
       return;
     }
-    state.data = result.data;
+    applyStateSnapshot(result.data, { forceRender: true });
     elements.urlInput.value = "";
-    setFormMessage(position === "next" ? "已经顶歌到下一首。" : "已经加入播放队列。");
-    render();
+    setFormMessage(position === "next" ? "已经顶歌到下一首。" : "已经加入点歌列表。");
   } catch (error) {
     if (error.code === "manual_binding_required") {
       openBindingSheet(
@@ -1074,16 +1469,15 @@ async function handleAddByHistory(url, position) {
   }
 
   state.submitting = true;
-  setFormMessage(position === "next" ? "正在从历史记录顶歌..." : "正在从历史记录加入队列...");
+  setFormMessage(position === "next" ? "正在从历史记录顶歌..." : "正在从历史记录加入点歌列表...");
   try {
     const result = await submitAddRequestWithDuplicateConfirm(url, position, requesterName);
     if (result.cancelled) {
       setFormMessage("已取消重复点歌。");
       return;
     }
-    state.data = result.data;
-    setFormMessage(position === "next" ? "已从历史记录顶歌到下一首。" : "已从历史记录加入队列。");
-    render();
+    applyStateSnapshot(result.data, { forceRender: true });
+    setFormMessage(position === "next" ? "已从历史记录顶歌到下一首。" : "已从历史记录加入点歌列表。");
   } catch (error) {
     if (error.code === "manual_binding_required") {
       openBindingSheet(
@@ -1104,6 +1498,12 @@ async function handleAddByHistory(url, position) {
   }
 }
 
+async function resortPlaylistByCycle() {
+  state.data = await apiPost("/api/playlist/resort");
+  applyStateSnapshot(state.data, { forceRender: true });
+  setFormMessage("已按本场用户座次重新排序点歌列表。");
+}
+
 async function addByUrl(url, position = "tail") {
   const requesterName = selectedRequesterName();
   if (!url || state.submitting) {
@@ -1122,14 +1522,13 @@ async function addByUrl(url, position = "tail") {
       setFormMessage("已取消重复点歌。");
       return;
     }
-    state.data = result.data;
+    applyStateSnapshot(result.data, { forceRender: true });
     hideSearchResults();
     elements.searchQuery.value = "";
     state.gatchaCandidate = null;
     elements.gatchaResultView.classList.add("hidden");
     elements.gatchaInitView.classList.remove("hidden");
     setFormMessage("点歌成功。");
-    render();
   } catch (error) {
     if (error.code === "manual_binding_required") {
       openBindingSheet(
@@ -1176,13 +1575,12 @@ async function sendPlayerControl(action, deltaSeconds = 0) {
     } else {
       renderPlayerControls(currentItem, playbackMode);
     }
-    state.data = await apiPost("/api/player/control", {
+    applyStateSnapshot(await apiPost("/api/player/control", {
       action,
       item_id: currentItem.id,
       delta_seconds: deltaSeconds,
-    });
+    }));
     setFormMessage(message);
-    render();
   } catch (error) {
     setFormMessage(error.message, true);
     await fetchState().catch(() => {});
@@ -1198,9 +1596,8 @@ async function sendPlayerNext() {
   try {
     state.playerControlPendingAction = "next-track";
     renderPlayerControls(state.data?.current_item, state.data?.playback_mode);
-    state.data = await apiPost("/api/player/next");
+    applyStateSnapshot(await apiPost("/api/player/next"));
     setFormMessage("已切到下一首。");
-    render();
   } catch (error) {
     setFormMessage(error.message, true);
     await fetchState().catch(() => {});
@@ -1214,6 +1611,7 @@ function queueNoteText() {
 }
 
 function disconnectClient() {
+  closeEventStream();
   if (state.disconnectSent) {
     return;
   }
@@ -1271,6 +1669,14 @@ elements.addNextButton.addEventListener("click", async () => {
   await submitRequest("next");
 });
 
+elements.resortPlaylistButton?.addEventListener("click", async () => {
+  try {
+    await resortPlaylistByCycle();
+  } catch (error) {
+    setFormMessage(error.message, true);
+  }
+});
+
 elements.layoutModeSwitch?.addEventListener("click", (event) => {
   const button = event.target.closest("button[data-layout-mode]");
   if (!button) {
@@ -1279,10 +1685,34 @@ elements.layoutModeSwitch?.addEventListener("click", (event) => {
   setLayoutMode(button.dataset.layoutMode);
 });
 
+elements.remoteQrToggle?.addEventListener("click", () => {
+  setRemoteQrPopoverOpen(!state.remoteQrPopoverOpen);
+});
+
+elements.remoteQrPopoverClose?.addEventListener("click", () => {
+  setRemoteQrPopoverOpen(false);
+});
+
+document.addEventListener("click", (event) => {
+  if (!state.remoteQrPopoverOpen) {
+    return;
+  }
+  if (event.target.closest("#remote-qr-control")) {
+    return;
+  }
+  setRemoteQrPopoverOpen(false);
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {
+    setRemoteQrPopoverOpen(false);
+  }
+});
+
 elements.refreshButton.addEventListener("click", async () => {
   try {
     await fetchState();
-    setFormMessage("列表已刷新。");
+    setFormMessage("点歌列表已刷新。");
   } catch (error) {
     setFormMessage(error.message, true);
   } finally {
@@ -1318,6 +1748,8 @@ elements.remoteVolumeSlider?.addEventListener("input", async (event) => {
   await setRemoteVolumeSettings({
     volumePercent: event.target.value,
     isMuted: currentRemoteMuted(state.data?.player_settings),
+  }, {
+    debounce: true,
   });
 });
 
@@ -1408,9 +1840,8 @@ elements.audioVariantBar.addEventListener("click", async (event) => {
         setFormMessage("已取消重复添加");
         return;
       }
-      state.data = result.data;
-      setFormMessage("已将分P加入下载列表");
-      render();
+      applyStateSnapshot(result.data, { forceRender: true });
+      setFormMessage("已将分P加入缓存任务");
     } catch (error) {
       setFormMessage(error.message, true);
     } finally {
@@ -1433,11 +1864,10 @@ elements.audioVariantBar.addEventListener("click", async (event) => {
     state.audioVariantSwitchInFlight = true;
     state.audioVariantSwitchUnlockAt = Date.now() + audioVariantSwitchDebounceMs;
     renderAudioVariantBar(currentItem, state.data?.playback_mode);
-    state.data = await apiPost("/api/player/audio-variant", {
+    applyStateSnapshot(await apiPost("/api/player/audio-variant", {
       item_id: currentItem.id,
       variant_id: nextVariantId,
-    });
-    render();
+    }));
     const activeItem = state.data?.current_item;
     const activeVariant = activeItem ? selectedAudioVariantForItem(activeItem) : null;
     setFormMessage(`已切换到 ${activeVariant?.label || nextVariantId}`);
@@ -1491,10 +1921,41 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    clearViewportScaleResetTimers();
+    blurActiveEditableElement();
+    return;
+  }
+  scheduleViewportScaleReset();
+});
+
+window.addEventListener("pageshow", () => {
+  window.requestAnimationFrame(() => {
+    blurActiveEditableElement();
+  });
+  scheduleViewportScaleReset();
+});
+
+window.addEventListener("focus", () => {
+  scheduleViewportScaleReset();
+});
+
+if (window.visualViewport) {
+  window.visualViewport.addEventListener("resize", () => {
+    if (document.hidden || isEditableElement(document.activeElement) || currentViewportScale() <= 1.01) {
+      return;
+    }
+    scheduleViewportScaleReset();
+  });
+}
+
+window.addEventListener("pagehide", blurActiveEditableElement);
+window.addEventListener("pagehide", clearViewportScaleResetTimers);
 window.addEventListener("pagehide", disconnectClient);
 window.addEventListener("beforeunload", disconnectClient);
 
-async function startPolling() {
+async function startRemoteSession() {
   hydrateLocalPreferences();
   renderLayoutMode();
   try {
@@ -1502,13 +1963,7 @@ async function startPolling() {
   } catch (error) {
     setFormMessage(error.message, true);
   }
-  window.setInterval(async () => {
-    try {
-      await fetchState();
-    } catch {
-      // Keep the last successful state on screen.
-    }
-  }, pollIntervalMs);
+  connectStateStream();
 }
 
-startPolling();
+startRemoteSession();

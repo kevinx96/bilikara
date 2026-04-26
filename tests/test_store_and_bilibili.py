@@ -13,7 +13,7 @@ from bilikara.bilibili import (
     select_matching_pages,
 )
 from bilikara.models import PlaylistItem
-from bilikara.store import PlaylistStore
+from bilikara.store import DEFAULT_SONG_ADVANCE_DELAY_SECONDS, PlaylistStore
 from bilikara.title_cleanup import clean_display_title
 
 
@@ -38,7 +38,7 @@ class PlaylistStoreTest(unittest.TestCase):
     def test_default_mode_is_local(self):
         self.assertEqual(self.store.playback_mode, "local")
 
-    def test_av_offset_persists_in_state_file(self):
+    def test_av_offset_persists_in_player_state_file(self):
         self.store.set_av_offset_ms(230)
 
         restored_store = PlaylistStore(
@@ -49,8 +49,10 @@ class PlaylistStoreTest(unittest.TestCase):
 
         self.assertEqual(self.store.snapshot()["player_settings"]["av_offset_ms"], 230)
         self.assertEqual(restored_store.av_offset_ms, 230)
+        self.assertFalse(self.state_file.exists())
+        self.assertTrue((self.state_file.parent / "player_state.json").exists())
 
-    def test_volume_settings_persist_in_state_file(self):
+    def test_volume_settings_persist_in_player_state_file(self):
         self.store.set_volume_percent(35)
         self.store.set_muted(True)
 
@@ -65,6 +67,88 @@ class PlaylistStoreTest(unittest.TestCase):
         self.assertTrue(snapshot["is_muted"])
         self.assertEqual(restored_store.volume_percent, 35)
         self.assertTrue(restored_store.is_muted)
+
+    def test_song_advance_delay_persists_in_player_state_file(self):
+        self.store.set_song_advance_delay_seconds(8)
+
+        restored_store = PlaylistStore(
+            state_file=self.state_file,
+            backup_file=self.backup_file,
+            session_archive_dir=self.session_archive_dir,
+        )
+
+        snapshot = self.store.snapshot()["player_settings"]
+        self.assertEqual(snapshot["song_advance_delay_seconds"], 8)
+        self.assertEqual(restored_store.song_advance_delay_seconds, 8)
+
+    def test_reset_player_state_keeps_queue_and_runtime_data(self):
+        self.store.set_mode("online")
+        self.store.set_av_offset_ms(230)
+        self.store.set_volume_percent(35)
+        self.store.set_muted(True)
+        self.store.set_song_advance_delay_seconds(8)
+        self.add_item("a", requester_name="A")
+        self.add_item("b", requester_name="B")
+        self.mark_started("a")
+
+        self.store.reset_player_state()
+
+        snapshot = self.store.snapshot()
+        self.assertEqual(snapshot["playback_mode"], "local")
+        self.assertEqual(snapshot["player_settings"]["av_offset_ms"], 0)
+        self.assertEqual(snapshot["player_settings"]["volume_percent"], 100)
+        self.assertFalse(snapshot["player_settings"]["is_muted"])
+        self.assertEqual(
+            snapshot["player_settings"]["song_advance_delay_seconds"],
+            DEFAULT_SONG_ADVANCE_DELAY_SECONDS,
+        )
+        self.assertEqual(snapshot["current_item"]["id"], "a")
+        self.assertEqual([item["id"] for item in snapshot["playlist"]], ["b"])
+        self.assertEqual(snapshot["session_users"], ["A", "B", "C", "D"])
+        self.assertFalse(self.store.current_item_started)
+
+    def test_legacy_state_file_is_ignored_and_removed(self):
+        for name in ["player_state.json", "history.json", "session_users.json"]:
+            (self.state_file.parent / name).unlink(missing_ok=True)
+        legacy_payload = {
+            "playback_mode": "online",
+            "player_settings": {"av_offset_ms": 320, "volume_percent": 55, "is_muted": True},
+            "history": [
+                {
+                    "key": "song-a",
+                    "display_title": "legacy song",
+                    "original_url": "https://www.bilibili.com/video/BV1xx411c7mD",
+                    "resolved_url": "https://www.bilibili.com/video/BV1xx411c7mD",
+                    "title": "legacy song",
+                    "part_title": "P1",
+                    "requested_at": 1,
+                    "request_count": 2,
+                    "requester_name": "A",
+                }
+            ],
+            "session_users": ["A", "B"],
+            "updated_at": 1,
+        }
+        self.state_file.write_text(
+            json.dumps(legacy_payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+        restored_store = PlaylistStore(
+            state_file=self.state_file,
+            backup_file=self.backup_file,
+            session_archive_dir=self.session_archive_dir,
+        )
+
+        self.assertEqual(restored_store.playback_mode, "local")
+        self.assertEqual(restored_store.av_offset_ms, 0)
+        self.assertEqual(restored_store.volume_percent, 100)
+        self.assertFalse(restored_store.is_muted)
+        self.assertEqual(restored_store.history, [])
+        self.assertEqual(restored_store.session_users, [])
+        self.assertFalse(self.state_file.exists())
+        self.assertTrue((self.state_file.parent / "history.json").exists())
+        self.assertTrue((self.state_file.parent / "session_users.json").exists())
 
     def make_item(self, item_id: str, *, song_key: str | None = None) -> PlaylistItem:
         key = song_key or item_id
@@ -95,6 +179,9 @@ class PlaylistStoreTest(unittest.TestCase):
         item = self.make_item(item_id, song_key=song_key)
         self.store.add_item(item, position=position, requester_name=requester_name)
         return item
+
+    def mark_started(self, item_id: str) -> None:
+        self.assertTrue(self.store.mark_item_playback_started(item_id))
 
     def test_add_tail_and_next(self):
         self.add_item("a", requester_name="A")
@@ -134,12 +221,30 @@ class PlaylistStoreTest(unittest.TestCase):
         self.assertTrue(self.store.move_item_to_index("d", 0))
         self.assertEqual([item.id for item in self.store.playlist], ["d", "b", "c"])
 
+    def test_resort_playlist_resets_priority_and_manual_items_to_cycle_order(self):
+        self.add_item("a1", requester_name="A")
+        self.add_item("b1", requester_name="B")
+        self.add_item("c1", requester_name="C")
+        self.add_item("a2", requester_name="A")
+
+        self.store.move_to_next("c1")
+        self.store.move_item_to_index("a2", 0)
+        self.assertEqual([item.queue_slot_type for item in self.store.playlist], ["manual", "priority", "cycle"])
+
+        self.assertTrue(self.store.resort_playlist_by_cycle())
+
+        self.assertEqual([item.id for item in self.store.playlist], ["b1", "c1", "a2"])
+        self.assertEqual([item.queue_slot_type for item in self.store.playlist], ["cycle", "cycle", "cycle"])
+
     def test_clear_playlist_keeps_current(self):
         self.add_item("a", requester_name="A")
         self.add_item("b", requester_name="B")
+        self.assertTrue(self.backup_file.exists())
         self.store.clear_playlist()
         self.assertEqual(self.store.current_item.id, "a")
         self.assertEqual(self.store.playlist, [])
+        self.assertFalse(self.backup_file.exists())
+        self.assertFalse(self.store.backup_summary()["available"])
 
     def test_snapshot_uses_cleaned_display_titles(self):
         item = self.make_item("a")
@@ -150,13 +255,50 @@ class PlaylistStoreTest(unittest.TestCase):
 
         snapshot = self.store.snapshot()
         self.assertEqual(snapshot["current_item"]["display_title"], "Song Name")
-        self.assertEqual(snapshot["history"][0]["display_title"], "Song Name")
         self.assertEqual(snapshot["current_item"]["requester_name"], "A")
+
+        self.mark_started("a")
+        self.store.advance_to_next()
+        snapshot = self.store.snapshot()
+        self.assertEqual(snapshot["history"][0]["display_title"], "Song Name")
+
+    def test_history_stays_empty_until_current_item_has_started_playing(self):
+        self.add_item("a", requester_name="A", song_key="song-a")
+        self.add_item("b", requester_name="B", song_key="song-b")
+
+        self.assertEqual(self.store.history, [])
+
+        self.store.advance_to_next()
+
+        self.assertEqual(self.store.history, [])
+
+        self.mark_started("b")
+        self.store.remove_item("b")
+
+        self.assertEqual(len(self.store.history), 1)
+        self.assertEqual(self.store.history[0].display_title, "title-b - P1")
+        self.assertEqual(self.store.history[0].requester_name, "B")
+
+    def test_history_records_started_song_when_advanced_to_next(self):
+        self.add_item("a", requester_name="A", song_key="song-a")
+        self.add_item("b", requester_name="B", song_key="song-b")
+        self.mark_started("a")
+        self.store.advance_to_next()
+
+        self.assertEqual(len(self.store.history), 1)
+        self.assertEqual(self.store.history[0].display_title, "title-a - P1")
+        self.assertEqual(self.store.history[0].requester_name, "A")
 
     def test_history_updates_and_moves_latest_duplicate_to_top(self):
         self.add_item("a", requester_name="A", song_key="song-a")
         self.add_item("b", requester_name="B", song_key="song-b")
         self.add_item("c", requester_name="C", song_key="song-a")
+        self.mark_started("a")
+        self.store.advance_to_next()
+        self.mark_started("b")
+        self.store.move_to_front("c")
+        self.mark_started("c")
+        self.store.advance_to_next()
         self.assertEqual(len(self.store.history), 2)
         self.assertEqual(self.store.history[0].display_title, "title-c - P1")
         self.assertEqual(self.store.history[0].request_count, 2)
@@ -167,10 +309,23 @@ class PlaylistStoreTest(unittest.TestCase):
     def test_session_history_updates_for_duplicate_request_in_current_run(self):
         self.add_item("a", requester_name="A", song_key="song-a")
         self.add_item("b", requester_name="B", song_key="song-a")
+        self.mark_started("a")
+        self.store.move_to_front("b")
+        self.mark_started("b")
+        self.store.remove_item("b")
         self.assertEqual(len(self.store.session_history), 1)
         self.assertEqual(self.store.session_history[0].display_title, "title-b - P1")
         self.assertEqual(self.store.session_history[0].request_count, 2)
         self.assertEqual(self.store.session_history[0].requester_name, "B")
+
+    def test_unstarted_removed_song_does_not_count_as_session_duplicate(self):
+        self.add_item("a", requester_name="A", song_key="song-a")
+        self.add_item("b", requester_name="B", song_key="song-b")
+
+        self.store.advance_to_next()
+
+        self.assertEqual(self.store.session_history, [])
+        self.assertIsNone(self.store.session_request_for_item(self.make_item("retry", song_key="song-b")))
 
     def test_session_history_does_not_restore_from_state_file(self):
         self.add_item("a", requester_name="A", song_key="song-a")
@@ -232,6 +387,9 @@ class PlaylistStoreTest(unittest.TestCase):
         item.owner_mid = 0
         item.owner_url = ""
         self.store.add_item(item, requester_name="A")
+        self.store.add_item(self.make_item("b", song_key="song-b"), requester_name="B")
+        self.mark_started("a")
+        self.store.advance_to_next()
 
         changed = self.store.update_owner_info_for_url(
             item.resolved_url,
@@ -257,8 +415,10 @@ class PlaylistStoreTest(unittest.TestCase):
         self.assertTrue(changed)
         self.assertEqual(self.store.current_item.selected_audio_variant_id, "p2_off_vocal")
 
-    def test_history_restores_from_state_file(self):
+    def test_history_restores_from_history_state_file(self):
         self.add_item("a", requester_name="A", song_key="song-a")
+        self.mark_started("a")
+        self.store.advance_to_next()
         restored_store = PlaylistStore(
             state_file=self.state_file,
             backup_file=self.backup_file,
@@ -269,13 +429,27 @@ class PlaylistStoreTest(unittest.TestCase):
         self.assertEqual(restored_store.history[0].request_count, 1)
         self.assertEqual(restored_store.history[0].requester_name, "A")
 
+    def test_clear_history_removes_persisted_entries(self):
+        self.add_item("a", requester_name="A", song_key="song-a")
+        self.mark_started("a")
+        self.store.advance_to_next()
+        self.assertEqual(len(self.store.history), 1)
+
+        self.store.clear_history()
+
+        self.assertEqual(self.store.history, [])
+        restored_store = PlaylistStore(
+            state_file=self.state_file,
+            backup_file=self.backup_file,
+            session_archive_dir=self.session_archive_dir,
+        )
+        self.assertEqual(restored_store.history, [])
+
     def test_restore_from_backup(self):
         item = self.make_item("a")
         item.cache_status = "ready"
         item.cache_progress = 100.0
         item.cache_message = "cached"
-        item.local_relative_path = "a/video.mp4"
-        item.local_media_url = "/media/a/video.mp4"
         item.video_relative_path = "a/video-only.m4s"
         item.video_media_url = "/media/a/video-only.m4s"
         self.store.move_session_user_to_index("D", 1)
@@ -284,6 +458,14 @@ class PlaylistStoreTest(unittest.TestCase):
         self.store.set_av_offset_ms(180)
         self.store.set_volume_percent(42)
         self.store.set_muted(True)
+
+        backup_payload = json.loads(self.backup_file.read_text(encoding="utf-8"))
+        backup_payload["current_item"]["local_relative_path"] = "legacy/video.mp4"
+        backup_payload["current_item"]["local_media_url"] = "/media/legacy/video.mp4"
+        self.backup_file.write_text(
+            json.dumps(backup_payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
 
         restored_store = PlaylistStore(
             state_file=self.state_file,
@@ -301,8 +483,8 @@ class PlaylistStoreTest(unittest.TestCase):
         self.assertEqual([entry.id for entry in restored_store.playlist], [])
         restored_item = restored_store.current_item
         self.assertEqual(restored_item.cache_status, "pending")
-        self.assertEqual(restored_item.local_relative_path, "")
-        self.assertEqual(restored_item.local_media_url, "")
+        self.assertFalse(hasattr(restored_item, "local_relative_path"))
+        self.assertFalse(hasattr(restored_item, "local_media_url"))
         self.assertEqual(restored_item.video_relative_path, "")
         self.assertEqual(restored_item.video_media_url, "")
         self.assertEqual(restored_item.requester_name, "A")
@@ -313,6 +495,27 @@ class PlaylistStoreTest(unittest.TestCase):
         self.assertTrue(self.backup_file.exists())
         self.assertTrue(self.store.discard_backup())
         self.assertFalse(self.store.backup_summary()["available"])
+        self.assertIsNone(self.store.current_item)
+        self.assertEqual(self.store.playlist, [])
+
+    def test_reset_runtime_data_keeps_gatcha_cache_and_played_sessions(self):
+        self.store.set_mode("online")
+        self.add_item("a", requester_name="A")
+        self.assertTrue(self.backup_file.exists())
+        gatcha_file = self.state_file.parent / "gatcha_cache.json"
+        gatcha_file.write_text("{}", encoding="utf-8")
+        played_file = self.session_archive_dir / "played-keep.json"
+        played_file.parent.mkdir(parents=True, exist_ok=True)
+        played_file.write_text("{}", encoding="utf-8")
+
+        self.store.reset_runtime_data()
+
+        self.assertTrue(gatcha_file.exists())
+        self.assertTrue(played_file.exists())
+        self.assertFalse(self.backup_file.exists())
+        self.assertEqual(self.store.playback_mode, "local")
+        self.assertEqual(self.store.history, [])
+        self.assertEqual(self.store.session_users, [])
 
     def test_add_requires_existing_session_user_selection(self):
         isolated_store = PlaylistStore(
@@ -341,6 +544,72 @@ class PlaylistStoreTest(unittest.TestCase):
         self.store.move_session_user_to_index("C", 1)
         self.assertEqual(self.store.session_users[:3], ["A", "C", "B"])
         self.assertEqual([item.id for item in self.store.playlist], ["c1", "b1", "a2"])
+
+    def test_play_now_rebuilds_cycle_queue_for_new_current_requester(self):
+        self.add_item("a1", requester_name="A")
+        self.add_item("b1", requester_name="B")
+        self.add_item("c1", requester_name="C")
+        self.add_item("a2", requester_name="A")
+        self.assertEqual([item.id for item in self.store.playlist], ["b1", "c1", "a2"])
+
+        self.store.move_to_front("c1")
+
+        self.assertEqual(self.store.current_item.id, "c1")
+        self.assertEqual([item.id for item in self.store.playlist], ["a2", "b1"])
+
+    def test_advance_to_priority_item_rebuilds_cycle_queue(self):
+        self.add_item("a1", requester_name="A")
+        self.add_item("b1", requester_name="B")
+        self.add_item("c1", requester_name="C")
+        self.add_item("a2", requester_name="A")
+        self.store.move_to_next("c1")
+
+        self.store.advance_to_next()
+
+        self.assertEqual(self.store.current_item.id, "c1")
+        self.assertEqual([item.id for item in self.store.playlist], ["a2", "b1"])
+
+    def test_reordering_session_users_keeps_priority_next_and_rebuilds_cycle_tail(self):
+        self.add_item("a1", requester_name="A")
+        self.add_item("b1", requester_name="B")
+        self.add_item("c1", requester_name="C")
+        self.add_item("a2", requester_name="A")
+        self.add_item("b2", requester_name="B")
+        self.assertEqual([item.id for item in self.store.playlist], ["b1", "c1", "a2", "b2"])
+
+        self.store.move_to_next("b2")
+        self.assertEqual([item.id for item in self.store.playlist], ["b2", "b1", "c1", "a2"])
+
+        self.store.move_session_user_to_index("C", 1)
+
+        self.assertEqual(self.store.session_users[:3], ["A", "C", "B"])
+        self.assertEqual([item.id for item in self.store.playlist], ["b2", "c1", "b1", "a2"])
+        self.assertEqual(self.store.playlist[0].queue_slot_type, "priority")
+
+    def test_priority_section_is_independent_from_cycle_queue(self):
+        self.add_item("a1", requester_name="A")
+        self.add_item("b1", requester_name="B")
+        self.add_item("c1", requester_name="C")
+        self.add_item("a2", requester_name="A")
+        self.add_item("b2", requester_name="B")
+        self.add_item("c2", requester_name="C")
+        self.assertEqual([item.id for item in self.store.playlist], ["b1", "c1", "a2", "b2", "c2"])
+
+        self.add_item("c-priority", requester_name="C", position="next")
+        self.assertEqual(
+            [item.id for item in self.store.playlist],
+            ["c-priority", "b1", "c1", "a2", "b2", "c2"],
+        )
+
+        self.add_item("b-priority", requester_name="B", position="next")
+        self.assertEqual(
+            [item.id for item in self.store.playlist],
+            ["b-priority", "c-priority", "b1", "c1", "a2", "b2", "c2"],
+        )
+        self.assertEqual(
+            [item.queue_slot_type for item in self.store.playlist[:2]],
+            ["priority", "priority"],
+        )
 
     def test_current_item_does_not_consume_waiting_queue_turn(self):
         self.store = PlaylistStore(
@@ -481,6 +750,34 @@ class BilibiliParserTest(unittest.TestCase):
         self.assertEqual(item.selected_audio_variant_id, "p2_off_vocal")
         self.assertEqual(item.available_pages, [1, 2])
         self.assertEqual(item.available_parts, ["on_vocal", "off_vocal"])
+
+    @patch("bilikara.bilibili.request_json")
+    def test_fetch_video_item_keeps_both_keyword_matched_pages_when_durations_differ(self, mock_request_json):
+        mock_request_json.return_value = {
+            "code": 0,
+            "data": {
+                "aid": 123,
+                "bvid": "BV1xx411c7mD",
+                "title": "example video",
+                "pic": "https://example.com/cover.jpg",
+                "owner": {
+                    "mid": 114514,
+                    "name": "example-up",
+                },
+                "pages": [
+                    {"cid": 456, "page": 1, "part": "on vocal", "duration": 300},
+                    {"cid": 789, "page": 2, "part": "off vocal", "duration": 309},
+                ],
+            },
+        }
+
+        item = fetch_video_item("https://www.bilibili.com/video/BV1xx411c7mD?p=2")
+
+        self.assertFalse(item.manual_selection)
+        self.assertEqual(item.video_page, 2)
+        self.assertEqual(item.selected_pages, [1, 2])
+        self.assertEqual(item.selected_durations, [300, 309])
+        self.assertEqual(item.selected_audio_variant_id, "p2_off_vocal")
 
     @patch("bilikara.bilibili.request_json")
     def test_fetch_video_item_requires_manual_binding_for_ambiguous_multipart_video(self, mock_request_json):
