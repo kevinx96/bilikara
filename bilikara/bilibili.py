@@ -43,6 +43,7 @@ _GATCHA_REQUEST_LOCK = threading.Lock()
 _GATCHA_LAST_REQUEST_AT = 0.0
 _GATCHA_CACHE_FILE = cfg.DATA_DIR / "gatcha_cache.json"
 _GATCHA_UIDS_FILE = cfg.DATA_DIR / "gatcha_uids.json"
+_GATCHA_CACHE_SCHEMA_VERSION = 2
 GATCHA_RETRY_DELAY_SECONDS = 5
 GATCHA_PROFILE_CACHE_TTL_SECONDS = 300
 MISSING_BILIBILI_COOKIE_MESSAGE = "请登录 Bilibili 账号或输入 Cookie"
@@ -305,22 +306,49 @@ class ManualBindingRequiredError(BilibiliError):
         super().__init__("该视频包含多个分P，请先选择视频和音频绑定关系")
 
 
-def _load_gatcha_cache() -> dict:
+def _empty_gatcha_cache_payload() -> dict:
+    return {"schema_version": _GATCHA_CACHE_SCHEMA_VERSION, "uids": {}, "profiles": {}, "updated_at": 0}
+
+
+def _is_legacy_gatcha_cache_payload(payload: object) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    if not isinstance(payload.get("uids"), dict):
+        return False
+    if "profiles" not in payload:
+        return True
+    if not isinstance(payload.get("profiles"), dict):
+        return True
+    return False
+
+
+def _clear_legacy_gatcha_cache_file() -> None:
+    try:
+        _GATCHA_CACHE_FILE.unlink(missing_ok=True)
+    except OSError:
+        return
+
+
+def _load_gatcha_cache(*, reset_legacy: bool = False) -> dict:
     if not _GATCHA_CACHE_FILE.exists():
-        return {"uids": {}, "profiles": {}, "updated_at": 0}
+        return _empty_gatcha_cache_payload()
     try:
         with _GATCHA_CACHE_FILE.open("r", encoding="utf-8") as handle:
             payload = json.load(handle)
     except (OSError, json.JSONDecodeError):
-        return {"uids": {}, "profiles": {}, "updated_at": 0}
+        return _empty_gatcha_cache_payload()
 
     if not isinstance(payload, dict):
-        return {"uids": {}, "profiles": {}, "updated_at": 0}
+        return _empty_gatcha_cache_payload()
+    if reset_legacy and _is_legacy_gatcha_cache_payload(payload):
+        _clear_legacy_gatcha_cache_file()
+        return _empty_gatcha_cache_payload()
     uids = payload.get("uids")
     if not isinstance(uids, dict):
         uids = {}
     profiles = _normalize_gatcha_profiles(payload.get("profiles"))
     return {
+        "schema_version": _GATCHA_CACHE_SCHEMA_VERSION,
         "uids": uids,
         "profiles": profiles,
         "updated_at": float(payload.get("updated_at") or 0),
@@ -329,6 +357,7 @@ def _load_gatcha_cache() -> dict:
 
 def _save_gatcha_cache(cache_payload: dict) -> None:
     cfg.DATA_DIR.mkdir(parents=True, exist_ok=True)
+    cache_payload["schema_version"] = _GATCHA_CACHE_SCHEMA_VERSION
     temp_path = _GATCHA_CACHE_FILE.with_suffix(".tmp")
     with temp_path.open("w", encoding="utf-8") as handle:
         json.dump(cache_payload, handle, ensure_ascii=False, indent=2)
@@ -657,10 +686,10 @@ def refresh_gatcha_cache() -> dict:
         known_profiles = {}
 
     with _GATCHA_CACHE_LOCK:
-        cache_payload = _load_gatcha_cache()
+        cache_payload = _load_gatcha_cache(reset_legacy=True)
 
     if not isinstance(cache_payload, dict):
-        cache_payload = {"uids": {}, "profiles": {}, "updated_at": 0}
+        cache_payload = _empty_gatcha_cache_payload()
     if not isinstance(cache_payload.get("uids"), dict):
         cache_payload["uids"] = {}
     cache_profiles = cache_payload.get("profiles")
