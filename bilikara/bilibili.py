@@ -193,9 +193,38 @@ def _save_gatcha_uid_payload(uid_payload: dict) -> None:
     temp_path.replace(_GATCHA_UIDS_FILE)
 
 
+def _normalize_gatcha_profile(raw_uid: object, raw_profile: object) -> dict | None:
+    try:
+        uid = _normalize_gatcha_uid(raw_uid)
+    except BilibiliError:
+        return None
+    if not isinstance(raw_profile, dict):
+        return None
+    name = str(raw_profile.get("name") or "").strip()
+    if not name:
+        return None
+    return {
+        "uid": uid,
+        "name": name,
+        "space_url": str(raw_profile.get("space_url") or f"https://space.bilibili.com/{uid}"),
+    }
+
+
+def _normalize_gatcha_profiles(raw_profiles: object) -> dict[str, dict]:
+    profiles: dict[str, dict] = {}
+    if not isinstance(raw_profiles, dict):
+        return profiles
+    for raw_uid, raw_profile in raw_profiles.items():
+        profile = _normalize_gatcha_profile(raw_uid, raw_profile)
+        if profile is None:
+            continue
+        profiles[str(profile["uid"])] = profile
+    return profiles
+
+
 def _load_gatcha_uid_payload() -> dict:
     if not _GATCHA_UIDS_FILE.exists():
-        payload = {"uids": _default_gatcha_uids(), "updated_at": time.time()}
+        payload = {"uids": _default_gatcha_uids(), "profiles": {}, "updated_at": time.time()}
         _save_gatcha_uid_payload(payload)
         return payload
 
@@ -203,25 +232,29 @@ def _load_gatcha_uid_payload() -> dict:
         with _GATCHA_UIDS_FILE.open("r", encoding="utf-8") as handle:
             payload = json.load(handle)
     except (OSError, json.JSONDecodeError):
-        payload = {"uids": _default_gatcha_uids(), "updated_at": time.time()}
+        payload = {"uids": _default_gatcha_uids(), "profiles": {}, "updated_at": time.time()}
         _save_gatcha_uid_payload(payload)
         return payload
 
     if isinstance(payload, list):
         normalized_payload = {
             "uids": _normalize_gatcha_uid_list(payload),
+            "profiles": {},
             "updated_at": time.time(),
         }
         _save_gatcha_uid_payload(normalized_payload)
         return normalized_payload
 
     if not isinstance(payload, dict):
-        payload = {"uids": _default_gatcha_uids(), "updated_at": time.time()}
+        payload = {"uids": _default_gatcha_uids(), "profiles": {}, "updated_at": time.time()}
         _save_gatcha_uid_payload(payload)
         return payload
 
+    profiles = _normalize_gatcha_profiles(payload.get("profiles"))
+
     return {
         "uids": _normalize_gatcha_uid_list(payload.get("uids")),
+        "profiles": profiles,
         "updated_at": float(payload.get("updated_at") or 0),
     }
 
@@ -235,6 +268,7 @@ def gatcha_uid_snapshot() -> dict:
     return {
         "uids": list(uids),
         "count": len(uids),
+        "profiles": dict(payload.get("profiles") or {}),
         "updated_at": float(payload.get("updated_at") or 0),
     }
 
@@ -273,20 +307,22 @@ class ManualBindingRequiredError(BilibiliError):
 
 def _load_gatcha_cache() -> dict:
     if not _GATCHA_CACHE_FILE.exists():
-        return {"uids": {}, "updated_at": 0}
+        return {"uids": {}, "profiles": {}, "updated_at": 0}
     try:
         with _GATCHA_CACHE_FILE.open("r", encoding="utf-8") as handle:
             payload = json.load(handle)
     except (OSError, json.JSONDecodeError):
-        return {"uids": {}, "updated_at": 0}
+        return {"uids": {}, "profiles": {}, "updated_at": 0}
 
     if not isinstance(payload, dict):
-        return {"uids": {}, "updated_at": 0}
+        return {"uids": {}, "profiles": {}, "updated_at": 0}
     uids = payload.get("uids")
     if not isinstance(uids, dict):
         uids = {}
+    profiles = _normalize_gatcha_profiles(payload.get("profiles"))
     return {
         "uids": uids,
+        "profiles": profiles,
         "updated_at": float(payload.get("updated_at") or 0),
     }
 
@@ -327,13 +363,18 @@ def _extract_gatcha_entries(mid: str, payload: dict) -> list[dict]:
         title = str(video.get("title") or "").strip()
         if not bvid or not title or not _matches_gatcha_keywords(title):
             continue
+        owner_name = str(video.get("author") or video.get("owner_name") or "").strip()
+        entry = {
+            "mid": str(mid),
+            "bvid": bvid,
+            "title": title,
+            "url": f"https://www.bilibili.com/video/{bvid}",
+        }
+        if owner_name:
+            entry["owner_name"] = owner_name
+            entry["owner_url"] = f"https://space.bilibili.com/{mid}"
         entries.append(
-            {
-                "mid": str(mid),
-                "bvid": bvid,
-                "title": title,
-                "url": f"https://www.bilibili.com/video/{bvid}",
-            }
+            entry
         )
     return entries
 
@@ -414,6 +455,42 @@ def _request_gatcha_uid_profile(mid: str) -> dict:
         _GATCHA_PROFILE_CACHE[normalized_mid] = (time.time(), dict(profile))
         _GATCHA_PROFILE_CACHE[profile["uid"]] = (time.time(), dict(profile))
     return profile
+
+
+def _persist_gatcha_uid_profile(profile: dict) -> dict | None:
+    normalized = _normalize_gatcha_profile(profile.get("uid"), profile)
+    if normalized is None:
+        return None
+
+    with _GATCHA_UIDS_LOCK:
+        uid_payload = _load_gatcha_uid_payload()
+        profiles = uid_payload.get("profiles")
+        if not isinstance(profiles, dict):
+            profiles = {}
+        uid = str(normalized["uid"])
+        if profiles.get(uid) == normalized:
+            return normalized
+        profiles[uid] = normalized
+        uid_payload["profiles"] = profiles
+        uid_payload["updated_at"] = time.time()
+        try:
+            _save_gatcha_uid_payload(uid_payload)
+        except OSError:
+            return normalized
+    return normalized
+
+
+def _resolve_gatcha_uid_profile(mid: str, known_profiles: dict | None = None) -> dict | None:
+    known = known_profiles.get(mid) if isinstance(known_profiles, dict) else None
+    normalized_known = _normalize_gatcha_profile(mid, known)
+    if normalized_known is not None:
+        return normalized_known
+
+    try:
+        profile = _request_gatcha_uid_profile(mid)
+    except Exception:
+        return None
+    return _persist_gatcha_uid_profile(profile)
 
 
 def _fetch_gatcha_videos_for_uid(
@@ -570,19 +647,36 @@ def refresh_gatcha_cache() -> dict:
     if not effective_bilibili_cookie():
         raise BilibiliError(MISSING_BILIBILI_COOKIE_MESSAGE)
 
+    with _GATCHA_UIDS_LOCK:
+        uid_payload = _load_gatcha_uid_payload()
+    configured_uids = uid_payload.get("uids") if isinstance(uid_payload, dict) else []
+    if not isinstance(configured_uids, list):
+        configured_uids = []
+    known_profiles = uid_payload.get("profiles") if isinstance(uid_payload, dict) else {}
+    if not isinstance(known_profiles, dict):
+        known_profiles = {}
+
     with _GATCHA_CACHE_LOCK:
         cache_payload = _load_gatcha_cache()
 
     if not isinstance(cache_payload, dict):
-        cache_payload = {"uids": {}, "updated_at": 0}
+        cache_payload = {"uids": {}, "profiles": {}, "updated_at": 0}
     if not isinstance(cache_payload.get("uids"), dict):
         cache_payload["uids"] = {}
+    cache_profiles = cache_payload.get("profiles")
+    if not isinstance(cache_profiles, dict):
+        cache_profiles = {}
+    cache_payload["profiles"] = cache_profiles
 
     cache_payload["updated_at"] = time.time()
-    for raw_mid in _configured_gatcha_uids():
+    for raw_mid in configured_uids:
         mid = str(raw_mid).strip()
         if not mid:
             continue
+        profile = _resolve_gatcha_uid_profile(mid, known_profiles)
+        if profile is not None:
+            cache_profiles[str(profile["uid"])] = profile
+            known_profiles[str(profile["uid"])] = profile
         _refresh_gatcha_uid_cache(cache_payload, mid)
     return cache_payload
 
@@ -617,14 +711,32 @@ def add_gatcha_uid(raw_mid: object) -> dict:
         else:
             uids.append(mid)
             uid_payload["uids"] = uids
-            uid_payload["updated_at"] = time.time()
-            _save_gatcha_uid_payload(uid_payload)
             added = True
+        profiles = uid_payload.get("profiles")
+        if not isinstance(profiles, dict):
+            profiles = {}
+        profiles[mid] = {
+            "uid": mid,
+            "name": preview["name"],
+            "space_url": preview["space_url"],
+        }
+        uid_payload["profiles"] = profiles
+        uid_payload["updated_at"] = time.time()
+        _save_gatcha_uid_payload(uid_payload)
 
     _GATCHA_REFRESH_LOCK.acquire()
     try:
         with _GATCHA_CACHE_LOCK:
             cache_payload = _load_gatcha_cache()
+        cache_profiles = cache_payload.get("profiles") if isinstance(cache_payload, dict) else {}
+        if not isinstance(cache_profiles, dict):
+            cache_profiles = {}
+        cache_profiles[mid] = {
+            "uid": mid,
+            "name": preview["name"],
+            "space_url": preview["space_url"],
+        }
+        cache_payload["profiles"] = cache_profiles
         cache_result = _refresh_gatcha_uid_cache(cache_payload, mid)
     finally:
         _GATCHA_REFRESH_LOCK.release()
@@ -696,6 +808,95 @@ def search_gatcha_cache(query: str, *, limit: int = 30) -> list[dict]:
         if len(results) >= max(1, int(limit)):
             break
     return results
+
+
+def _gatcha_entry_payload(entry: dict) -> dict:
+    return {
+        "mid": str(entry.get("mid") or ""),
+        "bvid": str(entry.get("bvid") or ""),
+        "title": str(entry.get("title") or ""),
+        "url": str(entry.get("url") or ""),
+    }
+
+
+def _profile_from_cached_entries(mid: str, entries: list[dict]) -> dict:
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        owner_name = str(entry.get("owner_name") or entry.get("author") or "").strip()
+        if owner_name:
+            return {
+                "uid": mid,
+                "name": owner_name,
+                "space_url": str(entry.get("owner_url") or f"https://space.bilibili.com/{mid}"),
+            }
+    return {
+        "uid": mid,
+        "name": f"UID {mid}",
+        "space_url": f"https://space.bilibili.com/{mid}",
+    }
+
+
+def browse_gatcha_cache(uid: str = "", query: str = "") -> dict:
+    with _GATCHA_UIDS_LOCK:
+        uid_payload = _load_gatcha_uid_payload()
+    configured_uids = uid_payload.get("uids") if isinstance(uid_payload, dict) else []
+    if not isinstance(configured_uids, list):
+        configured_uids = []
+    profiles = uid_payload.get("profiles") if isinstance(uid_payload, dict) else {}
+    if not isinstance(profiles, dict):
+        profiles = {}
+
+    with _GATCHA_CACHE_LOCK:
+        cache_payload = _load_gatcha_cache()
+    cached_by_uid = cache_payload.get("uids") if isinstance(cache_payload, dict) else {}
+    if not isinstance(cached_by_uid, dict):
+        cached_by_uid = {}
+    cache_profiles = cache_payload.get("profiles") if isinstance(cache_payload, dict) else {}
+    if not isinstance(cache_profiles, dict):
+        cache_profiles = {}
+
+    owners: list[dict] = []
+    for raw_mid in configured_uids:
+        mid = str(raw_mid).strip()
+        if not mid:
+            continue
+        entries = _dedupe_gatcha_entries(cached_by_uid.get(mid, []))
+        profile = profiles.get(mid) if isinstance(profiles.get(mid), dict) else {}
+        if not profile or not str(profile.get("name") or "").strip():
+            profile = cache_profiles.get(mid) if isinstance(cache_profiles.get(mid), dict) else {}
+        if not profile or not str(profile.get("name") or "").strip():
+            profile = _profile_from_cached_entries(mid, entries)
+        owners.append(
+            {
+                "uid": mid,
+                "name": str(profile.get("name") or f"UID {mid}"),
+                "space_url": str(profile.get("space_url") or f"https://space.bilibili.com/{mid}"),
+                "count": len(entries),
+            }
+        )
+
+    selected_uid = str(uid or "").strip()
+    if selected_uid and selected_uid not in {owner["uid"] for owner in owners}:
+        selected_uid = ""
+
+    items: list[dict] = []
+    normalized_query = str(query or "").strip().lower()
+    if selected_uid:
+        entries = _dedupe_gatcha_entries(cached_by_uid.get(selected_uid, []))
+        for entry in entries:
+            title = str(entry.get("title") or "")
+            if normalized_query and normalized_query not in title.lower():
+                continue
+            items.append(_gatcha_entry_payload(entry))
+
+    return {
+        "owners": owners,
+        "selected_uid": selected_uid,
+        "query": str(query or "").strip(),
+        "items": items,
+        "updated_at": float(cache_payload.get("updated_at") or 0) if isinstance(cache_payload, dict) else 0,
+    }
 
 
 

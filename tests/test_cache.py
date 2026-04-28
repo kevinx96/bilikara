@@ -197,6 +197,13 @@ class CacheManagerPolicyTest(unittest.TestCase):
 
         rmtree_mock.assert_called_once_with(self.cache_dir / "song-a", ignore_errors=True)
 
+    def test_path_size_ignores_directory_removed_during_scan(self):
+        item_dir = self.cache_dir / "song-a"
+        item_dir.mkdir(parents=True, exist_ok=True)
+
+        with patch.object(Path, "rglob", side_effect=OSError(3, "missing path")):
+            self.assertEqual(CacheManager._path_size(item_dir), 0)
+
     def test_enrich_snapshot_includes_cache_activity_timestamp(self):
         with patch("bilikara.cache.CACHE_DIR", self.cache_dir):
             manager = CacheManager(self.store, max_cache_items=3)

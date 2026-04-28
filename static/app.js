@@ -100,6 +100,10 @@ const state = {
   retryActivityById: {},
   gatchaCandidate: null,
   searchCookieVisible: false,
+  followBrowseData: null,
+  followBrowseSelectedUid: "",
+  followBrowseLoading: false,
+  followBrowseRenderSignature: "",
   gatchaUidVisible: false,
   gatchaUidSaving: false,
   gatchaRefreshSaving: false,
@@ -230,10 +234,17 @@ const elements = {
   searchButton: document.getElementById("search-button"),
   searchMessage: document.getElementById("search-message"),
   searchResults: document.getElementById("search-results"),
-  cookieSessdata: document.getElementById("cookie-sessdata"),
-  cookieJct: document.getElementById("cookie-jct"),
-  saveCookieButton: document.getElementById("save-cookie-button"),
-  cookieMessage: document.getElementById("cookie-message"),
+  followUpListView: document.getElementById("follow-up-list-view"),
+  followUpGrid: document.getElementById("follow-up-grid"),
+  followUpItemsView: document.getElementById("follow-up-items-view"),
+  followBrowseBack: document.getElementById("follow-browse-back"),
+  followBrowseTitle: document.getElementById("follow-browse-title"),
+  followBrowseCount: document.getElementById("follow-browse-count"),
+  followSearchForm: document.getElementById("follow-search-form"),
+  followSearchQuery: document.getElementById("follow-search-query"),
+  followSearchButton: document.getElementById("follow-search-button"),
+  followSongResults: document.getElementById("follow-song-results"),
+  followBrowseMessage: document.getElementById("follow-browse-message"),
   gatchaUidForm: document.getElementById("gatcha-uid-form"),
   gatchaUidInput: document.getElementById("gatcha-uid-input"),
   addGatchaUidButton: document.getElementById("add-gatcha-uid-button"),
@@ -749,6 +760,28 @@ async function searchGatchaCache(query) {
   return Array.isArray(payload.data?.items) ? payload.data.items : [];
 }
 
+async function fetchGatchaBrowse(uid = "", query = "") {
+  const params = new URLSearchParams();
+  const normalizedUid = String(uid || "").trim();
+  const normalizedQuery = String(query || "").trim();
+  if (normalizedUid) {
+    params.set("uid", normalizedUid);
+  }
+  if (normalizedQuery) {
+    params.set("q", normalizedQuery);
+  }
+  const queryString = params.toString();
+  const response = await fetch(`/api/gatcha/browse${queryString ? `?${queryString}` : ""}`, {
+    cache: "no-store",
+    headers: clientHeaders(),
+  });
+  const payload = await response.json();
+  if (!response.ok || !payload.ok) {
+    throw new Error(payload.error || "Browse failed");
+  }
+  return payload.data || { owners: [], items: [] };
+}
+
 async function previewGatchaUid(uid) {
   return apiPost("/api/gatcha/uids/preview", { uid: String(uid || "").trim() });
 }
@@ -795,15 +828,18 @@ function hideSearchResults() {
   elements.searchResults.classList.add("hidden");
 }
 
-function renderSearchResults(items) {
-  elements.searchResults.innerHTML = "";
-  elements.searchResults.classList.remove("hidden");
+function renderSearchResultItems(container, items, emptyText = "No cached matches found.") {
+  if (!container) {
+    return;
+  }
+  container.innerHTML = "";
+  container.classList.remove("hidden");
 
   if (!items.length) {
     const empty = document.createElement("div");
     empty.className = "search-empty";
-    empty.textContent = "No cached matches found.";
-    elements.searchResults.appendChild(empty);
+    empty.textContent = emptyText;
+    container.appendChild(empty);
     return;
   }
 
@@ -830,8 +866,137 @@ function renderSearchResults(items) {
 
     meta.append(title, url);
     row.append(meta, button);
-    elements.searchResults.appendChild(row);
+    container.appendChild(row);
   });
+}
+
+function renderSearchResults(items) {
+  renderSearchResultItems(elements.searchResults, items);
+}
+
+function selectedFollowOwner() {
+  const owners = Array.isArray(state.followBrowseData?.owners) ? state.followBrowseData.owners : [];
+  return owners.find((owner) => String(owner.uid || "") === state.followBrowseSelectedUid) || null;
+}
+
+function ownerNameFromStateByUid(uid) {
+  const normalizedUid = String(uid || "").trim();
+  if (!normalizedUid || !state.data) {
+    return "";
+  }
+  const entries = [
+    state.data.current_item,
+    ...(Array.isArray(state.data.playlist) ? state.data.playlist : []),
+    ...(Array.isArray(state.data.history) ? state.data.history : []),
+  ];
+  for (const entry of entries) {
+    if (String(entry?.owner_mid || "").trim() !== normalizedUid) {
+      continue;
+    }
+    const ownerName = String(entry?.owner_name || "").trim();
+    if (ownerName) {
+      return ownerName;
+    }
+  }
+  return "";
+}
+
+function followOwnerDisplayName(owner) {
+  const uid = String(owner?.uid || "").trim();
+  const ownerName = String(owner?.name || "").trim();
+  const stateOwnerName = ownerNameFromStateByUid(uid);
+  if (ownerName && ownerName !== `UID ${uid}`) {
+    return ownerName;
+  }
+  return stateOwnerName || ownerName || `UID ${uid}`;
+}
+
+function renderFollowBrowse() {
+  if (!elements.followUpGrid || !elements.followSongResults) {
+    return;
+  }
+  const owners = Array.isArray(state.followBrowseData?.owners) ? state.followBrowseData.owners : [];
+  const items = Array.isArray(state.followBrowseData?.items) ? state.followBrowseData.items : [];
+  const signature = JSON.stringify({
+    loading: state.followBrowseLoading,
+    selected: state.followBrowseSelectedUid,
+    owners,
+    items,
+  });
+  if (signature === state.followBrowseRenderSignature) {
+    return;
+  }
+  state.followBrowseRenderSignature = signature;
+
+  const hasSelectedUid = Boolean(state.followBrowseSelectedUid);
+  elements.followUpListView?.classList.toggle("hidden", hasSelectedUid);
+  elements.followUpItemsView?.classList.toggle("hidden", !hasSelectedUid);
+
+  if (!hasSelectedUid) {
+    elements.followUpGrid.innerHTML = "";
+    if (!owners.length) {
+      const empty = document.createElement("div");
+      empty.className = "search-empty";
+      empty.textContent = state.followBrowseLoading ? "正在读取关注缓存..." : "还没有可浏览的关注 UID。";
+      elements.followUpGrid.appendChild(empty);
+    } else {
+      owners.forEach((owner) => {
+        const displayName = followOwnerDisplayName(owner);
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "follow-up-button";
+        button.dataset.uid = String(owner.uid || "");
+        button.title = displayName;
+
+        const name = document.createElement("span");
+        name.className = "follow-up-name";
+        name.textContent = displayName;
+
+        const count = document.createElement("span");
+        count.className = "follow-up-count";
+        count.textContent = `${Number(owner.count || 0)} 首`;
+
+        button.append(name, count);
+        elements.followUpGrid.appendChild(button);
+      });
+    }
+    setFollowBrowseMessage(state.followBrowseLoading ? "正在读取关注列表..." : "");
+    return;
+  }
+
+  const owner = selectedFollowOwner();
+  if (elements.followBrowseTitle) {
+    elements.followBrowseTitle.textContent = followOwnerDisplayName(owner) || `UID ${state.followBrowseSelectedUid}`;
+  }
+  if (elements.followBrowseCount) {
+    const totalCount = Number(owner?.count || items.length || 0);
+    elements.followBrowseCount.textContent = `${items.length}/${totalCount} 首`;
+  }
+  renderSearchResultItems(
+    elements.followSongResults,
+    items,
+    state.followBrowseLoading ? "正在读取稿件..." : "这个 UP 的缓存稿件里没有匹配结果。",
+  );
+  setFollowBrowseMessage(state.followBrowseLoading ? "正在读取稿件..." : "");
+}
+
+async function loadFollowBrowse({ uid = state.followBrowseSelectedUid, query = "", keepQuery = false } = {}) {
+  state.followBrowseLoading = true;
+  state.followBrowseSelectedUid = String(uid || "").trim();
+  renderFollowBrowse();
+  try {
+    const nextData = await fetchGatchaBrowse(state.followBrowseSelectedUid, query);
+    state.followBrowseData = nextData;
+    state.followBrowseSelectedUid = String(nextData.selected_uid || state.followBrowseSelectedUid || "");
+    if (!keepQuery && elements.followSearchQuery) {
+      elements.followSearchQuery.value = String(nextData.query || "");
+    }
+  } catch (error) {
+    setFollowBrowseMessage(error.message, true);
+  } finally {
+    state.followBrowseLoading = false;
+    renderFollowBrowse();
+  }
 }
 
 async function handleGatchaDraw() {
@@ -863,12 +1028,12 @@ function setGatchaMessage(message, isError = false) {
   elements.gatchaMessage.classList.toggle("is-error", Boolean(isError));
 }
 
-function setCookieMessage(message, isError = false) {
-  if (!elements.cookieMessage) {
+function setFollowBrowseMessage(message, isError = false) {
+  if (!elements.followBrowseMessage) {
     return;
   }
-  elements.cookieMessage.textContent = message || "";
-  elements.cookieMessage.classList.toggle("is-error", Boolean(isError));
+  elements.followBrowseMessage.textContent = message || "";
+  elements.followBrowseMessage.classList.toggle("is-error", Boolean(isError));
 }
 
 function setGatchaUidMessage(message, isError = false) {
@@ -881,7 +1046,11 @@ function setGatchaUidMessage(message, isError = false) {
 
 function renderSearchCookieFace() {
   const showCookie = Boolean(state.searchCookieVisible);
-  const signature = showCookie ? "cookie" : "search";
+  const signature = JSON.stringify({
+    face: showCookie ? "browse" : "search",
+    selected: state.followBrowseSelectedUid,
+    loading: state.followBrowseLoading,
+  });
   if (signature === state.searchCookieFaceRenderSignature) {
     return;
   }
@@ -889,11 +1058,14 @@ function renderSearchCookieFace() {
 
   setClassToggle(elements.searchPanel, "is-cookie-view", showCookie);
   setClassToggle(elements.searchStage, "is-cookie-view", showCookie);
-  setTextContent(elements.searchTag, showCookie ? "Cookie Config" : "Local Search");
-  setTextContent(elements.searchTitle, showCookie ? "Cookie" : "搜索");
-  setTextContent(elements.searchCookieToggle, showCookie ? "返回搜索" : "输入 Cookie");
+  setTextContent(elements.searchTag, showCookie ? "Follow Browse" : "Local Search");
+  setTextContent(elements.searchTitle, showCookie ? "关注列表" : "搜索");
+  setTextContent(elements.searchCookieToggle, showCookie ? "返回搜索" : "关注浏览");
   if (elements.searchCookieToggle?.getAttribute("aria-pressed") !== String(showCookie)) {
     elements.searchCookieToggle.setAttribute("aria-pressed", String(showCookie));
+  }
+  if (showCookie) {
+    renderFollowBrowse();
   }
 }
 
@@ -2681,9 +2853,11 @@ function renderPlayer(currentItem, playbackMode) {
   state.localPlayerSyncTimer = window.setInterval(() => {
     if (isSplitPlayerSeekSettling(video, audio)) {
       settleSplitPlayerSeek(video, audio);
+      reportCurrentVideoStatus();
       return;
     }
     syncSplitPlayer(video, audio, currentAvOffsetSeconds(), false);
+    reportCurrentVideoStatus();
   }, localPlayerSyncIntervalMs);
 
   window.setTimeout(() => {
@@ -2732,12 +2906,18 @@ function applyRemotePlayerControl(command, currentItem, playbackMode) {
           state.localShouldBePlaying = false;
           video.pause();
         }
-      } else if (action === "seek-relative") {
+      } else if (action === "seek-relative" || action === "seek-absolute") {
         const deltaSeconds = Number(command?.delta_seconds || 0);
-        if (Number.isFinite(deltaSeconds) && deltaSeconds !== 0) {
+        const targetSeconds = Number(command?.target_seconds ?? 0);
+        if (
+          (action === "seek-relative" && Number.isFinite(deltaSeconds) && deltaSeconds !== 0)
+          || (action === "seek-absolute" && Number.isFinite(targetSeconds))
+        ) {
           const resumeAfterSeek = !video.paused || state.localShouldBePlaying;
           const duration = Number.isFinite(video.duration) ? video.duration : Number.POSITIVE_INFINITY;
-          const nextTime = Math.max(0, Number(video.currentTime || 0) + deltaSeconds);
+          const nextTime = action === "seek-absolute"
+            ? Math.max(0, targetSeconds)
+            : Math.max(0, Number(video.currentTime || 0) + deltaSeconds);
           const clampedNextTime = Number.isFinite(duration)
             ? Math.min(nextTime, duration)
             : nextTime;
@@ -2782,10 +2962,12 @@ function reportPlayerStatus(itemId, video) {
   }
 
   const currentTime = Number(video.currentTime || 0);
+  const duration = Number.isFinite(video.duration) ? Number(video.duration) : 0;
   const signature = [
     normalizedItemId,
     video.paused ? "paused" : "playing",
     Math.round(currentTime),
+    Math.round(duration),
   ].join("|");
   if (signature === state.lastReportedPlayerStatusSignature) {
     return;
@@ -2796,6 +2978,7 @@ function reportPlayerStatus(itemId, video) {
     item_id: normalizedItemId,
     is_paused: video.paused,
     current_time: currentTime,
+    duration,
   }).catch(() => {});
 }
 
@@ -4739,6 +4922,67 @@ elements.gatchaRetryButton.addEventListener("click", handleGatchaDraw);
 elements.searchCookieToggle?.addEventListener("click", () => {
   state.searchCookieVisible = !state.searchCookieVisible;
   renderSearchCookieFace();
+  if (state.searchCookieVisible && !state.followBrowseLoading) {
+    state.followBrowseSelectedUid = "";
+    if (elements.followSearchQuery) {
+      elements.followSearchQuery.value = "";
+    }
+    loadFollowBrowse({ uid: "", query: "" });
+  }
+});
+
+elements.followUpGrid?.addEventListener("click", async (event) => {
+  const button = event.target.closest("button[data-uid]");
+  if (!button) {
+    return;
+  }
+  const uid = String(button.dataset.uid || "").trim();
+  if (!uid) {
+    return;
+  }
+  state.followBrowseSelectedUid = uid;
+  if (elements.followSearchQuery) {
+    elements.followSearchQuery.value = "";
+  }
+  await loadFollowBrowse({ uid, query: "" });
+});
+
+elements.followBrowseBack?.addEventListener("click", () => {
+  state.followBrowseSelectedUid = "";
+  if (elements.followSearchQuery) {
+    elements.followSearchQuery.value = "";
+  }
+  renderFollowBrowse();
+  renderSearchCookieFace();
+});
+
+elements.followSearchForm?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const query = String(elements.followSearchQuery?.value || "").trim();
+  await loadFollowBrowse({
+    uid: state.followBrowseSelectedUid,
+    query,
+    keepQuery: true,
+  });
+});
+
+elements.followSongResults?.addEventListener("click", async (event) => {
+  const button = event.target.closest("button[data-url]");
+  if (!button) {
+    return;
+  }
+
+  const url = String(button.dataset.url || "").trim();
+  if (!url) {
+    return;
+  }
+
+  button.disabled = true;
+  try {
+    await handleAddByUrl(url, "tail", anchorPointForEvent(event, button));
+  } finally {
+    button.disabled = false;
+  }
 });
 
 elements.gatchaUidToggle?.addEventListener("click", () => {
@@ -4846,23 +5090,6 @@ elements.refreshGatchaCacheButton?.addEventListener("click", async () => {
   }
 });
 
-elements.saveCookieButton.addEventListener("click", async () => {
-  const sessdata = elements.cookieSessdata.value.trim();
-  const jct = elements.cookieJct.value.trim();
-
-  setCookieMessage("正在更新 Cookie 配置...");
-  try {
-    await apiPost("/api/config/cookie", {
-      sessdata: sessdata,
-      bili_jct: jct
-    });
-    setCookieMessage("Cookie 已更新，正在拉取稿件信息（第一次拉取稿件数量会影响拉取时间）");
-    elements.cookieSessdata.value = "";
-    elements.cookieJct.value = "";
-  } catch (error) {
-    setCookieMessage(error.message, true);
-  }
-});
 
 async function startPolling() {
   hydrateLocalPreferences();

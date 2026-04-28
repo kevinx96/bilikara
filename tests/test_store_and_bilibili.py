@@ -853,18 +853,31 @@ class BilibiliParserTest(unittest.TestCase):
                     on_progress(entries[:1])
                 return entries
 
+            def fake_profile(mid):
+                return {
+                    "uid": mid,
+                    "name": f"up-{mid}",
+                    "space_url": f"https://space.bilibili.com/{mid}",
+                }
+
             with (
                 patch.object(bilibili_module.cfg, "DATA_DIR", data_dir),
                 patch.object(bilibili_module, "_GATCHA_UIDS_FILE", uid_file),
                 patch.object(bilibili_module, "_GATCHA_CACHE_FILE", cache_file),
                 patch.object(bilibili_module, "_GATCHA_REFRESH_LOCK", threading.Lock()),
                 patch.object(bilibili_module, "effective_bilibili_cookie", return_value="cookie"),
+                patch.object(bilibili_module, "_request_gatcha_uid_profile", side_effect=fake_profile),
                 patch.object(bilibili_module, "_fetch_gatcha_videos_for_uid", side_effect=fake_fetch),
             ):
                 bilibili_module.refresh_gatcha_cache()
 
             self.assertEqual(calls, [("1", 1, False), ("2", None, True)])
+            uid_payload = json.loads(uid_file.read_text(encoding="utf-8"))
+            self.assertEqual(uid_payload["profiles"]["1"]["name"], "up-1")
+            self.assertEqual(uid_payload["profiles"]["2"]["name"], "up-2")
             cache_payload = json.loads(cache_file.read_text(encoding="utf-8"))
+            self.assertEqual(cache_payload["profiles"]["1"]["name"], "up-1")
+            self.assertEqual(cache_payload["profiles"]["2"]["name"], "up-2")
             self.assertEqual([entry["bvid"] for entry in cache_payload["uids"]["1"]], ["BVNEW", "BVOLD"])
             self.assertEqual([entry["bvid"] for entry in cache_payload["uids"]["2"]], ["BV2A", "BV2B"])
 

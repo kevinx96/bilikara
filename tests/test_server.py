@@ -66,6 +66,37 @@ class AppContextStateRevisionTest(unittest.TestCase):
         self.assertEqual(results, [True])
 
 
+class AppContextPlayerStatusTest(unittest.TestCase):
+    def make_context(self) -> AppContext:
+        context = AppContext.__new__(AppContext)
+        context._player_status_lock = threading.RLock()
+        context._player_status = None
+        context._state_change_condition = threading.Condition()
+        context._state_revision = 0
+        context.store = SimpleNamespace(mark_item_playback_started=lambda item_id: None)
+        return context
+
+    def test_player_status_preserves_reported_duration(self):
+        context = self.make_context()
+
+        context.update_player_status(
+            item_id="song-1",
+            is_paused=False,
+            current_time=12.0,
+            duration=123.4,
+        )
+        context.update_player_status(
+            item_id="song-1",
+            is_paused=True,
+            current_time=13.0,
+        )
+
+        snapshot = context.player_status_snapshot({"id": "song-1"})
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(snapshot["duration"], 123.4)
+        self.assertEqual(snapshot["current_time"], 13.0)
+
+
 class AppContextClientTrackingTest(unittest.TestCase):
     def make_context(self) -> AppContext:
         context = AppContext.__new__(AppContext)
@@ -164,6 +195,35 @@ class PlayerResetRouteTest(unittest.TestCase):
 
         self.assertEqual(writes[0], {"reset_player": True})
         self.assertEqual(writes[1], {"ok": True, "data": {"playback_mode": "local"}})
+
+
+class PlayerControlRouteTest(unittest.TestCase):
+    def test_absolute_seek_route_forwards_target_seconds(self):
+        handler = BilikaraHandler.__new__(BilikaraHandler)
+        writes: list[dict] = []
+        issued: list[dict] = []
+        context = SimpleNamespace(
+            touch_client=lambda client_id, is_host=True: None,
+            issue_player_control=lambda **kwargs: issued.append(kwargs),
+            snapshot=lambda: {"player_control_command": issued[-1]},
+        )
+
+        handler.path = "/api/player/control"
+        handler.headers = {}
+        handler._read_json_body = lambda: {
+            "action": "seek-absolute",
+            "item_id": "song-1",
+            "target_seconds": 262.5,
+        }
+        handler._write_json = lambda payload, status=None: writes.append(payload)
+
+        with patch("bilikara.server.CONTEXT", context):
+            handler.do_POST()
+
+        self.assertEqual(issued[0]["action"], "seek-absolute")
+        self.assertEqual(issued[0]["item_id"], "song-1")
+        self.assertEqual(issued[0]["target_seconds"], 262.5)
+        self.assertEqual(writes[0]["data"]["player_control_command"]["target_seconds"], 262.5)
 
 
 class PlaylistResortRouteTest(unittest.TestCase):
