@@ -40,6 +40,11 @@ const state = {
   gatchaCandidate: null,
   gatchaUidVisible: false,
   gatchaUidSaving: false,
+  followBrowseVisible: false,
+  followBrowseData: null,
+  followBrowseSelectedUid: "",
+  followBrowseLoading: false,
+  followBrowseRenderSignature: "",
   layoutMode: "full",
   remoteAccessRenderSignature: "",
   remoteQrPopoverOpen: false,
@@ -92,6 +97,19 @@ const elements = {
   searchQuery: document.getElementById("search-query"),
   searchButton: document.getElementById("search-button"),
   searchResults: document.getElementById("search-results"),
+  followBrowseToggle: document.getElementById("follow-browse-toggle"),
+  followBrowseView: document.getElementById("follow-browse-view"),
+  followUpListView: document.getElementById("follow-up-list-view"),
+  followUpGrid: document.getElementById("follow-up-grid"),
+  followUpItemsView: document.getElementById("follow-up-items-view"),
+  followBrowseBack: document.getElementById("follow-browse-back"),
+  followBrowseTitle: document.getElementById("follow-browse-title"),
+  followBrowseCount: document.getElementById("follow-browse-count"),
+  followSearchForm: document.getElementById("follow-search-form"),
+  followSearchQuery: document.getElementById("follow-search-query"),
+  followSearchButton: document.getElementById("follow-search-button"),
+  followSongResults: document.getElementById("follow-song-results"),
+  followBrowseMessage: document.getElementById("follow-browse-message"),
   addNextButton: document.getElementById("add-next-button"),
   resortPlaylistButton: document.getElementById("resort-playlist-button"),
   refreshButton: document.getElementById("refresh-button"),
@@ -526,6 +544,28 @@ async function searchGatchaCache(query) {
   return Array.isArray(payload.data?.items) ? payload.data.items : [];
 }
 
+async function fetchGatchaBrowse(uid = "", query = "") {
+  const params = new URLSearchParams();
+  const normalizedUid = String(uid || "").trim();
+  const normalizedQuery = String(query || "").trim();
+  if (normalizedUid) {
+    params.set("uid", normalizedUid);
+  }
+  if (normalizedQuery) {
+    params.set("q", normalizedQuery);
+  }
+  const queryString = params.toString();
+  const response = await fetch(`/api/gatcha/browse${queryString ? `?${queryString}` : ""}`, {
+    cache: "no-store",
+    headers: clientHeaders(),
+  });
+  const payload = await response.json();
+  if (!response.ok || !payload.ok) {
+    throw new Error(payload.error || "关注浏览失败");
+  }
+  return payload.data || { owners: [], items: [] };
+}
+
 async function previewGatchaUid(uid) {
   return apiPost("/api/gatcha/uids/preview", { uid: String(uid || "").trim() });
 }
@@ -585,6 +625,190 @@ function renderSearchResults(items) {
     row.append(meta, button);
     elements.searchResults.appendChild(row);
   });
+}
+
+function setFollowBrowseMessage(message, isError = false) {
+  if (!elements.followBrowseMessage) {
+    return;
+  }
+  elements.followBrowseMessage.textContent = message || "";
+  elements.followBrowseMessage.classList.toggle("is-error", Boolean(isError));
+}
+
+function selectedFollowOwner() {
+  const owners = Array.isArray(state.followBrowseData?.owners) ? state.followBrowseData.owners : [];
+  return owners.find((owner) => String(owner.uid || "") === state.followBrowseSelectedUid) || null;
+}
+
+function ownerNameFromStateByUid(uid) {
+  const normalizedUid = String(uid || "").trim();
+  if (!normalizedUid || !state.data) {
+    return "";
+  }
+  const entries = [
+    state.data.current_item,
+    ...(Array.isArray(state.data.playlist) ? state.data.playlist : []),
+    ...(Array.isArray(state.data.history) ? state.data.history : []),
+  ];
+  for (const entry of entries) {
+    if (String(entry?.owner_mid || "").trim() !== normalizedUid) {
+      continue;
+    }
+    const ownerName = String(entry?.owner_name || "").trim();
+    if (ownerName) {
+      return ownerName;
+    }
+  }
+  return "";
+}
+
+function followOwnerDisplayName(owner) {
+  const uid = String(owner?.uid || "").trim();
+  const ownerName = String(owner?.name || "").trim();
+  const stateOwnerName = ownerNameFromStateByUid(uid);
+  if (ownerName && ownerName !== `UID ${uid}`) {
+    return ownerName;
+  }
+  return stateOwnerName || ownerName || `UID ${uid}`;
+}
+
+function renderFollowSongResults(items, emptyText) {
+  if (!elements.followSongResults) {
+    return;
+  }
+  elements.followSongResults.innerHTML = "";
+  elements.followSongResults.classList.remove("hidden");
+
+  if (!items.length) {
+    const empty = document.createElement("div");
+    empty.className = "search-empty";
+    empty.textContent = emptyText;
+    elements.followSongResults.appendChild(empty);
+    return;
+  }
+
+  items.forEach((item) => {
+    const row = document.createElement("div");
+    row.className = "search-result-item";
+
+    const meta = document.createElement("div");
+    const title = document.createElement("div");
+    title.className = "search-result-title";
+    title.textContent = String(item.title || "");
+
+    const url = document.createElement("div");
+    url.className = "search-result-url";
+    url.textContent = String(item.bvid || "");
+
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "primary-button";
+    button.dataset.url = String(item.url || "");
+    button.textContent = "点歌";
+
+    meta.append(title, url);
+    row.append(meta, button);
+    elements.followSongResults.appendChild(row);
+  });
+}
+
+function renderFollowBrowse() {
+  if (!elements.followBrowseView || !elements.followUpGrid || !elements.followSongResults) {
+    return;
+  }
+
+  elements.searchForm?.classList.toggle("hidden", state.followBrowseVisible);
+  elements.searchResults?.classList.toggle("hidden", state.followBrowseVisible || !elements.searchResults.children.length);
+  elements.followBrowseView.classList.toggle("hidden", !state.followBrowseVisible);
+  if (elements.followBrowseToggle) {
+    elements.followBrowseToggle.textContent = state.followBrowseVisible ? "返回搜索" : "关注浏览";
+    elements.followBrowseToggle.setAttribute("aria-pressed", String(state.followBrowseVisible));
+  }
+  if (!state.followBrowseVisible) {
+    return;
+  }
+
+  const owners = Array.isArray(state.followBrowseData?.owners) ? state.followBrowseData.owners : [];
+  const items = Array.isArray(state.followBrowseData?.items) ? state.followBrowseData.items : [];
+  const signature = JSON.stringify({
+    loading: state.followBrowseLoading,
+    selected: state.followBrowseSelectedUid,
+    owners,
+    items,
+  });
+  if (signature === state.followBrowseRenderSignature) {
+    return;
+  }
+  state.followBrowseRenderSignature = signature;
+
+  const hasSelectedUid = Boolean(state.followBrowseSelectedUid);
+  elements.followUpListView?.classList.toggle("hidden", hasSelectedUid);
+  elements.followUpItemsView?.classList.toggle("hidden", !hasSelectedUid);
+
+  if (!hasSelectedUid) {
+    elements.followUpGrid.innerHTML = "";
+    if (!owners.length) {
+      const empty = document.createElement("div");
+      empty.className = "search-empty";
+      empty.textContent = state.followBrowseLoading ? "正在读取关注列表..." : "还没有可浏览的关注 UID。";
+      elements.followUpGrid.appendChild(empty);
+    } else {
+      owners.forEach((owner) => {
+        const displayName = followOwnerDisplayName(owner);
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "follow-up-button";
+        button.dataset.uid = String(owner.uid || "");
+        button.title = displayName;
+
+        const name = document.createElement("span");
+        name.className = "follow-up-name";
+        name.textContent = displayName;
+
+        const count = document.createElement("span");
+        count.className = "follow-up-count";
+        count.textContent = `${Number(owner.count || 0)} 首`;
+
+        button.append(name, count);
+        elements.followUpGrid.appendChild(button);
+      });
+    }
+    setFollowBrowseMessage(state.followBrowseLoading ? "正在读取关注列表..." : "");
+    return;
+  }
+
+  const owner = selectedFollowOwner();
+  if (elements.followBrowseTitle) {
+    elements.followBrowseTitle.textContent = followOwnerDisplayName(owner) || `UID ${state.followBrowseSelectedUid}`;
+  }
+  if (elements.followBrowseCount) {
+    const totalCount = Number(owner?.count || items.length || 0);
+    elements.followBrowseCount.textContent = `${items.length}/${totalCount} 首`;
+  }
+  renderFollowSongResults(
+    items,
+    state.followBrowseLoading ? "正在读取稿件..." : "这个 UP 的缓存稿件里没有匹配结果。",
+  );
+  setFollowBrowseMessage(state.followBrowseLoading ? "正在读取稿件..." : "");
+}
+
+async function loadFollowBrowse({ uid = state.followBrowseSelectedUid, query = "", keepQuery = false } = {}) {
+  state.followBrowseLoading = true;
+  state.followBrowseSelectedUid = String(uid || "").trim();
+  renderFollowBrowse();
+  try {
+    const nextData = await fetchGatchaBrowse(state.followBrowseSelectedUid, query);
+    state.followBrowseData = nextData;
+    state.followBrowseSelectedUid = String(nextData.selected_uid || state.followBrowseSelectedUid || "");
+    if (!keepQuery && elements.followSearchQuery) {
+      elements.followSearchQuery.value = String(nextData.query || "");
+    }
+  } catch (error) {
+    setFollowBrowseMessage(error.message, true);
+  } finally {
+    state.followBrowseLoading = false;
+    renderFollowBrowse();
+  }
 }
 
 async function handleGatchaDraw() {
@@ -707,6 +931,7 @@ function render() {
   renderRemoteAvSyncControls(data.playback_mode, data.player_settings);
   renderRemoteVolumeControls(data.playback_mode, data.player_settings);
   renderRemoteAccess(data.remote_access);
+  renderFollowBrowse();
   renderListHeader(data.playlist || [], data.history || []);
   renderQueue(Array.isArray(data.playlist) ? data.playlist : []);
   renderHistory(Array.isArray(data.history) ? data.history : []);
@@ -1727,6 +1952,69 @@ elements.searchResults.addEventListener("click", async (event) => {
     return;
   }
   await addByUrl(String(button.dataset.url || ""), "tail");
+});
+
+elements.followBrowseToggle?.addEventListener("click", () => {
+  state.followBrowseVisible = !state.followBrowseVisible;
+  renderFollowBrowse();
+  if (state.followBrowseVisible && !state.followBrowseLoading) {
+    state.followBrowseSelectedUid = "";
+    if (elements.followSearchQuery) {
+      elements.followSearchQuery.value = "";
+    }
+    loadFollowBrowse({ uid: "", query: "" });
+  }
+});
+
+elements.followUpGrid?.addEventListener("click", async (event) => {
+  const button = event.target.closest("button[data-uid]");
+  if (!button) {
+    return;
+  }
+  const uid = String(button.dataset.uid || "").trim();
+  if (!uid) {
+    return;
+  }
+  state.followBrowseSelectedUid = uid;
+  if (elements.followSearchQuery) {
+    elements.followSearchQuery.value = "";
+  }
+  await loadFollowBrowse({ uid, query: "" });
+});
+
+elements.followBrowseBack?.addEventListener("click", () => {
+  state.followBrowseSelectedUid = "";
+  if (elements.followSearchQuery) {
+    elements.followSearchQuery.value = "";
+  }
+  renderFollowBrowse();
+});
+
+elements.followSearchForm?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const query = String(elements.followSearchQuery?.value || "").trim();
+  await loadFollowBrowse({
+    uid: state.followBrowseSelectedUid,
+    query,
+    keepQuery: true,
+  });
+});
+
+elements.followSongResults?.addEventListener("click", async (event) => {
+  const button = event.target.closest("button[data-url]");
+  if (!button) {
+    return;
+  }
+  const url = String(button.dataset.url || "").trim();
+  if (!url) {
+    return;
+  }
+  button.disabled = true;
+  try {
+    await addByUrl(url, "tail");
+  } finally {
+    button.disabled = false;
+  }
 });
 
 elements.addNextButton.addEventListener("click", async () => {

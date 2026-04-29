@@ -1988,7 +1988,7 @@ class CacheManager:
                 if child.is_dir():
                     self._safe_rmtree(child)
                 else:
-                    child.unlink(missing_ok=True)
+                    self._safe_unlink(child)
                 self._remove_item_log(child.name)
 
     def _clear_cache_root(self) -> None:
@@ -1996,10 +1996,11 @@ class CacheManager:
             if child.is_dir():
                 self._safe_rmtree(child)
             else:
-                child.unlink(missing_ok=True)
+                self._safe_unlink(child)
         self._clear_log_root()
 
-    def _path_size(self, path: Path) -> int:
+    @staticmethod
+    def _path_size(path: Path) -> int:
         if not path.exists():
             return 0
         if path.is_file():
@@ -2009,13 +2010,16 @@ class CacheManager:
                 return 0
 
         total = 0
-        for child in path.rglob("*"):
-            if not child.is_file():
-                continue
-            try:
-                total += child.stat().st_size
-            except OSError:
-                continue
+        try:
+            for child in path.rglob("*"):
+                if not child.is_file():
+                    continue
+                try:
+                    total += child.stat().st_size
+                except OSError:
+                    continue
+        except OSError:
+            return total
         return total
 
     def _ensure_item_cached(self, item) -> None:
@@ -2076,7 +2080,7 @@ class CacheManager:
         self._remove_item_log(item_id)
 
     def _remove_item_log(self, item_id: str) -> None:
-        self._item_log_path(item_id).unlink(missing_ok=True)
+        self._safe_unlink(self._item_log_path(item_id))
 
     def _clear_log_root(self) -> None:
         if not self.log_dir.exists():
@@ -2085,12 +2089,19 @@ class CacheManager:
             if child.is_dir():
                 self._safe_rmtree(child)
             else:
-                child.unlink(missing_ok=True)
+                self._safe_unlink(child)
 
     @staticmethod
     def _safe_rmtree(path: Path) -> None:
         try:
             shutil.rmtree(path, ignore_errors=True)
+        except OSError:
+            return
+
+    @staticmethod
+    def _safe_unlink(path: Path) -> None:
+        try:
+            path.unlink(missing_ok=True)
         except OSError:
             return
 

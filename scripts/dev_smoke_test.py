@@ -5,7 +5,6 @@ import argparse
 import base64
 from dataclasses import dataclass
 import json
-import math
 import os
 from pathlib import Path
 import queue
@@ -36,6 +35,9 @@ DEFAULT_CACHE_TIMEOUT_SECONDS = 420
 DEFAULT_VISUAL_PAUSE_SECONDS = 5
 DEFAULT_TRANSITION_VISUAL_SECONDS = 18
 DEFAULT_TRANSITION_TAIL_SECONDS = 3.0
+DEFAULT_TRANSITION_SEEK_TOLERANCE_SECONDS = 1.25
+DEFAULT_TRANSITION_END_GUARD_SECONDS = 0.75
+DEFAULT_SMOKE_VIDEO_QUALITY_PREFIX = "480P"
 
 
 class ApiError(RuntimeError):
@@ -65,6 +67,12 @@ class ServerHandle:
         if self.context is not None:
             self.context.shutdown()
         self.server.server_close()
+
+
+@dataclass
+class PlayerTimeWindowResult:
+    status: str
+    current_time: float | None = None
 
 
 class SmokeRunner:
@@ -153,9 +161,59 @@ class SmokeRunner:
 
     def check_static_pages(self) -> None:
         print_header("Static pages and assets")
-        for path in ["/", "/remote", "/app.js", "/styles.css", "/remote.js", "/remote-queue.js"]:
+        static_bodies: dict[str, bytes] = {}
+        for path in ["/", "/remote", "/app.js", "/styles.css", "/remote.js", "/remote.css", "/remote-queue.js"]:
             body = self.http_get(path, expect_json=False)
+            static_bodies[path] = body
             print_ok(f"GET {path} ({len(body)} bytes)")
+        self.check_recent_feature_static_surface(static_bodies)
+
+    def check_recent_feature_static_surface(self, static_bodies: dict[str, bytes]) -> None:
+        print_header("Recent UI surface checks")
+        expected_tokens = {
+            "/": [
+                "search-cookie-toggle",
+                "follow-up-grid",
+                "follow-song-results",
+                "binding-modal-confirm",
+            ],
+            "/remote": [
+                "follow-browse-toggle",
+                "follow-up-grid",
+                "follow-song-results",
+                "binding-sheet-actions",
+            ],
+            "/app.js": [
+                "fetchGatchaBrowse",
+                "followSongResults",
+                "handleAddByUrl",
+            ],
+            "/remote.js": [
+                "fetchGatchaBrowse",
+                "followSongResults",
+                "addByUrl",
+            ],
+            "/styles.css": [
+                "grid-template-rows: auto auto minmax(0, 1fr) auto",
+                ".selection-modal-actions",
+                ".follow-up-grid",
+            ],
+            "/remote.css": [
+                "flex-direction: column",
+                ".binding-sheet-actions",
+                ".follow-up-grid",
+            ],
+        }
+        for path, tokens in expected_tokens.items():
+            body = static_bodies.get(path)
+            if body is None:
+                continue
+            text = body.decode("utf-8", errors="replace")
+            missing = [token for token in tokens if token not in text]
+            if missing:
+                raise RuntimeError(f"{path} missing recent UI token(s): {missing}")
+            elif tokens:
+                print_ok(f"{path} includes recent follow/binding UI hooks")
 
     def check_remote_surface(self) -> None:
         print_header("Remote page surface")
@@ -164,6 +222,7 @@ class SmokeRunner:
         result = self.http_get(f"/api/gatcha/search?q={urllib.parse.quote(GATCHA_MULTI_PAGE_QUERY)}", remote=True)
         items = ((result.get("data") or {}).get("items") or []) if isinstance(result, dict) else []
         print_ok(f"Remote gatcha search API works for multi-page keyword: {len(items)} results")
+        self.check_follow_browse_api("Remote follow browse", remote=True)
         self.visual_checkpoint("Remote page should be open in another browser tab. Check queue, search, and control layout there.")
 
     def check_bbdown_login(self) -> None:
@@ -316,6 +375,44 @@ class SmokeRunner:
         print_ok("Player settings restored to the pre-test values")
         self.visual_checkpoint("Service Settings should keep its layout; values may have changed briefly and then restored.")
 
+    def smoke_download_quality(self, cache_policy: dict[str, Any]) -> str:
+        choices = cache_policy.get("video_quality_choices") or []
+        for choice in choices:
+            value = str((choice or {}).get("value") or "").strip()
+            if value.startswith(DEFAULT_SMOKE_VIDEO_QUALITY_PREFIX):
+                return value
+        return ""
+
+    def set_smoke_download_quality(self) -> dict[str, Any]:
+        state = self.get_state()
+        original_policy = dict(state.get("cache_policy") or {})
+        target_quality = self.smoke_download_quality(original_policy)
+        if not target_quality:
+            print_skip("Smoke download quality", "No 480P video quality choice was available")
+            return {}
+
+        policy_payload: dict[str, Any] = {"video_quality": target_quality}
+        state = self.api_post("/api/cache-policy", policy_payload)
+        policy = state.get("cache_policy") or {}
+        print_ok(f"Smoke download video quality set to {policy.get('video_quality')} before song downloads")
+
+        restore_payload: dict[str, Any] = {}
+        if "video_quality" in original_policy:
+            restore_payload["video_quality"] = original_policy["video_quality"]
+        if "audio_hires" in original_policy:
+            restore_payload["audio_hires"] = bool(original_policy.get("audio_hires"))
+        return restore_payload
+
+    def restore_smoke_download_quality(self, policy_payload: dict[str, Any]) -> None:
+        if not policy_payload:
+            return
+        state = self.api_post("/api/cache-policy", policy_payload)
+        policy = state.get("cache_policy") or {}
+        print_ok(
+            "Restored download quality policy: "
+            f"quality={policy.get('video_quality')} hires={policy.get('audio_hires')}"
+        )
+
     def check_users(self) -> None:
         print_header("Local user management")
         suffix = str(int(time.time()))[-6:]
@@ -364,6 +461,13 @@ class SmokeRunner:
                 self.add_user(requester)
                 self.created_user_names.append(requester)
 
+        restore_smoke_policy = self.set_smoke_download_quality()
+        try:
+            self.check_song_download_flow(song_urls, requester)
+        finally:
+            self.restore_smoke_download_quality(restore_smoke_policy)
+
+    def check_song_download_flow(self, song_urls: list[str], requester: str) -> None:
         added_items: list[dict[str, Any]] = []
         multi_item = self.check_search_multi_page_binding(requester)
         if multi_item:
@@ -904,14 +1008,31 @@ class SmokeRunner:
         if not item:
             print_skip("Transition seek", f"Current item was not found: {item_id}")
             return False
-        duration_seconds = self.item_duration_seconds(item)
+        metadata_duration_seconds = self.item_duration_seconds(item)
+        observed_duration_seconds = self.wait_for_player_duration_seconds(item_id, timeout=6.0)
+        duration_seconds = observed_duration_seconds or metadata_duration_seconds
         if duration_seconds <= 0:
             print_skip("Transition seek", f"Current item duration is unavailable: {item_id}")
             return False
-        current_time = self.player_current_time_seconds(state, item_id)
+        duration_source = "player media" if observed_duration_seconds else "item metadata"
+        current_time = self.player_current_time_seconds(self.get_state(), item_id)
+        tolerance_seconds = DEFAULT_TRANSITION_SEEK_TOLERANCE_SECONDS
+        end_guard_seconds = DEFAULT_TRANSITION_END_GUARD_SECONDS
         target_time = max(0.0, duration_seconds - max(0.5, tail_seconds))
         remaining = target_time - current_time
         if remaining <= 0.5:
+            if current_time >= max(0.0, duration_seconds - end_guard_seconds):
+                print_warn(
+                    f"Playback is already at the media end: "
+                    f"current={current_time:.1f}s duration={duration_seconds:.1f}s"
+                )
+                return False
+            if current_time > target_time + tolerance_seconds:
+                print_warn(
+                    f"Playback is already past the transition target: "
+                    f"current={current_time:.1f}s target={target_time:.1f}s duration={duration_seconds:.1f}s"
+                )
+                return False
             print_ok(
                 f"Playback is already near the transition target: "
                 f"current={current_time:.1f}s target={target_time:.1f}s duration={duration_seconds:.1f}s"
@@ -919,46 +1040,60 @@ class SmokeRunner:
             return True
         print_info(
             f"Seeking to {tail_seconds:.1f}s before the end for transition test: current={current_time:.1f}s "
-            f"target={target_time:.1f}s duration={duration_seconds:.1f}s"
+            f"target={target_time:.1f}s duration={duration_seconds:.1f}s source={duration_source}"
         )
 
-        estimated_time = current_time
-        while target_time - estimated_time > 1.0:
-            remaining = target_time - estimated_time
-            delta_seconds = int(min(300, max(1, math.floor(remaining))))
-            seek_state = self.api_post(
-                "/api/player/control",
-                {"action": "seek-relative", "item_id": item_id, "delta_seconds": delta_seconds},
-                remote=True,
-            )
-            command = seek_state.get("player_control_command") or {}
-            seq = int(command.get("seq") or 0)
-            if seq and not self.wait_for_player_control_ack(seq):
-                print_warn(f"Timed out waiting for seek command ack: seq={seq} delta={delta_seconds}")
-                return False
-            time.sleep(0.4)
-            estimated_time += delta_seconds
-            observed_state = self.get_state()
-            observed_status_time = self.player_current_time_seconds(observed_state, item_id)
-            if observed_status_time > 0:
-                estimated_time = max(estimated_time, observed_status_time)
+        seek_state = self.api_post(
+            "/api/player/control",
+            {"action": "seek-absolute", "item_id": item_id, "target_seconds": target_time},
+            remote=True,
+        )
+        command = seek_state.get("player_control_command") or {}
+        seq = int(command.get("seq") or 0)
+        if seq and not self.wait_for_player_control_ack(seq):
+            print_warn(f"Timed out waiting for absolute seek command ack: seq={seq} target={target_time:.1f}s")
+            return False
 
-        observed_time = self.wait_for_player_time_at_least(
+        window_result = self.wait_for_player_time_in_transition_window(
             item_id,
-            min_seconds=max(0.0, target_time - 1.0),
+            target_seconds=target_time,
+            duration_seconds=duration_seconds,
+            tolerance_seconds=tolerance_seconds,
+            end_guard_seconds=end_guard_seconds,
             timeout=8.0,
         )
-        if observed_time is not None:
+        if window_result.status == "ok" and window_result.current_time is not None:
             print_ok(
                 f"Player reported near-end playback: "
-                f"current={observed_time:.1f}s target={target_time:.1f}s duration={duration_seconds:.1f}s"
+                f"current={window_result.current_time:.1f}s target={target_time:.1f}s duration={duration_seconds:.1f}s"
             )
-        else:
-            print_info(
-                f"Seek commands were acknowledged; last estimated playback was about "
-                f"{min(estimated_time, duration_seconds):.1f}s / {duration_seconds:.1f}s"
-            )
-        return True
+            return True
+
+        observed_text = (
+            f"{window_result.current_time:.1f}s"
+            if window_result.current_time is not None
+            else "unavailable"
+        )
+        print_warn(
+            f"Player did not land in the transition window after seek: "
+            f"status={window_result.status} current={observed_text} "
+            f"target={target_time:.1f}s duration={duration_seconds:.1f}s"
+        )
+        return False
+
+    def wait_for_player_duration_seconds(self, item_id: str, *, timeout: float) -> float | None:
+        deadline = time.time() + timeout
+        last_seen: float | None = None
+        while time.time() < deadline:
+            state = self.get_state(timeout=10)
+            duration = self.player_duration_seconds(state, item_id)
+            if duration > 0:
+                return duration
+            status = self.player_status_for_item(state, item_id)
+            if status is not None:
+                last_seen = duration
+            time.sleep(0.5)
+        return last_seen if last_seen and last_seen > 0 else None
 
     def wait_for_player_control_ack(self, seq: int, *, timeout: float = 8.0) -> bool:
         if seq <= 0:
@@ -974,20 +1109,47 @@ class SmokeRunner:
             time.sleep(0.2)
         return False
 
-    def wait_for_player_time_at_least(self, item_id: str, *, min_seconds: float, timeout: float) -> float | None:
+    def wait_for_player_time_in_transition_window(
+        self,
+        item_id: str,
+        *,
+        target_seconds: float,
+        duration_seconds: float,
+        tolerance_seconds: float,
+        end_guard_seconds: float,
+        timeout: float,
+    ) -> PlayerTimeWindowResult:
         deadline = time.time() + timeout
         last_seen: float | None = None
+        min_seconds = max(0.0, target_seconds - tolerance_seconds)
+        max_seconds = min(
+            max(0.0, duration_seconds - end_guard_seconds),
+            target_seconds + tolerance_seconds,
+        )
+        if max_seconds < min_seconds:
+            max_seconds = min_seconds
         while time.time() < deadline:
             state = self.get_state(timeout=10)
+            current_id = str((state.get("current_item") or {}).get("id") or "")
+            if current_id != item_id:
+                return PlayerTimeWindowResult("item-changed", last_seen)
             status = self.player_status_for_item(state, item_id)
             if status is None:
-                time.sleep(0.5)
+                time.sleep(0.25)
                 continue
-            last_seen = max(0.0, float(status.get("current_time") or 0.0))
-            if last_seen >= min_seconds:
-                return last_seen
-            time.sleep(0.5)
-        return last_seen if last_seen is not None and last_seen >= min_seconds else None
+            try:
+                last_seen = max(0.0, float(status.get("current_time") or 0.0))
+            except (TypeError, ValueError):
+                time.sleep(0.25)
+                continue
+            if last_seen >= max(0.0, duration_seconds - end_guard_seconds):
+                return PlayerTimeWindowResult("ended", last_seen)
+            if min_seconds <= last_seen <= max_seconds:
+                return PlayerTimeWindowResult("ok", last_seen)
+            if last_seen > max_seconds:
+                return PlayerTimeWindowResult("overshot", last_seen)
+            time.sleep(0.25)
+        return PlayerTimeWindowResult("timeout", last_seen)
 
     @staticmethod
     def player_status_for_item(state: dict[str, Any], item_id: str) -> dict[str, Any] | None:
@@ -1005,6 +1167,16 @@ class SmokeRunner:
             return 0.0
         try:
             return max(0.0, float(status.get("current_time") or 0.0))
+        except (TypeError, ValueError):
+            return 0.0
+
+    @classmethod
+    def player_duration_seconds(cls, state: dict[str, Any], item_id: str) -> float:
+        status = cls.player_status_for_item(state, item_id)
+        if status is None:
+            return 0.0
+        try:
+            return max(0.0, float(status.get("duration") or 0.0))
         except (TypeError, ValueError):
             return 0.0
 
@@ -1066,6 +1238,8 @@ class SmokeRunner:
         except ApiError as exc:
             print_warn(f"Gatcha search returned an error: {exc}")
 
+        self.check_follow_browse_api("Host follow browse", remote=False)
+
         try:
             result = self.http_get("/api/gatcha/candidate", timeout=30)
             if result.get("ok"):
@@ -1074,6 +1248,54 @@ class SmokeRunner:
                 print_warn(f"Gatcha candidate returned no song: {result.get('error')}")
         except Exception as exc:  # noqa: BLE001
             print_warn(f"Gatcha candidate skipped/failed: {exc}")
+
+    def check_follow_browse_api(self, label: str, *, remote: bool) -> None:
+        try:
+            result = self.http_get("/api/gatcha/browse", timeout=30, remote=remote)
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"{label} API failed: {exc}") from exc
+        if not isinstance(result, dict) or not result.get("ok"):
+            raise RuntimeError(f"{label} API returned an error: {result.get('error') if isinstance(result, dict) else result}")
+        data = result.get("data") if isinstance(result, dict) else {}
+        owners = data.get("owners") if isinstance(data, dict) else []
+        if not isinstance(owners, list):
+            raise RuntimeError(f"{label} returned a non-list owners payload")
+        print_ok(f"{label} owner grid API works: {len(owners)} owners")
+        if not owners:
+            print_skip(label, "No followed UID owners are configured")
+            return
+
+        owner = next(
+            (
+                entry for entry in owners
+                if isinstance(entry, dict) and str(entry.get("uid") or "").strip()
+            ),
+            None,
+        )
+        if not owner:
+            raise RuntimeError(f"{label} returned owners without UID values")
+        uid = str(owner.get("uid") or "").strip()
+        owner_name = str(owner.get("name") or "").strip() or f"UID {uid}"
+        try:
+            count = int(owner.get("count") or 0)
+        except (TypeError, ValueError):
+            count = 0
+        selected = self.http_get(f"/api/gatcha/browse?uid={urllib.parse.quote(uid)}", timeout=30, remote=remote)
+        selected_data = selected.get("data") if isinstance(selected, dict) else {}
+        items = selected_data.get("items") if isinstance(selected_data, dict) else []
+        items = items if isinstance(items, list) else []
+        print_ok(f"{label} selected owner API works: {owner_name} ({uid}) items={len(items)} cached_count={count}")
+        if items:
+            first_title = str((items[0] or {}).get("title") or "").strip()
+            if first_title:
+                query = urllib.parse.quote(first_title[:8])
+                filtered = self.http_get(
+                    f"/api/gatcha/browse?uid={urllib.parse.quote(uid)}&q={query}",
+                    timeout=30,
+                    remote=remote,
+                )
+                filtered_items = (((filtered.get("data") or {}).get("items") or []) if isinstance(filtered, dict) else [])
+                print_ok(f"{label} per-owner search works: {len(filtered_items)} result(s) for title prefix")
 
     def check_destructive_maintenance(self) -> None:
         print_header("Destructive data maintenance APIs")

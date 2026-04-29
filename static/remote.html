@@ -171,6 +171,9 @@
       <section class="panel search-panel">
         <div class="panel-head">
           <p class="panel-tag">Local Search</p>
+          <button type="button" id="follow-browse-toggle" class="secondary-button follow-browse-toggle" aria-pressed="false">
+            关注浏览
+          </button>
         </div>
         <form id="search-form" class="request-form">
           <input
@@ -184,6 +187,31 @@
           </div>
         </form>
         <div id="search-results" class="search-results hidden"></div>
+        <div id="follow-browse-view" class="follow-browser hidden">
+          <div id="follow-up-list-view">
+            <div id="follow-up-grid" class="follow-up-grid"></div>
+          </div>
+          <div id="follow-up-items-view" class="hidden">
+            <div class="follow-browser-head">
+              <button type="button" id="follow-browse-back" class="secondary-button">返回</button>
+              <div class="follow-browser-title">
+                <h3 id="follow-browse-title">关注列表</h3>
+                <span id="follow-browse-count"></span>
+              </div>
+            </div>
+            <form id="follow-search-form" class="request-form follow-search-form">
+              <input
+                type="text"
+                id="follow-search-query"
+                placeholder="搜索该 UP 的缓存稿件"
+                autocomplete="off"
+              />
+              <button type="submit" id="follow-search-button" class="primary-button">搜索</button>
+            </form>
+            <div id="follow-song-results" class="search-results"></div>
+          </div>
+          <p class="gatcha-message" id="follow-browse-message" role="status"></p>
+        </div>
       </section>
 
       <section class="panel gatcha-panel">

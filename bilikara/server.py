@@ -18,6 +18,7 @@ from .bilibili import (
     ManualBindingRequiredError,
     MISSING_BILIBILI_COOKIE_MESSAGE,
     add_gatcha_uid,
+    browse_gatcha_cache,
     effective_bilibili_cookie,
     fetch_gatcha_candidate,
     fetch_owner_info,
@@ -208,6 +209,7 @@ class AppContext:
         action: str,
         item_id: str = "",
         delta_seconds: int = 0,
+        target_seconds: float | None = None,
     ) -> dict[str, object]:
         with self._player_control_lock:
             self._player_control_seq += 1
@@ -216,6 +218,7 @@ class AppContext:
                 "action": action,
                 "item_id": item_id,
                 "delta_seconds": delta_seconds,
+                "target_seconds": target_seconds,
                 "issued_at": time.time(),
             }
             command = dict(self._player_control_command)
@@ -241,15 +244,32 @@ class AppContext:
         item_id: str,
         is_paused: bool,
         current_time: float = 0.0,
+        duration: float | None = None,
     ) -> None:
         normalized_item_id = str(item_id or "").strip()
         if not normalized_item_id:
             return
+        normalized_duration = 0.0
+        if duration is not None:
+            try:
+                normalized_duration = max(0.0, float(duration or 0.0))
+            except (TypeError, ValueError):
+                normalized_duration = 0.0
         with self._player_status_lock:
+            previous_duration = 0.0
+            if (
+                isinstance(self._player_status, dict)
+                and str(self._player_status.get("item_id") or "").strip() == normalized_item_id
+            ):
+                try:
+                    previous_duration = max(0.0, float(self._player_status.get("duration") or 0.0))
+                except (TypeError, ValueError):
+                    previous_duration = 0.0
             self._player_status = {
                 "item_id": normalized_item_id,
                 "is_paused": bool(is_paused),
                 "current_time": max(0.0, float(current_time or 0.0)),
+                "duration": normalized_duration or previous_duration,
                 "updated_at": time.time(),
             }
         if (not is_paused) or float(current_time or 0.0) > 0:
@@ -508,6 +528,15 @@ class BilikaraHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._write_json({"ok": False, "error": str(e)})
             return
+        if route == "/api/gatcha/browse":
+            route_query = parse_qs(urlparse(self.path).query)
+            selected_uid = route_query.get("uid", [""])[0]
+            search_query = route_query.get("q", [""])[0]
+            try:
+                self._write_json({"ok": True, "data": browse_gatcha_cache(selected_uid, search_query)})
+            except Exception as e:
+                self._write_json({"ok": False, "error": str(e)})
+            return
         if route == "/api/gatcha/uids":
             try:
                 self._write_json({"ok": True, "data": gatcha_uid_snapshot()})
@@ -675,17 +704,23 @@ class BilikaraHandler(BaseHTTPRequestHandler):
             if route == "/api/player/control":
                 action = str(body.get("action") or "").strip()
                 item_id = str(body.get("item_id") or "").strip()
-                if action not in {"toggle-play", "seek-relative"}:
+                if action not in {"toggle-play", "seek-relative", "seek-absolute"}:
                     raise ValueError("invalid player control action")
                 delta_seconds = int(body.get("delta_seconds") or 0)
+                target_seconds = None
                 if action == "seek-relative" and delta_seconds == 0:
                     raise ValueError("missing delta_seconds")
                 if action == "seek-relative" and abs(delta_seconds) > 300:
                     raise ValueError("delta_seconds too large")
+                if action == "seek-absolute":
+                    target_seconds = float(body.get("target_seconds") or 0.0)
+                    if target_seconds < 0:
+                        raise ValueError("target_seconds must be non-negative")
                 CONTEXT.issue_player_control(
                     action=action,
                     item_id=item_id,
                     delta_seconds=delta_seconds,
+                    target_seconds=target_seconds,
                 )
                 self._write_json({"ok": True, "data": CONTEXT.snapshot()})
                 return
@@ -704,10 +739,14 @@ class BilikaraHandler(BaseHTTPRequestHandler):
                 if not isinstance(is_paused, bool):
                     raise ValueError("is_paused must be boolean")
                 current_time = float(body.get("current_time") or 0.0)
+                duration = None
+                if "duration" in body:
+                    duration = float(body.get("duration") or 0.0)
                 CONTEXT.update_player_status(
                     item_id=item_id,
                     is_paused=is_paused,
                     current_time=current_time,
+                    duration=duration,
                 )
                 self._write_json({"ok": True})
                 return

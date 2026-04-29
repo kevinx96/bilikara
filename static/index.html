@@ -381,7 +381,7 @@
                     <h2 id="search-title">搜索</h2>
                   </div>
                   <button type="button" id="search-cookie-toggle" class="toolbar-button ghost search-cookie-toggle">
-                    输入 Cookie
+                    关注浏览
                   </button>
                 </div>
 
@@ -399,19 +399,30 @@
                     </div>
 
                     <div id="search-cookie-view" class="search-face search-face-back search-cookie-view">
-                      <div class="cookie-config-bar">
-                        <div class="cookie-inputs">
-                          <div class="input-group">
-                            <label>SESSDATA</label>
-                            <input type="text" id="cookie-sessdata" placeholder="从浏览器获取的 SESSDATA">
-                          </div>
-                          <div class="input-group">
-                            <label>bili_jct</label>
-                            <input type="text" id="cookie-jct" placeholder="从浏览器获取的 bili_jct">
-                          </div>
-                          <button type="button" id="save-cookie-button" class="next-button">更新配置</button>
+                      <div class="follow-browser" id="follow-browser">
+                        <div id="follow-up-list-view" class="follow-up-list-view">
+                          <div id="follow-up-grid" class="follow-up-grid" role="list"></div>
                         </div>
-                        <p class="gatcha-message" id="cookie-message" role="status"></p>
+                        <div id="follow-up-items-view" class="follow-up-items-view hidden">
+                          <div class="follow-browser-head">
+                            <button type="button" id="follow-browse-back" class="toolbar-button ghost">返回</button>
+                            <div class="follow-browser-title-block">
+                              <h3 id="follow-browse-title">UP 主稿件</h3>
+                              <p id="follow-browse-count" class="follow-browser-count">0 首</p>
+                            </div>
+                          </div>
+                          <form id="follow-search-form" class="follow-search-form">
+                            <input
+                              type="text"
+                              id="follow-search-query"
+                              placeholder="在这个 UP 的缓存稿件里搜索"
+                              autocomplete="off"
+                            >
+                            <button type="submit" id="follow-search-button" class="next-button">搜索</button>
+                          </form>
+                          <div id="follow-song-results" class="search-results"></div>
+                        </div>
+                        <p class="gatcha-message" id="follow-browse-message" role="status"></p>
                       </div>
                     </div>
                   </div>
