@@ -1,6 +1,8 @@
 import unittest
+import urllib.error
+from unittest.mock import patch
 
-from bilikara.updater import check_for_update, is_newer_version, version_tuple
+from bilikara.updater import check_for_update, fetch_latest_release, is_newer_version, version_tuple
 
 
 class UpdateCheckTest(unittest.TestCase):
@@ -35,6 +37,16 @@ class UpdateCheckTest(unittest.TestCase):
         self.assertEqual(result["latest_version"], "v0.4.1")
         self.assertEqual(result["release_url"], "https://github.com/VZRXS/bilikara/releases/tag/v0.4.1")
 
+    def test_fetch_latest_release_reports_timeout_error(self):
+        with patch("bilikara.updater.urllib.request.urlopen", side_effect=TimeoutError):
+            with self.assertRaisesRegex(RuntimeError, "连接 GitHub Releases 超时"):
+                fetch_latest_release()
+
+    def test_fetch_latest_release_reports_network_error(self):
+        with patch("bilikara.updater.urllib.request.urlopen", side_effect=urllib.error.URLError("offline")):
+            with self.assertRaisesRegex(RuntimeError, "无法连接 GitHub Releases"):
+                fetch_latest_release()
+
     def test_check_for_update_offers_switch_for_non_release_build(self):
         result = check_for_update(
             current_version="v0.4.0-8-gabcdef-dirty",
@@ -68,9 +80,31 @@ class UpdateCheckTest(unittest.TestCase):
         self.assertEqual(result["latest_version"], "v0.4.0")
         self.assertFalse(result["update_available"])
 
+    def test_stable_current_can_opt_into_preview_release_check(self):
+        result = check_for_update(
+            current_version="v0.4.0",
+            include_preview=True,
+            release_fetcher=lambda: [
+                {
+                    "tag_name": "v0.5.0-preview.1",
+                    "html_url": "https://github.com/VZRXS/bilikara/releases/tag/v0.5.0-preview.1",
+                    "prerelease": True,
+                },
+                {
+                    "tag_name": "v0.4.0",
+                    "html_url": "https://github.com/VZRXS/bilikara/releases/tag/v0.4.0",
+                },
+            ],
+        )
+
+        self.assertEqual(result["latest_version"], "v0.5.0-preview.1")
+        self.assertTrue(result["update_available"])
+        self.assertTrue(result["include_preview"])
+
     def test_preview_current_updates_to_newer_preview(self):
         result = check_for_update(
             current_version="v0.5.0-preview.1",
+            include_preview=True,
             release_fetcher=lambda: [
                 {
                     "tag_name": "v0.5.0-preview.2",
@@ -91,6 +125,7 @@ class UpdateCheckTest(unittest.TestCase):
     def test_preview_current_updates_to_stable_release(self):
         result = check_for_update(
             current_version="v0.5.0-preview.2",
+            include_preview=True,
             release_fetcher=lambda: [
                 {
                     "tag_name": "v0.5.0",
@@ -111,6 +146,7 @@ class UpdateCheckTest(unittest.TestCase):
     def test_preview_current_updates_to_newer_stable_minor(self):
         result = check_for_update(
             current_version="v0.5.0-preview.2",
+            include_preview=True,
             release_fetcher=lambda: [
                 {
                     "tag_name": "v0.5.1",

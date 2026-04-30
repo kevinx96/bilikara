@@ -228,16 +228,25 @@
               <div class="cache-panel-row cache-panel-update-row">
                 <div>
                   <p class="cache-panel-label">应用更新</p>
-                  <p class="cache-panel-hint">从 GitHub Releases 获取新版本</p>
+                  <p class="cache-panel-hint">默认检查正式版</p>
                 </div>
-                <button
-                  type="button"
-                  class="toolbar-button cache-update-button"
-                  id="update-check-button"
-                  title="检查 bilikara 新版本"
-                >
-                  检查更新
-                </button>
+                <div class="cache-update-control">
+                  <label class="cache-preview-field" for="update-preview-checkbox" title="同时检查预览版 Release">
+                    <span>预览版</span>
+                    <input id="update-preview-checkbox" type="checkbox" />
+                    <span class="cache-preview-switch" aria-hidden="true">
+                      <span class="cache-preview-switch-thumb"></span>
+                    </span>
+                  </label>
+                  <button
+                    type="button"
+                    class="toolbar-button cache-update-button"
+                    id="update-check-button"
+                    title="检查 bilikara 新版本"
+                  >
+                    检查更新
+                  </button>
+                </div>
               </div>
             </div>
           </div>

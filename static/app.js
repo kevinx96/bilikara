@@ -13,11 +13,13 @@ const playerClickDelayMs = 220;
 const playerControlsAutoHideMs = 5000;
 const defaultSongAdvanceDelaySeconds = 3;
 const maxSongAdvanceDelaySeconds = 30;
+const appUpdateCheckTimeoutMs = 10000;
 const storageKeys = {
   playerVolume: "bilikara.player.volume",
   playerMuted: "bilikara.player.muted",
   avOffsetMs: "bilikara.player.av_offset_ms",
   layoutMode: "bilikara.layout.mode",
+  updatePreview: "bilikara.update.preview",
 };
 
 const state = {
@@ -113,6 +115,7 @@ const state = {
   gatchaRefreshSaving: false,
   bbdownLoginRequesting: false,
   updateChecking: false,
+  updatePreviewEnabled: false,
   appToastTimer: null,
   layoutMode: "full",
 };
@@ -145,6 +148,7 @@ const elements = {
   dataResetButton: document.getElementById("data-reset-button"),
   currentCacheRetryButton: document.getElementById("current-cache-retry-button"),
   playerResetButton: document.getElementById("player-reset-button"),
+  updatePreviewCheckbox: document.getElementById("update-preview-checkbox"),
   updateCheckButton: document.getElementById("update-check-button"),
   currentTitle: document.getElementById("current-title"),
   playerPanel: document.querySelector(".player-panel"),
@@ -600,6 +604,7 @@ function hydrateLocalPreferences() {
   );
   state.localPlayerMuted = readLocalBoolean(storageKeys.playerMuted, state.localPlayerMuted);
   state.layoutMode = normalizeLayoutMode(readLocalString(storageKeys.layoutMode, state.layoutMode));
+  state.updatePreviewEnabled = readLocalBoolean(storageKeys.updatePreview, state.updatePreviewEnabled);
 }
 
 function normalizeLayoutMode(value) {
@@ -688,10 +693,11 @@ async function apiPost(url, payload = {}) {
   return data.data;
 }
 
-async function apiGet(url) {
+async function apiGet(url, options = {}) {
   const response = await fetch(url, {
     cache: "no-store",
     headers: clientHeaders(),
+    signal: options.signal,
   });
   const data = await response.json();
   if (!response.ok || !data.ok) {
@@ -1548,7 +1554,16 @@ function renderCacheSettings(bbdown, ffmpeg, cachePolicy) {
   setTextContent(elements.cacheUsageDetail, cacheUsageDetail);
   renderCacheSlider(cachePolicy);
   renderCachePolicyControls(cachePolicy);
+  renderUpdatePreviewControl();
   syncCachePanelVisibility();
+}
+
+function renderUpdatePreviewControl() {
+  if (!elements.updatePreviewCheckbox) {
+    return;
+  }
+  elements.updatePreviewCheckbox.checked = state.updatePreviewEnabled;
+  elements.updatePreviewCheckbox.disabled = state.updateChecking;
 }
 
 function renderPlaybackRepairControls(currentItem) {
@@ -3971,12 +3986,18 @@ async function checkAppUpdate(event) {
   const button = elements.updateCheckButton;
   const point = anchorPointForEvent(event, button || elements.cacheSettings);
   state.updateChecking = true;
+  renderUpdatePreviewControl();
   if (button) {
     button.disabled = true;
     button.textContent = "检查中";
   }
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  const timeoutId = controller
+    ? window.setTimeout(() => controller.abort(), appUpdateCheckTimeoutMs)
+    : null;
   try {
-    const result = await apiGet("/api/app/update");
+    const query = state.updatePreviewEnabled ? "?include_preview=1" : "";
+    const result = await apiGet(`/api/app/update${query}`, { signal: controller?.signal });
     if (result?.update_available || result?.switch_to_release_available) {
       const fallbackMessage = result?.switch_to_release_available
         ? "当前为开发版或非正式版。是否打开 GitHub Releases 下载最新正式版？"
@@ -3994,9 +4015,16 @@ async function checkAppUpdate(event) {
     }
     setAppMessage(result?.message || "当前已是最新版本。");
   } catch (error) {
-    setAppMessage(error.message, true);
+    const message = error?.name === "AbortError"
+      ? "连接 GitHub Releases 超时，请稍后重试。"
+      : error?.message || "检查更新失败，请稍后重试。";
+    setAppMessage(message, true);
   } finally {
+    if (timeoutId !== null) {
+      window.clearTimeout(timeoutId);
+    }
     state.updateChecking = false;
+    renderUpdatePreviewControl();
     if (button) {
       button.disabled = false;
       button.textContent = "检查更新";
@@ -4448,6 +4476,12 @@ elements.cacheHiresCheckbox?.addEventListener("change", async (event) => {
     { audio_hires: audioHires },
     audioHires ? "已启用 Hi-Res 音频优先。" : "已关闭 Hi-Res 音频优先。",
   );
+});
+
+elements.updatePreviewCheckbox?.addEventListener("change", (event) => {
+  state.updatePreviewEnabled = Boolean(event.target.checked);
+  writeLocalPreference(storageKeys.updatePreview, state.updatePreviewEnabled);
+  renderUpdatePreviewControl();
 });
 
 elements.avSyncPanel?.addEventListener("click", async (event) => {

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import re
+import socket
+import urllib.error
 import urllib.request
 from typing import Any, Callable
 
@@ -9,6 +11,9 @@ from .config import APP_RELEASE_API, APP_RELEASES_URL, APP_VERSION
 
 VERSION_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(?:-preview\.(\d+))?$", re.IGNORECASE)
 APP_RELEASES_API = APP_RELEASE_API.rsplit("/", 1)[0] if APP_RELEASE_API.endswith("/latest") else APP_RELEASE_API
+APP_UPDATE_TIMEOUT_SECONDS = 5
+APP_UPDATE_NETWORK_ERROR = "无法连接 GitHub Releases，请检查网络后重试"
+APP_UPDATE_TIMEOUT_ERROR = "连接 GitHub Releases 超时，请稍后重试"
 
 
 def normalize_version_tag(version: object) -> str:
@@ -54,26 +59,38 @@ def is_newer_version(latest_version: object, current_version: object) -> bool:
     return latest_key > current_key
 
 
-def fetch_releases() -> list[dict[str, Any]]:
+def _fetch_release_json(url: str) -> object:
     request = urllib.request.Request(
-        APP_RELEASES_API,
+        url,
         headers={
             "Accept": "application/vnd.github+json",
             "User-Agent": "bilikara-update-check",
         },
     )
-    with urllib.request.urlopen(request, timeout=8) as response:
-        payload = json.loads(response.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(request, timeout=APP_UPDATE_TIMEOUT_SECONDS) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except (TimeoutError, socket.timeout) as exc:
+        raise RuntimeError(APP_UPDATE_TIMEOUT_ERROR) from exc
+    except urllib.error.URLError as exc:
+        reason = getattr(exc, "reason", None)
+        if isinstance(reason, (TimeoutError, socket.timeout)):
+            raise RuntimeError(APP_UPDATE_TIMEOUT_ERROR) from exc
+        raise RuntimeError(APP_UPDATE_NETWORK_ERROR) from exc
+
+
+def fetch_releases() -> list[dict[str, Any]]:
+    payload = _fetch_release_json(APP_RELEASES_API)
     if not isinstance(payload, list):
         raise RuntimeError("GitHub Release 响应格式不正确")
     return payload
 
 
 def fetch_latest_release() -> dict[str, Any]:
-    releases = fetch_releases()
-    if not releases:
-        raise RuntimeError("没有找到 GitHub Release")
-    return releases[0]
+    payload = _fetch_release_json(APP_RELEASE_API)
+    if not isinstance(payload, dict):
+        raise RuntimeError("GitHub Release 响应格式不正确")
+    return payload
 
 
 def _coerce_releases(payload: object) -> list[dict[str, Any]]:
@@ -84,7 +101,12 @@ def _coerce_releases(payload: object) -> list[dict[str, Any]]:
     return []
 
 
-def _latest_release_for_current(current_version: str, releases: list[dict[str, Any]]) -> dict[str, Any]:
+def _latest_release_for_current(
+    current_version: str,
+    releases: list[dict[str, Any]],
+    *,
+    include_preview: bool = False,
+) -> dict[str, Any]:
     valid_releases = [
         release
         for release in releases
@@ -105,20 +127,25 @@ def _latest_release_for_current(current_version: str, releases: list[dict[str, A
         else {}
     )
 
-    if is_stable_version(current_version):
-        return latest_stable
-    if is_preview_version(current_version):
+    if include_preview:
         return latest_any
-    return latest_stable or latest_any
+    return latest_stable
 
 
 def check_for_update(
     *,
     current_version: str = APP_VERSION,
-    release_fetcher: Callable[[], object] = fetch_releases,
+    include_preview: bool = False,
+    release_fetcher: Callable[[], object] | None = None,
 ) -> dict[str, Any]:
+    if release_fetcher is None:
+        release_fetcher = fetch_releases if include_preview else fetch_latest_release
     releases = _coerce_releases(release_fetcher())
-    release = _latest_release_for_current(normalize_version_tag(current_version) or "dev", releases)
+    release = _latest_release_for_current(
+        normalize_version_tag(current_version) or "dev",
+        releases,
+        include_preview=include_preview,
+    )
     latest_version = normalize_version_tag(release.get("tag_name"))
     release_url = str(release.get("html_url") or APP_RELEASES_URL)
     current_version = normalize_version_tag(current_version) or "dev"
@@ -145,5 +172,6 @@ def check_for_update(
         "published_at": str(release.get("published_at") or ""),
         "update_available": update_available,
         "switch_to_release_available": switch_to_release_available,
+        "include_preview": include_preview,
         "message": message,
     }
