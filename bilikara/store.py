@@ -836,7 +836,7 @@ class PlaylistStore:
 
             player_payload = self._read_json_payload_unlocked(self.player_state_file)
             if player_payload:
-                self.playback_mode = str(player_payload.get("playback_mode") or "local")
+                self.playback_mode = self._load_playback_mode(player_payload)
                 self.av_offset_ms = self._load_av_offset_ms(player_payload)
                 self.volume_percent = self._load_volume_percent(player_payload)
                 self.is_muted = self._load_is_muted(player_payload)
@@ -866,6 +866,12 @@ class PlaylistStore:
         if state_file.name == "state.json":
             return state_file.with_name(default_name)
         return state_file.with_name(f"{state_file.stem}-{suffix}.json")
+
+    @staticmethod
+    def _load_playback_mode(_payload: dict[str, Any]) -> str:
+        # Online embed playback is deprecated in the frontend. Keep the
+        # server-side mode field for compatibility, but never restore it.
+        return "local"
 
     @staticmethod
     def _load_av_offset_ms(payload: dict[str, Any]) -> int:

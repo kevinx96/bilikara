@@ -39,6 +39,21 @@ class PlaylistStoreTest(unittest.TestCase):
     def test_default_mode_is_local(self):
         self.assertEqual(self.store.playback_mode, "local")
 
+    def test_online_mode_from_player_state_restores_as_local(self):
+        player_state_file = self.state_file.parent / "player_state.json"
+        player_state_file.write_text(
+            json.dumps({"playback_mode": "online"}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        restored_store = PlaylistStore(
+            state_file=self.state_file,
+            backup_file=self.backup_file,
+            session_archive_dir=self.session_archive_dir,
+        )
+
+        self.assertEqual(restored_store.playback_mode, "local")
+
     def test_av_offset_persists_in_player_state_file(self):
         self.store.set_av_offset_ms(230)
 

@@ -174,10 +174,11 @@
                   重新生成二维码
                 </button>
               </div>
-              <div class="cache-panel-row cache-panel-mode-row">
+              <!-- LEGACY: 在线外挂模式暂时下线，保留元素 id 仅避免旧脚本引用失效。 -->
+              <div class="cache-panel-row cache-panel-mode-row hidden" aria-hidden="true">
                 <div>
                   <p class="cache-panel-label">播放模式</p>
-                  <p class="cache-panel-hint">⚠️在线外挂仅作为备用</p>
+                  <p class="cache-panel-hint">本地缓存</p>
                 </div>
                 <div class="cache-mode-control">
                   <span id="playback-mode-current">本地缓存</span>
