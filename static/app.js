@@ -1501,7 +1501,7 @@ function renderListHeader(playlist, history) {
   const listTag = isHistoryView ? "History" : "Requests";
   const listTitle = isHistoryView ? "历史记录" : "点歌列表";
   const queueCount = isHistoryView ? `(${history.length}首)` : `(${playlist.length}首)`;
-  const historyButtonText = isHistoryView ? "返回点歌列表" : "历史记录";
+  const historyButtonText = isHistoryView ? "点歌列表" : "历史记录";
   const signature = JSON.stringify({
     isHistoryView,
     queueCount,

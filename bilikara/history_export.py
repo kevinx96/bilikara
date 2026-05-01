@@ -114,32 +114,27 @@ def _render_history_page(
     font_module: Any,
 ) -> Any:
     width, height = 1600, 2200
-    image = image_module.new("RGB", (width, height), "#101018")
+    image = image_module.new("RGB", (width, height), "#F6EFE3")
     draw = draw_module.Draw(image)
 
     _draw_gradient(draw, width, height)
-    _draw_glow(draw, width, height)
-    _draw_neon_details(draw, width, height)
 
-    title_font = _load_font(font_module, 66, bold=True)
-    subtitle_font = _load_font(font_module, 28)
+    title_font = _load_font(font_module, 72, bold=True)
+    subtitle_font = _load_font(font_module, 27)
     header_font = _load_font(font_module, 25, bold=True)
     row_font = _load_font(font_module, 24)
-    small_font = _load_font(font_module, 21)
-    footer_font = _load_font(font_module, 23, bold=True)
+    footer_font = _load_font(font_module, 22)
 
-    draw.text((90, 78), title, fill="#2A213B", font=title_font)
-    draw.text((84, 72), title, fill="#FFF7E6", font=title_font)
+    draw.text((86, 72), "BILIKARA", fill="#8B7B6D", font=subtitle_font)
+    draw.text((84, 112), title, fill="#1F1A16", font=title_font)
     subtitle = f"共 {total_count} 首 · 第 {page_number}/{page_count} 页 · {datetime.now().strftime('%Y-%m-%d %H:%M')}"
-    draw.text((88, 154), subtitle, fill="#F7B98A", font=subtitle_font)
-
-    _draw_logo(image, logo_path, image_module, size=168, position=(1348, 52))
+    draw.text((88, 206), subtitle, fill="#77695E", font=subtitle_font)
 
     table_x = 70
-    table_y = 245
+    table_y = 292
     table_w = width - table_x * 2
     row_h = 66
-    header_h = 58
+    header_h = 62
     columns = [
         ("#", 64),
         ("标题", 564),
@@ -149,18 +144,20 @@ def _render_history_page(
         ("时间", 280),
     ]
 
-    _rounded_rectangle(draw, (table_x, table_y, table_x + table_w, table_y + header_h), 24, "#252036")
-    draw.line((table_x + 28, table_y + header_h - 2, table_x + table_w - 28, table_y + header_h - 2), fill="#5FD6D1", width=2)
+    card_box = (table_x, table_y, table_x + table_w, table_y + header_h + HISTORY_IMAGE_PAGE_SIZE * row_h + 24)
+    _rounded_rectangle(draw, card_box, 34, "#FFFCF7")
+    draw.rounded_rectangle(card_box, radius=34, outline="#EADDD0", width=2)
+    _rounded_rectangle(draw, (table_x + 18, table_y + 18, table_x + table_w - 18, table_y + header_h + 10), 24, "#F5E7DA")
     cursor_x = table_x + 24
     for label, col_w in columns:
-        draw.text((cursor_x, table_y + 11), label, fill="#FFD9A8", font=header_font)
+        draw.text((cursor_x, table_y + 30), label, fill="#8F3E2B", font=header_font)
         cursor_x += col_w
 
     start_index = (page_number - 1) * HISTORY_IMAGE_PAGE_SIZE
     for row_index, entry in enumerate(entries):
         top = table_y + header_h + row_index * row_h
-        bg = "#1B1927" if row_index % 2 == 0 else "#171520"
-        _rounded_rectangle(draw, (table_x, top + 5, table_x + table_w, top + row_h - 5), 18, bg)
+        bg = "#FFFFFF" if row_index % 2 == 0 else "#FBF6EF"
+        _rounded_rectangle(draw, (table_x + 18, top + 9, table_x + table_w - 18, top + row_h - 7), 18, bg)
 
         values = [
             str(start_index + row_index + 1),
@@ -172,27 +169,25 @@ def _render_history_page(
         ]
         cursor_x = table_x + 24
         for col_index, ((_, col_w), value) in enumerate(zip(columns, values)):
-            fill = "#F8F0DF" if col_index in {0, 1} else "#BFC2D6"
+            fill = "#1F1A16" if col_index == 1 else "#6F6258"
+            if col_index == 0:
+                fill = "#8F3E2B"
             clipped = _fit_text(draw, value, row_font, col_w - 18)
-            draw.text((cursor_x, top + 17), clipped, fill=fill, font=row_font)
+            draw.text((cursor_x, top + 20), clipped, fill=fill, font=row_font)
             cursor_x += col_w
 
     footer_y = height - 155
-    draw.line((80, footer_y - 26, width - 80, footer_y - 26), fill="#343044", width=2)
-    draw.text((92, footer_y), PROJECT_URL, fill="#FFE0AC", font=footer_font)
-
-    qr_matrix = _qr_matrix(RELEASES_URL)
-    _draw_qr(draw, qr_matrix, x=width - 230, y=height - 255, size=154)
-    draw.text((width - 198, height - 81), "Releases", fill="#FFF7E6", font=small_font)
+    draw.line((86, footer_y - 28, width - 86, footer_y - 28), fill="#E2D5C8", width=2)
+    draw.text((92, footer_y), PROJECT_URL, fill="#8B7B6D", font=footer_font)
     return image
 
 
 def _draw_gradient(draw: Any, width: int, height: int) -> None:
     for y in range(height):
         t = y / max(1, height - 1)
-        r = int(16 + 23 * t)
-        g = int(16 + 9 * t)
-        b = int(30 + 10 * t)
+        r = int(250 - 7 * t)
+        g = int(244 - 14 * t)
+        b = int(235 - 25 * t)
         draw.line((0, y, width, y), fill=(r, g, b))
 
 

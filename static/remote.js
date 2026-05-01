@@ -48,6 +48,7 @@ const state = {
   layoutMode: "full",
   remoteAccessRenderSignature: "",
   remoteQrPopoverOpen: false,
+  appToastTimer: null,
   viewportScaleResetTimers: [],
 };
 
@@ -137,6 +138,7 @@ const elements = {
   historyExportSource: document.getElementById("history-export-source"),
   historyExportImageButton: document.getElementById("history-export-image-button"),
   historyExportCsvButton: document.getElementById("history-export-csv-button"),
+  appToast: document.getElementById("app-toast"),
   queueList: document.getElementById("queue-list"),
   historyList: document.getElementById("history-list"),
   queueItemTemplate: document.getElementById("queue-item-template"),
@@ -371,6 +373,25 @@ function setFormMessage(message, isError = false) {
   elements.formMessage.classList.toggle("error", isError);
 }
 
+function setAppMessage(message, isError = false) {
+  if (!elements.appToast) {
+    return;
+  }
+  if (state.appToastTimer) {
+    window.clearTimeout(state.appToastTimer);
+    state.appToastTimer = null;
+  }
+  elements.appToast.textContent = message || "";
+  elements.appToast.classList.toggle("is-error", Boolean(isError));
+  elements.appToast.classList.toggle("hidden", !message);
+  if (message) {
+    state.appToastTimer = window.setTimeout(() => {
+      elements.appToast.classList.add("hidden");
+      state.appToastTimer = null;
+    }, 2800);
+  }
+}
+
 function setSearchMessage(message, isError = false) {
   if (!elements.searchMessage) {
     return;
@@ -481,12 +502,12 @@ async function downloadHistoryExport(format, source = selectedHistoryExportSourc
 async function exportHistory(format) {
   const source = selectedHistoryExportSource();
   const sourceLabel = source === "played" ? "本场记录" : "全部历史";
-  setFormMessage(format === "csv" ? `正在导出${sourceLabel} CSV...` : `正在导出${sourceLabel}图片...`);
+  setAppMessage(format === "csv" ? `正在导出${sourceLabel} CSV...` : `正在导出${sourceLabel}图片...`);
   try {
     await downloadHistoryExport(format, source);
-    setFormMessage(format === "csv" ? `${sourceLabel} CSV 已开始下载。` : `${sourceLabel}图片已开始下载。`);
+    setAppMessage(format === "csv" ? `${sourceLabel} CSV 已开始下载。` : `${sourceLabel}图片已开始下载。`);
   } catch (error) {
-    setFormMessage(error.message, true);
+    setAppMessage(error.message, true);
   }
 }
 

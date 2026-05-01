@@ -1041,6 +1041,30 @@ select:disabled {
   color: var(--accent-deep);
 }
 
+.app-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 22px;
+  z-index: 420;
+  max-width: min(520px, calc(100vw - 32px));
+  padding: 11px 16px;
+  border: 1px solid rgba(87, 63, 43, 0.12);
+  border-radius: 999px;
+  background: rgba(255, 251, 245, 0.94);
+  box-shadow: 0 16px 42px rgba(88, 56, 30, 0.16);
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.4;
+  text-align: center;
+  transform: translateX(-50%);
+  backdrop-filter: blur(14px);
+}
+
+.app-toast.is-error {
+  border-color: rgba(177, 69, 69, 0.22);
+  color: var(--accent-deep);
+}
+
 .count-chip,
 .queue-state {
   display: inline-flex;
