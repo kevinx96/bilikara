@@ -73,6 +73,7 @@ const elements = {
   playerControlHint: document.getElementById("player-control-hint"),
   remoteAvSyncPanel: document.getElementById("remote-av-sync-panel"),
   remoteAvOffsetInput: document.getElementById("remote-av-offset-input"),
+  remoteAvOffsetResetButton: document.getElementById("remote-av-offset-reset-button"),
   remoteVolumePanel: document.getElementById("remote-volume-panel"),
   remoteVolumeMuteButton: document.getElementById("remote-volume-mute-button"),
   remoteVolumeSlider: document.getElementById("remote-volume-slider"),
@@ -96,6 +97,7 @@ const elements = {
   searchForm: document.getElementById("search-form"),
   searchQuery: document.getElementById("search-query"),
   searchButton: document.getElementById("search-button"),
+  searchMessage: document.getElementById("search-message"),
   searchResults: document.getElementById("search-results"),
   followBrowseToggle: document.getElementById("follow-browse-toggle"),
   followBrowseView: document.getElementById("follow-browse-view"),
@@ -367,6 +369,30 @@ function renderRemoteQr(url, targets = []) {
 function setFormMessage(message, isError = false) {
   elements.formMessage.textContent = message;
   elements.formMessage.classList.toggle("error", isError);
+}
+
+function setSearchMessage(message, isError = false) {
+  if (!elements.searchMessage) {
+    return;
+  }
+  elements.searchMessage.textContent = message || "";
+  elements.searchMessage.classList.toggle("error", Boolean(isError));
+}
+
+function setMessageForSource(source, message, isError = false) {
+  if (source === "search") {
+    setSearchMessage(message, isError);
+    return;
+  }
+  if (source === "follow") {
+    setFollowBrowseMessage(message, isError);
+    return;
+  }
+  if (source === "gatcha") {
+    setGatchaMessage(message, isError);
+    return;
+  }
+  setFormMessage(message, isError);
 }
 
 function duplicateConfirmMessage(duplicateItem, sessionEntry, activeItem) {
@@ -1314,14 +1340,22 @@ function setRangeFillPercent(input, percent) {
   input.style.setProperty("--range-fill-percent", `${normalizedPercent}%`);
 }
 
+function muteIcon(isMuted) {
+  return isMuted ? "🔇" : "🔊";
+}
+
 function renderRemoteAvSyncControls(playbackMode, playerSettings) {
   if (!elements.remoteAvSyncPanel || !elements.remoteAvOffsetInput) {
     return;
   }
-  const isLocalMode = playbackMode === "local" && normalizeLayoutMode(state.layoutMode) === "full";
+  const isLocalMode = playbackMode === "local";
   elements.remoteAvSyncPanel.classList.toggle("hidden", !isLocalMode);
+  const offsetMs = currentRemoteAvOffsetMs(playerSettings);
+  if (elements.remoteAvOffsetResetButton) {
+    elements.remoteAvOffsetResetButton.disabled = offsetMs === 0;
+  }
   if (document.activeElement !== elements.remoteAvOffsetInput) {
-    elements.remoteAvOffsetInput.value = String(currentRemoteAvOffsetMs(playerSettings));
+    elements.remoteAvOffsetInput.value = String(offsetMs);
   }
 }
 
@@ -1329,14 +1363,17 @@ function renderRemoteVolumeControls(playbackMode, playerSettings) {
   if (!elements.remoteVolumePanel || !elements.remoteVolumeSlider || !elements.remoteVolumeMuteButton || !elements.remoteVolumeValue) {
     return;
   }
-  const isLocalMode = playbackMode === "local" && normalizeLayoutMode(state.layoutMode) === "full";
+  const isLocalMode = playbackMode === "local";
   elements.remoteVolumePanel.classList.toggle("hidden", !isLocalMode);
   const volumePercent = currentRemoteVolumePercent(playerSettings);
   const isMuted = currentRemoteMuted(playerSettings);
   elements.remoteVolumeSlider.value = String(volumePercent);
   setRangeFillPercent(elements.remoteVolumeSlider, volumePercent);
   elements.remoteVolumeValue.textContent = `${Math.round(volumePercent)}%`;
-  elements.remoteVolumeMuteButton.textContent = isMuted ? "取消静音" : "静音";
+  const muteLabel = isMuted ? "取消静音" : "静音";
+  elements.remoteVolumeMuteButton.textContent = muteIcon(isMuted);
+  elements.remoteVolumeMuteButton.setAttribute("aria-label", muteLabel);
+  elements.remoteVolumeMuteButton.setAttribute("title", muteLabel);
   elements.remoteVolumeMuteButton.classList.toggle("is-muted", isMuted);
 }
 
@@ -1451,18 +1488,19 @@ async function confirmBindingSheet() {
   if (!intent?.url || state.submitting) {
     return;
   }
+  const source = intent.source || "request-form";
   const { selectedVideoPage, selectedAudioPages } = currentBindingSelection();
   if (!selectedVideoPage) {
-    setFormMessage("请先选择一个视频分P", true);
+    setMessageForSource(source, "请先选择一个视频分P", true);
     return;
   }
   if (!selectedAudioPages.length) {
-    setFormMessage("请至少选择一个音频分P", true);
+    setMessageForSource(source, "请至少选择一个音频分P", true);
     return;
   }
 
   state.submitting = true;
-  setFormMessage(intent.position === "next" ? "正在按绑定关系顶歌..." : "正在按绑定关系加入点歌列表...");
+  setMessageForSource(source, intent.position === "next" ? "正在按绑定关系顶歌..." : "正在按绑定关系加入点歌列表...");
   try {
     const result = await submitAddRequestWithDuplicateConfirm(
       intent.url,
@@ -1474,7 +1512,7 @@ async function confirmBindingSheet() {
       },
     );
     if (result.cancelled) {
-      setFormMessage("已取消重复添加");
+      setMessageForSource(source, "已取消重复添加");
       return;
     }
     applyStateSnapshot(result.data, { forceRender: true });
@@ -1486,17 +1524,20 @@ async function confirmBindingSheet() {
       hideSearchResults();
       elements.searchQuery.value = "";
     }
+    if (intent.source === "follow") {
+      setFollowBrowseMessage("");
+    }
     if (intent.source === "gatcha") {
       state.gatchaCandidate = null;
       renderGatchaUidView();
     }
-    setFormMessage(intent.position === "next" ? "已按绑定关系顶歌到下一首" : "已按绑定关系加入点歌列表");
+    setMessageForSource(source, intent.position === "next" ? "已按绑定关系顶歌到下一首" : "已按绑定关系加入点歌列表");
   } catch (error) {
     if (error.code === "manual_binding_required") {
       openBindingSheet(intent, error.payload?.binding);
       return;
     }
-    setFormMessage(error.message, true);
+    setMessageForSource(source, error.message, true);
   } finally {
     state.submitting = false;
   }
@@ -1870,30 +1911,34 @@ async function resortPlaylistByCycle() {
   setFormMessage("已按本场用户座次重新排序点歌列表。");
 }
 
-async function addByUrl(url, position = "tail") {
+async function addByUrl(url, position = "tail", source = "search") {
   const requesterName = selectedRequesterName();
   if (!url || state.submitting) {
     return;
   }
   if (!requesterName) {
-    setFormMessage("请先选择点歌人。", true);
+    setMessageForSource(source, "请先选择点歌人。", true);
     return;
   }
 
   state.submitting = true;
-  setFormMessage("正在添加已选歌曲...");
+  setMessageForSource(source, "正在添加已选歌曲...");
   try {
     const result = await submitAddRequestWithDuplicateConfirm(url, position, requesterName);
     if (result.cancelled) {
-      setFormMessage("已取消重复点歌。");
+      setMessageForSource(source, "已取消重复点歌。");
       return;
     }
     applyStateSnapshot(result.data, { forceRender: true });
-    hideSearchResults();
-    elements.searchQuery.value = "";
-    state.gatchaCandidate = null;
-    renderGatchaUidView();
-    setFormMessage("点歌成功。");
+    if (source === "search") {
+      hideSearchResults();
+      elements.searchQuery.value = "";
+    }
+    if (source === "gatcha") {
+      state.gatchaCandidate = null;
+      renderGatchaUidView();
+    }
+    setMessageForSource(source, "点歌成功。");
   } catch (error) {
     if (error.code === "manual_binding_required") {
       openBindingSheet(
@@ -1902,13 +1947,13 @@ async function addByUrl(url, position = "tail") {
           position,
           requesterName,
           clearInput: false,
-          source: state.gatchaCandidate?.url === url ? "gatcha" : "search",
+          source,
         },
         error.payload?.binding,
       );
       return;
     }
-    setFormMessage(error.message, true);
+    setMessageForSource(source, error.message, true);
   } finally {
     state.submitting = false;
   }
@@ -2004,19 +2049,19 @@ elements.searchForm.addEventListener("submit", async (event) => {
   const query = String(elements.searchQuery.value || "").trim();
   if (!query) {
     hideSearchResults();
-    setFormMessage("请输入搜索关键词。", true);
+    setSearchMessage("请输入搜索关键词。", true);
     return;
   }
 
   elements.searchButton.disabled = true;
-  setFormMessage("正在搜索本地目录...");
+  setSearchMessage("正在搜索本地目录...");
   try {
     const items = await searchGatchaCache(query);
     renderSearchResults(items);
-    setFormMessage(items.length ? `找到 ${items.length} 条缓存结果。` : "未找到缓存结果。");
+    setSearchMessage(items.length ? `找到 ${items.length} 条缓存结果。` : "未找到缓存结果。");
   } catch (error) {
     hideSearchResults();
-    setFormMessage(error.message, true);
+    setSearchMessage(error.message, true);
   } finally {
     elements.searchButton.disabled = false;
   }
@@ -2027,7 +2072,7 @@ elements.searchResults.addEventListener("click", async (event) => {
   if (!button) {
     return;
   }
-  await addByUrl(String(button.dataset.url || ""), "tail");
+  await addByUrl(String(button.dataset.url || ""), "tail", "search");
 });
 
 elements.followBrowseToggle?.addEventListener("click", () => {
@@ -2087,7 +2132,7 @@ elements.followSongResults?.addEventListener("click", async (event) => {
   }
   button.disabled = true;
   try {
-    await addByUrl(url, "tail");
+    await addByUrl(url, "tail", "follow");
   } finally {
     button.disabled = false;
   }
@@ -2150,8 +2195,15 @@ elements.refreshButton.addEventListener("click", async () => {
 });
 
 elements.remoteAvSyncPanel?.addEventListener("click", async (event) => {
-  const button = event.target.closest("button[data-av-step]");
+  const button = event.target.closest("button[data-av-step], button[data-reset-av-offset]");
   if (!button) {
+    return;
+  }
+  if (button.disabled) {
+    return;
+  }
+  if (button.hasAttribute("data-reset-av-offset")) {
+    await setRemoteAvOffset(0);
     return;
   }
   await setRemoteAvOffset(
@@ -2202,7 +2254,7 @@ elements.gatchaConfirmButton.addEventListener("click", async () => {
   if (!state.gatchaCandidate?.url) {
     return;
   }
-  await addByUrl(String(state.gatchaCandidate.url), "tail");
+  await addByUrl(String(state.gatchaCandidate.url), "tail", "gatcha");
 });
 
 elements.bindingSheetClose?.addEventListener("click", () => {

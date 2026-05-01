@@ -157,6 +157,7 @@ const elements = {
   audioVariantBar: document.getElementById("audio-variant-bar"),
   avSyncPanel: document.getElementById("av-sync-panel"),
   avOffsetInput: document.getElementById("av-offset-input"),
+  avOffsetResetButton: document.getElementById("av-offset-reset-button"),
   volumePanel: document.getElementById("volume-panel"),
   volumeMuteButton: document.getElementById("volume-mute-button"),
   volumeSlider: document.getElementById("volume-slider"),
@@ -2419,6 +2420,10 @@ function volumePercentText() {
   return `${Math.round(state.localPlayerVolume * 100)}%`;
 }
 
+function muteIcon(isMuted) {
+  return isMuted ? "🔇" : "🔊";
+}
+
 function setRangeFillPercent(input, percent) {
   if (!input) {
     return;
@@ -2439,11 +2444,13 @@ function renderVolumeControls(playbackMode) {
   const volumePercent = Math.round(state.localPlayerVolume * 100);
   const label = volumePercentText();
   const muteLabel = state.localPlayerMuted ? "取消静音" : "静音";
+  const muteButtonText = muteIcon(state.localPlayerMuted);
   const signature = JSON.stringify({
     isLocalMode,
     volumePercent,
     label,
     muteLabel,
+    muteButtonText,
     muted: state.localPlayerMuted,
   });
 
@@ -2458,7 +2465,9 @@ function renderVolumeControls(playbackMode) {
   }
   setRangeFillPercent(elements.volumeSlider, volumePercent);
   setTextContent(elements.volumeValue, label);
-  setTextContent(elements.volumeMuteButton, muteLabel);
+  setTextContent(elements.volumeMuteButton, muteButtonText);
+  elements.volumeMuteButton.setAttribute("aria-label", muteLabel);
+  elements.volumeMuteButton.setAttribute("title", muteLabel);
   setClassToggle(elements.volumeMuteButton, "is-muted", state.localPlayerMuted);
 }
 
@@ -2669,6 +2678,9 @@ function renderAvSyncControls(playbackMode, playerSettings) {
   elements.avSyncPanel.classList.toggle("hidden", !isLocalMode);
   const offsetMs = currentAvOffsetMs();
   elements.avOffsetInput.disabled = state.avOffsetSaving;
+  if (elements.avOffsetResetButton) {
+    elements.avOffsetResetButton.disabled = state.avOffsetSaving || offsetMs === 0;
+  }
   if (document.activeElement !== elements.avOffsetInput || state.avOffsetSaving) {
     elements.avOffsetInput.value = String(offsetMs);
   }
@@ -4596,8 +4608,15 @@ elements.updatePreviewCheckbox?.addEventListener("change", (event) => {
 });
 
 elements.avSyncPanel?.addEventListener("click", async (event) => {
-  const button = event.target.closest("button[data-step]");
+  const button = event.target.closest("button[data-step], button[data-reset-av-offset]");
   if (!button) {
+    return;
+  }
+  if (button.disabled) {
+    return;
+  }
+  if (button.hasAttribute("data-reset-av-offset")) {
+    await setAvOffset(0);
     return;
   }
   const step = Number(button.dataset.step || 0);
@@ -5407,6 +5426,7 @@ window.addEventListener("pagehide", () => {
 window.addEventListener("beforeunload", disconnectClient);
 window.addEventListener("pageshow", () => {
   showMountedPlayerControls();
+  renderVolumeControls(frontendPlaybackMode(state.data?.playback_mode));
 });
 
 startPolling();

@@ -74,17 +74,18 @@
         <section id="remote-av-sync-panel" class="remote-setting-panel hidden">
           <div class="remote-setting-copy">
             <p class="panel-tag">音画延迟</p>
-            <p class="muted">正数表示音频延后，负数表示音频提前。</p>
+            <p class="muted">正数表示画面提前，负数表示画面延后。</p>
           </div>
           <div class="remote-setting-controls">
-            <button type="button" class="ghost-button remote-step-button" data-av-step="-200">-200ms</button>
-            <button type="button" class="ghost-button remote-step-button" data-av-step="-50">-50ms</button>
+            <button type="button" class="ghost-button remote-step-button" data-av-step="-200">« -200</button>
+            <button type="button" class="ghost-button remote-step-button" data-av-step="-50">‹ -50</button>
+            <button type="button" class="ghost-button remote-step-button" data-av-step="50">+50 ›</button>
+            <button type="button" class="ghost-button remote-step-button" data-av-step="200">+200 »</button>
+            <button type="button" id="remote-av-offset-reset-button" class="ghost-button remote-reset-button" data-reset-av-offset disabled>复位</button>
             <label class="remote-input-wrap" for="remote-av-offset-input">
               <input id="remote-av-offset-input" type="number" min="-5000" max="5000" step="10" value="0" />
               <span>ms</span>
             </label>
-            <button type="button" class="ghost-button remote-step-button" data-av-step="50">+50ms</button>
-            <button type="button" class="ghost-button remote-step-button" data-av-step="200">+200ms</button>
           </div>
         </section>
         <section id="remote-volume-panel" class="remote-setting-panel hidden">
@@ -93,7 +94,7 @@
             <p class="muted">直接遥控服务端当前本地播放的音量。</p>
           </div>
           <div class="remote-setting-controls">
-            <button type="button" id="remote-volume-mute-button" class="ghost-button remote-mute-button">静音</button>
+            <button type="button" id="remote-volume-mute-button" class="ghost-button remote-mute-button" aria-label="静音" title="静音">🔊</button>
             <input
               id="remote-volume-slider"
               class="remote-volume-slider"
@@ -110,17 +111,20 @@
 
       <section class="panel request-panel">
         <div class="panel-head">
-          <p class="panel-tag">Song Request</p>
+          <div>
+            <p class="panel-tag">Song Request</p>
+            <h2 class="panel-title">点歌</h2>
+          </div>
+          <button type="button" id="resort-playlist-button" class="secondary-button requester-row-button">重新排序</button>
         </div>
         <form id="request-form" class="request-form">
           <div class="requester-row">
             <select id="requester-select" name="requester_name"></select>
-            <button type="button" id="resort-playlist-button" class="secondary-button requester-row-button">重新排序</button>
           </div>
           <textarea
             id="url-input"
             name="url"
-            rows="3"
+            rows="2"
             placeholder="输入 Bilibili 视频链接、BV 号或 av 号"
             autocomplete="off"
           ></textarea>
@@ -168,8 +172,8 @@
             <option value="played">导出本场</option>
             <option value="history">全部历史</option>
           </select>
-          <button type="button" id="history-export-csv-button" class="ghost-button">导出 CSV</button>
           <button type="button" id="history-export-image-button" class="primary-button">导出图片</button>
+          <button type="button" id="history-export-csv-button" class="ghost-button">导出 CSV</button>
         </div>
 
         <div id="queue-list" class="list"></div>
@@ -178,22 +182,24 @@
 
       <section class="panel search-panel">
         <div class="panel-head">
-          <p class="panel-tag">Local Search</p>
+          <div>
+            <p class="panel-tag">Local Search</p>
+            <h2 class="panel-title">搜索</h2>
+          </div>
           <button type="button" id="follow-browse-toggle" class="secondary-button follow-browse-toggle" aria-pressed="false">
             关注浏览
           </button>
         </div>
-        <form id="search-form" class="request-form">
+        <form id="search-form" class="request-form search-form">
           <input
             id="search-query"
             type="text"
             placeholder="搜索本地歌曲目录"
             autocomplete="off"
           />
-          <div class="action-row action-row-single">
-            <button type="submit" id="search-button" class="primary-button">搜索</button>
-          </div>
+          <button type="submit" id="search-button" class="primary-button">搜索</button>
         </form>
+        <p id="search-message" class="message search-message" role="status"></p>
         <div id="search-results" class="search-results hidden"></div>
         <div id="follow-browse-view" class="follow-browser hidden">
           <div id="follow-up-list-view">
@@ -224,7 +230,10 @@
 
       <section class="panel gatcha-panel">
         <div class="panel-head">
-          <p class="panel-tag">Gatcha Draw</p>
+          <div>
+            <p class="panel-tag">Gatcha Draw</p>
+            <h2 class="panel-title">试试运气</h2>
+          </div>
           <button type="button" id="gatcha-uid-toggle" class="secondary-button gatcha-uid-toggle" aria-pressed="false">
             添加 UID
           </button>
@@ -238,8 +247,8 @@
         <div id="gatcha-result-view" class="gatcha-content hidden">
           <p class="gatcha-label">运气不错，抽到了：</p>
           <h3 id="gatcha-candidate-title">歌曲标题加载中...</h3>
-          <div class="action-row">
-            <button type="button" id="gatcha-confirm-button" class="primary-button">确定点歌</button>
+          <div class="action-row gatcha-actions">
+            <button type="button" id="gatcha-confirm-button" class="primary-button">确认点歌</button>
             <button type="button" id="gatcha-retry-button" class="secondary-button">重新再来</button>
           </div>
         </div>
@@ -358,7 +367,7 @@
           </div>
         </div>
         <div class="history-actions">
-          <button type="button" data-action="history-tail" class="primary-button">再点一次</button>
+          <button type="button" data-action="history-tail" class="primary-button">点歌</button>
           <button type="button" data-action="history-next" class="secondary-button">顶歌</button>
         </div>
       </article>

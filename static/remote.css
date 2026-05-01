@@ -326,6 +326,12 @@ h1 {
   line-height: 1.15;
 }
 
+.panel-title {
+  margin-top: 6px;
+  font-size: 22px;
+  line-height: 1.15;
+}
+
 .muted,
 .message,
 .queue-note,
@@ -408,9 +414,7 @@ h1 {
 }
 
 .remote-shell.layout-mode-basic .search-panel,
-.remote-shell.layout-mode-basic .gatcha-panel,
-.remote-shell.layout-mode-basic #remote-av-sync-panel,
-.remote-shell.layout-mode-basic #remote-volume-panel {
+.remote-shell.layout-mode-basic .gatcha-panel {
   display: none !important;
 }
 
@@ -455,24 +459,42 @@ h1 {
   text-align: right;
   color: var(--ink);
   outline: none;
+  box-shadow: none;
+}
+
+.remote-input-wrap:focus-within {
+  border-color: rgba(202, 91, 60, 0.42);
+  box-shadow: 0 0 0 4px rgba(202, 91, 60, 0.1);
+}
+
+.remote-input-wrap input:focus {
+  outline: none;
+  border: none;
+  box-shadow: none;
 }
 
 .remote-step-button,
+.remote-reset-button,
 .remote-mute-button {
   min-height: 42px;
   border-radius: 14px;
   font-weight: 700;
-  box-shadow: 0 10px 20px rgba(79, 56, 39, 0.08);
+  border: 1px solid rgba(67, 53, 41, 0.08);
+  box-shadow: none;
 }
 
 .remote-step-button:hover,
+.remote-reset-button:hover,
 .remote-mute-button:hover {
-  box-shadow: 0 12px 24px rgba(202, 91, 60, 0.12);
+  background: rgba(255, 255, 255, 0.95);
+  border-color: rgba(202, 91, 60, 0.22);
+  box-shadow: none;
 }
 
 .remote-mute-button.is-muted {
   background: var(--accent);
   color: white;
+  border-color: rgba(163, 54, 33, 0.38);
 }
 
 .remote-volume-slider {
@@ -561,18 +583,56 @@ h1 {
 }
 
 #remote-av-sync-panel .remote-setting-controls {
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  align-items: center;
+}
+
+#remote-av-sync-panel .remote-step-button,
+#remote-av-sync-panel .remote-reset-button {
+  width: 100%;
+  min-width: 0;
+  padding-inline: 8px;
+  border: 1px solid rgba(67, 53, 41, 0.08);
+}
+
+#remote-av-sync-panel .remote-step-button:hover,
+#remote-av-sync-panel .remote-reset-button:hover,
+#remote-volume-panel .remote-mute-button:hover {
+  border-color: rgba(202, 91, 60, 0.22);
+}
+
+#remote-av-sync-panel .remote-reset-button {
+  grid-column: 1;
+}
+
+#remote-av-sync-panel .remote-input-wrap {
+  grid-column: 2 / -1;
+  width: 100%;
+  justify-content: center;
 }
 
 #remote-volume-panel .remote-setting-controls {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: 42px minmax(0, 1fr) auto;
   gap: 12px;
   align-items: center;
 }
 
 #remote-volume-panel .remote-mute-button {
-  min-width: 88px;
+  width: 42px;
+  min-width: 42px;
+  padding-inline: 0;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(67, 53, 41, 0.08);
+  font-size: 18px;
+  line-height: 1;
+}
+
+#remote-volume-panel .remote-mute-button.is-muted {
+  border-color: rgba(163, 54, 33, 0.38);
 }
 
 #remote-volume-panel .remote-volume-slider {
@@ -587,35 +647,38 @@ h1 {
 }
 
 .player-control-row button {
+  border: 1px solid rgba(67, 53, 41, 0.08);
   min-height: 42px;
   padding-inline: 10px;
   transition:
-    transform 0.14s ease,
-    box-shadow 0.14s ease,
+    border-color 0.18s ease,
     background 0.18s ease,
     color 0.18s ease,
     opacity 0.18s ease;
 }
 
+.player-control-row button:hover {
+  background: rgba(255, 255, 255, 0.95);
+  border-color: rgba(202, 91, 60, 0.22);
+}
+
 .player-control-row button:active {
-  transform: scale(0.96);
+  transform: none;
 }
 
 .player-control-row .ghost-button,
 .player-control-row .primary-button {
-  box-shadow: 0 10px 20px rgba(79, 56, 39, 0.08);
+  box-shadow: none;
 }
 
 .player-control-row .ghost-button:active,
 .player-control-row .primary-button:active {
-  box-shadow: 0 4px 10px rgba(79, 56, 39, 0.12);
+  box-shadow: none;
 }
 
 .player-control-row button.is-pending {
-  transform: scale(0.97);
-  box-shadow:
-    0 0 0 3px rgba(202, 91, 60, 0.14),
-    0 10px 22px rgba(79, 56, 39, 0.12);
+  transform: none;
+  box-shadow: 0 0 0 3px rgba(202, 91, 60, 0.14);
 }
 
 .player-control-row button:disabled {
@@ -631,9 +694,7 @@ h1 {
 .player-control-row .primary-button.is-paused {
   background: rgba(255, 255, 255, 0.9);
   color: var(--accent-deep);
-  box-shadow:
-    inset 0 0 0 1px rgba(202, 91, 60, 0.24),
-    0 10px 20px rgba(79, 56, 39, 0.08);
+  box-shadow: inset 0 0 0 1px rgba(202, 91, 60, 0.24);
 }
 
 .player-control-hint {
@@ -836,6 +897,10 @@ h1 {
   gap: 10px;
 }
 
+.request-panel .requester-row {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .requester-row-button {
   width: auto;
   min-height: 48px;
@@ -854,6 +919,12 @@ textarea {
   outline: none;
 }
 
+.request-panel textarea {
+  height: 72px;
+  min-height: 72px;
+  line-height: 1.45;
+}
+
 input {
   width: 100%;
   min-height: 48px;
@@ -864,7 +935,13 @@ input {
   outline: none;
 }
 
-input:focus {
+/* input:not([type="range"]):focus {
+  border-color: rgba(202, 91, 60, 0.42);
+  box-shadow: 0 0 0 4px rgba(202, 91, 60, 0.1);
+} */
+.form-input:focus,
+.form-textarea:focus {
+  outline: none;
   border-color: rgba(202, 91, 60, 0.42);
   box-shadow: 0 0 0 4px rgba(202, 91, 60, 0.1);
 }
@@ -905,6 +982,16 @@ select:disabled {
   grid-template-columns: 1fr;
 }
 
+.search-form {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+}
+
+.search-form .primary-button {
+  min-height: 48px;
+  white-space: nowrap;
+}
+
 .primary-button,
 .secondary-button,
 .ghost-button,
@@ -931,7 +1018,7 @@ select:disabled {
   border: 1.5px solid rgba(202, 91, 60, 0.58);
   background: rgba(202, 91, 60, 0.1);
   color: var(--accent-deep);
-  box-shadow: 0 8px 18px rgba(202, 91, 60, 0.08);
+  box-shadow: none;
 }
 
 .primary-button:disabled,
@@ -1042,6 +1129,29 @@ select:disabled {
   display: grid;
   gap: 10px;
   margin-top: 12px;
+  max-height: clamp(220px, 42vh, 460px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 4px;
+  scrollbar-gutter: stable;
+}
+
+.search-results::-webkit-scrollbar {
+  width: 8px;
+}
+
+.search-results::-webkit-scrollbar-track {
+  background: rgba(67, 53, 41, 0.05);
+  border-radius: 999px;
+}
+
+.search-results::-webkit-scrollbar-thumb {
+  background: rgba(143, 49, 29, 0.24);
+  border-radius: 999px;
+}
+
+.search-results::-webkit-scrollbar-thumb:hover {
+  background: rgba(143, 49, 29, 0.36);
 }
 
 .search-result-item {
@@ -1053,6 +1163,15 @@ select:disabled {
   border-radius: 18px;
   background: rgba(255, 255, 255, 0.72);
   border: 1px solid rgba(67, 53, 41, 0.08);
+}
+
+.search-result-item > div {
+  min-width: 0;
+}
+
+.search-result-item .primary-button {
+  justify-self: end;
+  white-space: nowrap;
 }
 
 .search-result-title {
@@ -1079,6 +1198,10 @@ select:disabled {
   display: grid;
   gap: 12px;
   text-align: center;
+}
+
+.gatcha-actions {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .gatcha-uid-toggle {
@@ -1233,7 +1356,11 @@ select:disabled {
 }
 
 .history-item {
-  grid-template-columns: minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) 76px;
+}
+
+.history-main {
+  min-width: 0;
 }
 
 .queue-title,
@@ -1255,6 +1382,22 @@ select:disabled {
   gap: 10px;
   font-size: 13px;
   line-height: 1.4;
+}
+
+.history-item .history-actions {
+  grid-template-columns: 1fr;
+  gap: 8px;
+  width: 76px;
+  justify-self: end;
+}
+
+.history-item .history-actions button {
+  width: 100%;
+  min-width: 0;
+  min-height: 36px;
+  padding: 8px 10px;
+  border-radius: 14px;
+  line-height: 1;
 }
 
 .queue-item.ready .queue-state {
@@ -1283,19 +1426,46 @@ select:disabled {
   }
 
   .action-row,
-  .history-actions,
-  .history-export-row,
-  .view-toggle,
-  .player-control-row {
+  .history-actions {
     grid-template-columns: 1fr;
+  }
+
+  .view-toggle {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .history-export-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .history-export-source {
+    grid-column: 1 / -1;
+  }
+
+  .player-control-row {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .player-control-row button[data-control-action="next-track"] {
+    grid-column: 1 / -1;
   }
 
   .queue-item {
     grid-template-columns: 1fr;
   }
 
+  .search-form,
   .search-result-item {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .search-results {
+    max-height: clamp(200px, 46vh, 420px);
+  }
+
+  .gatcha-actions {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .queue-state {
@@ -1319,26 +1489,22 @@ select:disabled {
   }
 
   #remote-av-sync-panel .remote-setting-controls {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    grid-template-areas:
-      "neg200 neg50"
-      "input input"
-      "pos50 pos200";
-    gap: 12px;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 10px;
     align-items: stretch;
   }
 
-  #remote-av-sync-panel .remote-step-button {
+  #remote-av-sync-panel .remote-step-button,
+  #remote-av-sync-panel .remote-reset-button {
     width: 100%;
-    min-height: 48px;
+    min-height: 42px;
     padding-inline: 12px;
   }
 
   #remote-av-sync-panel .remote-input-wrap {
-    grid-area: input;
+    grid-column: 2 / -1;
     width: 100%;
-    min-height: 48px;
+    min-height: 42px;
     justify-content: center;
     padding: 0 16px;
   }
@@ -1348,31 +1514,21 @@ select:disabled {
     font-size: 18px;
   }
 
-  #remote-av-sync-panel [data-av-step="-200"] {
-    grid-area: neg200;
-  }
-
-  #remote-av-sync-panel [data-av-step="-50"] {
-    grid-area: neg50;
-  }
-
-  #remote-av-sync-panel [data-av-step="50"] {
-    grid-area: pos50;
-  }
-
-  #remote-av-sync-panel [data-av-step="200"] {
-    grid-area: pos200;
-  }
-
   #remote-volume-panel .remote-setting-controls {
-    grid-template-columns: 1fr;
-    gap: 14px;
-    align-items: stretch;
+    grid-template-columns: 42px minmax(0, 1fr) auto;
+    gap: 10px;
+    align-items: center;
   }
 
   #remote-volume-panel .remote-mute-button {
-    width: 100%;
-    min-height: 48px;
+    width: 42px;
+    min-width: 42px;
+    min-height: 42px;
+    padding-inline: 0;
+    display: grid;
+    place-items: center;
+    font-size: 18px;
+    line-height: 1;
   }
 
   #remote-volume-panel .remote-volume-slider {
@@ -1380,8 +1536,8 @@ select:disabled {
   }
 
   #remote-volume-panel .remote-volume-value {
-    min-width: 0;
-    text-align: left;
+    min-width: 44px;
+    text-align: right;
     font-size: 16px;
   }
 }
