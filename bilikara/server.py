@@ -526,7 +526,13 @@ class BilikaraHandler(BaseHTTPRequestHandler):
             return
         if route == "/api/app/update":
             try:
-                self._write_json({"ok": True, "data": check_for_update()})
+                include_preview = str(query.get("include_preview", [""])[0]).lower() in {
+                    "1",
+                    "true",
+                    "yes",
+                    "on",
+                }
+                self._write_json({"ok": True, "data": check_for_update(include_preview=include_preview)})
             except Exception as e:
                 self._write_json({"ok": False, "error": str(e)}, status=HTTPStatus.BAD_GATEWAY)
             return

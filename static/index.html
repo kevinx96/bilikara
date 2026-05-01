@@ -174,10 +174,11 @@
                   重新生成二维码
                 </button>
               </div>
-              <div class="cache-panel-row cache-panel-mode-row">
+              <!-- LEGACY: 在线外挂模式暂时下线，保留元素 id 仅避免旧脚本引用失效。 -->
+              <div class="cache-panel-row cache-panel-mode-row hidden" aria-hidden="true">
                 <div>
                   <p class="cache-panel-label">播放模式</p>
-                  <p class="cache-panel-hint">⚠️在线外挂仅作为备用</p>
+                  <p class="cache-panel-hint">本地缓存</p>
                 </div>
                 <div class="cache-mode-control">
                   <span id="playback-mode-current">本地缓存</span>
@@ -228,16 +229,25 @@
               <div class="cache-panel-row cache-panel-update-row">
                 <div>
                   <p class="cache-panel-label">应用更新</p>
-                  <p class="cache-panel-hint">从 GitHub Releases 获取新版本</p>
+                  <p class="cache-panel-hint">默认检查正式版</p>
                 </div>
-                <button
-                  type="button"
-                  class="toolbar-button cache-update-button"
-                  id="update-check-button"
-                  title="检查 bilikara 新版本"
-                >
-                  检查更新
-                </button>
+                <div class="cache-update-control">
+                  <label class="cache-preview-field" for="update-preview-checkbox" title="同时检查预览版 Release">
+                    <span>预览版</span>
+                    <input id="update-preview-checkbox" type="checkbox" />
+                    <span class="cache-preview-switch" aria-hidden="true">
+                      <span class="cache-preview-switch-thumb"></span>
+                    </span>
+                  </label>
+                  <button
+                    type="button"
+                    class="toolbar-button cache-update-button"
+                    id="update-check-button"
+                    title="检查 bilikara 新版本"
+                  >
+                    检查更新
+                  </button>
+                </div>
               </div>
             </div>
           </div>
@@ -648,7 +658,7 @@
             <p class="section-tag">Part Binding</p>
             <h2>选择分P绑定</h2>
           </div>
-          <button type="button" id="binding-modal-close" class="banner-close" aria-label="关闭">x</button>
+          <button type="button" id="binding-modal-close" class="banner-close" aria-label="关闭">×</button>
         </div>
         <p class="selection-modal-text" id="binding-modal-text">请选择要下载的视频分P和音频分P。</p>
         <div class="selection-modal-grid">

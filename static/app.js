@@ -13,11 +13,13 @@ const playerClickDelayMs = 220;
 const playerControlsAutoHideMs = 5000;
 const defaultSongAdvanceDelaySeconds = 3;
 const maxSongAdvanceDelaySeconds = 30;
+const appUpdateCheckTimeoutMs = 10000;
 const storageKeys = {
   playerVolume: "bilikara.player.volume",
   playerMuted: "bilikara.player.muted",
   avOffsetMs: "bilikara.player.av_offset_ms",
   layoutMode: "bilikara.layout.mode",
+  updatePreview: "bilikara.update.preview",
 };
 
 const state = {
@@ -113,6 +115,7 @@ const state = {
   gatchaRefreshSaving: false,
   bbdownLoginRequesting: false,
   updateChecking: false,
+  updatePreviewEnabled: false,
   appToastTimer: null,
   layoutMode: "full",
 };
@@ -145,6 +148,7 @@ const elements = {
   dataResetButton: document.getElementById("data-reset-button"),
   currentCacheRetryButton: document.getElementById("current-cache-retry-button"),
   playerResetButton: document.getElementById("player-reset-button"),
+  updatePreviewCheckbox: document.getElementById("update-preview-checkbox"),
   updateCheckButton: document.getElementById("update-check-button"),
   currentTitle: document.getElementById("current-title"),
   playerPanel: document.querySelector(".player-panel"),
@@ -516,7 +520,7 @@ function showMountedPlayerControls() {
 }
 
 function toggleMountedLocalPlayback() {
-  if (state.data?.playback_mode !== "local" || !state.data?.current_item) {
+  if (frontendPlaybackMode(state.data?.playback_mode) !== "local" || !state.data?.current_item) {
     return false;
   }
   const video = activePrimaryVideoElement();
@@ -602,6 +606,7 @@ function hydrateLocalPreferences() {
   );
   state.localPlayerMuted = readLocalBoolean(storageKeys.playerMuted, state.localPlayerMuted);
   state.layoutMode = normalizeLayoutMode(readLocalString(storageKeys.layoutMode, state.layoutMode));
+  state.updatePreviewEnabled = readLocalBoolean(storageKeys.updatePreview, state.updatePreviewEnabled);
 }
 
 function normalizeLayoutMode(value) {
@@ -690,10 +695,11 @@ async function apiPost(url, payload = {}) {
   return data.data;
 }
 
-async function apiGet(url) {
+async function apiGet(url, options = {}) {
   const response = await fetch(url, {
     cache: "no-store",
     headers: clientHeaders(),
+    signal: options.signal,
   });
   const data = await response.json();
   if (!response.ok || !data.ok) {
@@ -1196,13 +1202,14 @@ function render() {
   renderRemoteAccess(data.remote_access);
   renderLayoutMode();
 
-  renderAudioVariantBar(currentItem, data.playback_mode);
-  renderAvSyncControls(data.playback_mode, data.player_settings);
-  renderVolumeControls(data.playback_mode);
+  const playbackMode = frontendPlaybackMode(data.playback_mode);
+  renderAudioVariantBar(currentItem, playbackMode);
+  renderAvSyncControls(playbackMode, data.player_settings);
+  renderVolumeControls(playbackMode);
   applyStoredVolumeToMountedPlayer();
-  renderPlayer(currentItem, data.playback_mode);
+  renderPlayer(currentItem, playbackMode);
   renderPlayerFullscreenButton();
-  applyRemotePlayerControl(data.player_control_command, currentItem, data.playback_mode);
+  applyRemotePlayerControl(data.player_control_command, currentItem, playbackMode);
   renderQueueCurrent(currentItem);
   if (!state.dragItemId) {
     renderPlaylist(data.playlist, data.current_item, data.cache_policy);
@@ -1551,7 +1558,16 @@ function renderCacheSettings(bbdown, ffmpeg, cachePolicy) {
   setTextContent(elements.cacheUsageDetail, cacheUsageDetail);
   renderCacheSlider(cachePolicy);
   renderCachePolicyControls(cachePolicy);
+  renderUpdatePreviewControl();
   syncCachePanelVisibility();
+}
+
+function renderUpdatePreviewControl() {
+  if (!elements.updatePreviewCheckbox) {
+    return;
+  }
+  elements.updatePreviewCheckbox.checked = state.updatePreviewEnabled;
+  elements.updatePreviewCheckbox.disabled = state.updateChecking;
 }
 
 function renderPlaybackRepairControls(currentItem) {
@@ -1674,8 +1690,12 @@ function aggregateToolStatusState(bbdown, ffmpeg) {
   return "loading";
 }
 
-function formatPlaybackMode(mode) {
-  return mode === "online" ? "在线外挂" : "本地缓存";
+function frontendPlaybackMode(_mode) {
+  return "local";
+}
+
+function formatPlaybackMode(_mode) {
+  return "本地缓存";
 }
 
 function renderCacheSlider(cachePolicy) {
@@ -2209,7 +2229,7 @@ function syncSplitPlayerVolumeFromVideo(video, audio) {
     state.localPlayerVolume = nextVolume;
     state.localPlayerMuted = nextMuted;
     persistLocalVolumePreferences();
-    renderVolumeControls(state.data?.playback_mode || "local");
+    renderVolumeControls(frontendPlaybackMode(state.data?.playback_mode));
   }
 
   if (Math.abs(audio.volume - state.localPlayerVolume) > 0.001) {
@@ -2457,7 +2477,7 @@ async function setLocalPlayerVolume(nextVolume, { unmute = true } = {}) {
   }
   persistLocalVolumePreferences();
   applyStoredVolumeToMountedPlayer();
-  renderVolumeControls(state.data?.playback_mode || "local");
+  renderVolumeControls(frontendPlaybackMode(state.data?.playback_mode));
   try {
     const nextData = await apiPost("/api/player/volume", {
       volume_percent: Math.round(normalizedVolume * 100),
@@ -2477,7 +2497,7 @@ async function setLocalPlayerVolume(nextVolume, { unmute = true } = {}) {
     state.localPlayerMuted = previousMuted;
     persistLocalVolumePreferences();
     applyStoredVolumeToMountedPlayer();
-    renderVolumeControls(state.data?.playback_mode || "local");
+    renderVolumeControls(frontendPlaybackMode(state.data?.playback_mode));
     setAppMessage(error.message, true);
   }
 }
@@ -2488,7 +2508,7 @@ async function toggleLocalPlayerMute() {
   state.localPlayerMuted = !state.localPlayerMuted;
   persistLocalVolumePreferences();
   applyStoredVolumeToMountedPlayer();
-  renderVolumeControls(state.data?.playback_mode || "local");
+  renderVolumeControls(frontendPlaybackMode(state.data?.playback_mode));
   try {
     const nextData = await apiPost("/api/player/volume", {
       volume_percent: Math.round(state.localPlayerVolume * 100),
@@ -2507,7 +2527,7 @@ async function toggleLocalPlayerMute() {
     state.localPlayerMuted = previousMuted;
     persistLocalVolumePreferences();
     applyStoredVolumeToMountedPlayer();
-    renderVolumeControls(state.data?.playback_mode || "local");
+    renderVolumeControls(frontendPlaybackMode(state.data?.playback_mode));
     setAppMessage(error.message, true);
   }
 }
@@ -2526,7 +2546,7 @@ function scheduleAudioVariantSwitchUnlock() {
     state.audioVariantSwitchUnlockAt = 0;
     state.audioVariantSwitchTimer = null;
     if (state.data) {
-      renderAudioVariantBar(state.data.current_item, state.data.playback_mode);
+      renderAudioVariantBar(state.data.current_item, frontendPlaybackMode(state.data.playback_mode));
     }
   }, remainingMs);
 }
@@ -2717,6 +2737,8 @@ function renderPlayer(currentItem, playbackMode) {
     return;
   }
 
+  // LEGACY: online embed playback is kept for reference, but normal frontend
+  // rendering now passes only the local mode.
   if (playbackMode === "online") {
     elements.playerFrame.innerHTML = `
       <iframe
@@ -4041,12 +4063,18 @@ async function checkAppUpdate(event) {
   const button = elements.updateCheckButton;
   const point = anchorPointForEvent(event, button || elements.cacheSettings);
   state.updateChecking = true;
+  renderUpdatePreviewControl();
   if (button) {
     button.disabled = true;
     button.textContent = "检查中";
   }
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  const timeoutId = controller
+    ? window.setTimeout(() => controller.abort(), appUpdateCheckTimeoutMs)
+    : null;
   try {
-    const result = await apiGet("/api/app/update");
+    const query = state.updatePreviewEnabled ? "?include_preview=1" : "";
+    const result = await apiGet(`/api/app/update${query}`, { signal: controller?.signal });
     if (result?.update_available || result?.switch_to_release_available) {
       const fallbackMessage = result?.switch_to_release_available
         ? "当前为开发版或非正式版。是否打开 GitHub Releases 下载最新正式版？"
@@ -4064,9 +4092,16 @@ async function checkAppUpdate(event) {
     }
     setAppMessage(result?.message || "当前已是最新版本。");
   } catch (error) {
-    setAppMessage(error.message, true);
+    const message = error?.name === "AbortError"
+      ? "连接 GitHub Releases 超时，请稍后重试。"
+      : error?.message || "检查更新失败，请稍后重试。";
+    setAppMessage(message, true);
   } finally {
+    if (timeoutId !== null) {
+      window.clearTimeout(timeoutId);
+    }
     state.updateChecking = false;
+    renderUpdatePreviewControl();
     if (button) {
       button.disabled = false;
       button.textContent = "检查更新";
@@ -4266,7 +4301,7 @@ async function setAvOffset(offsetMs) {
   }
   syncMountedLocalPlayer(true);
   state.avOffsetSaving = true;
-  renderAvSyncControls(state.data?.playback_mode, state.data?.player_settings);
+  renderAvSyncControls(frontendPlaybackMode(state.data?.playback_mode), state.data?.player_settings);
   try {
     const nextData = await apiPost("/api/player/av-offset", { offset_ms: boundedOffsetMs });
     if (requestSeq !== state.avOffsetSaveSeq) {
@@ -4287,7 +4322,7 @@ async function setAvOffset(offsetMs) {
   } finally {
     if (requestSeq === state.avOffsetSaveSeq) {
       state.avOffsetSaving = false;
-      renderAvSyncControls(state.data?.playback_mode, state.data?.player_settings);
+      renderAvSyncControls(frontendPlaybackMode(state.data?.playback_mode), state.data?.player_settings);
     }
   }
 }
@@ -4520,6 +4555,12 @@ elements.cacheHiresCheckbox?.addEventListener("change", async (event) => {
   );
 });
 
+elements.updatePreviewCheckbox?.addEventListener("change", (event) => {
+  state.updatePreviewEnabled = Boolean(event.target.checked);
+  writeLocalPreference(storageKeys.updatePreview, state.updatePreviewEnabled);
+  renderUpdatePreviewControl();
+});
+
 elements.avSyncPanel?.addEventListener("click", async (event) => {
   const button = event.target.closest("button[data-step]");
   if (!button) {
@@ -4636,14 +4677,15 @@ elements.queueCurrentRetry.addEventListener("click", async () => {
   }
 });
 
+// LEGACY: the online embed mode endpoint still exists server-side, but the
+// frontend no longer exposes a switch into it.
 elements.modeSwitch?.addEventListener("click", async (event) => {
   const button = event.target.closest("button");
   if (!button) {
     return;
   }
-  const nextMode = state.data?.playback_mode === "online" ? "local" : "online";
   try {
-    state.data = await apiPost("/api/mode", { mode: nextMode });
+    state.data = await apiPost("/api/mode", { mode: "local" });
     render();
   } catch (error) {
     setAppMessage(error.message, true);
@@ -4709,7 +4751,7 @@ elements.audioVariantBar.addEventListener("click", async (event) => {
   if (toggleButton) {
     state.audioVariantBarExpanded = !state.audioVariantBarExpanded;
     if (state.data?.current_item) {
-      renderAudioVariantBar(state.data.current_item, state.data.playback_mode);
+      renderAudioVariantBar(state.data.current_item, frontendPlaybackMode(state.data.playback_mode));
     }
     return;
   }
@@ -4780,7 +4822,7 @@ elements.audioVariantBar.addEventListener("click", async (event) => {
   const video = elements.playerFrame.querySelector("video");
   state.audioVariantSwitchInFlight = true;
   state.audioVariantSwitchUnlockAt = Date.now() + audioVariantSwitchDebounceMs;
-  renderAudioVariantBar(currentItem, state.data?.playback_mode);
+  renderAudioVariantBar(currentItem, frontendPlaybackMode(state.data?.playback_mode));
   state.pendingPlaybackRestore = {
     itemId: currentItem.id,
     variantId: nextVariantId,

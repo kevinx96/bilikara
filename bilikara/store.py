@@ -52,9 +52,8 @@ class PlaylistStore:
         self.session_history: list[HistoryEntry] = []
         self.session_users: list[str] = []
         self.session_started_at = time.time()
-        self.session_played_file = (
-            self.session_archive_dir
-            / f"played-{self._session_file_label(self.session_started_at)}.json"
+        self.session_played_file = self._session_played_file_for_timestamp(
+            self.session_started_at
         )
         self.session_played: list[SessionPlayedEntry] = []
         self.updated_at = time.time()
@@ -378,6 +377,7 @@ class PlaylistStore:
                 for item in playlist_payload
             ]
             self.current_item_started = False
+            self._restore_session_played_from_backup_unlocked(payload)
             self._rebuild_cycle_items_unlocked()
             self._touch(persist_backup=False)
             return True
@@ -387,6 +387,8 @@ class PlaylistStore:
             existed = self.backup_file.exists() or self.current_item is not None or bool(self.playlist)
             self.current_item = None
             self.playlist = []
+            if existed:
+                self._start_new_session_played_unlocked()
             self.backup_file.unlink(missing_ok=True)
             self._touch(persist_backup=False)
             return existed
@@ -686,9 +688,74 @@ class PlaylistStore:
                 self._backup_item_payload(self.current_item) if self.current_item else None
             ),
             "playlist": [self._backup_item_payload(item) for item in self.playlist],
+            "played_session": {
+                "file": self.session_played_file.name,
+                "session_started_at": self.session_started_at,
+            },
             "updated_at": self.updated_at,
         }
         self._write_json_payload_unlocked(self.backup_file, payload)
+
+    def _restore_session_played_from_backup_unlocked(self, payload: dict[str, Any]) -> bool:
+        session_payload = payload.get("played_session")
+        if not isinstance(session_payload, dict):
+            self._start_new_session_played_unlocked()
+            return False
+
+        filename = Path(str(session_payload.get("file") or "").strip()).name
+        if not filename:
+            self._start_new_session_played_unlocked()
+            return False
+
+        candidate = self.session_archive_dir / filename
+        played_payload = self._read_json_payload_unlocked(candidate)
+        if not played_payload:
+            self._start_new_session_played_unlocked()
+            return False
+
+        entries: list[SessionPlayedEntry] = []
+        for entry_payload in played_payload.get("items") or []:
+            if not isinstance(entry_payload, dict):
+                continue
+            try:
+                entries.append(SessionPlayedEntry.from_dict(dict(entry_payload)))
+            except TypeError:
+                continue
+
+        self.session_played_file = candidate
+        self.session_started_at = self._session_started_at_from_payload(
+            played_payload,
+            session_payload,
+        )
+        self.session_played = entries
+        return True
+
+    def _start_new_session_played_unlocked(self) -> None:
+        self.session_started_at = time.time()
+        self.session_played_file = self._session_played_file_for_timestamp(
+            self.session_started_at
+        )
+        self.session_played = []
+
+    def _session_played_file_for_timestamp(self, timestamp: float) -> Path:
+        return (
+            self.session_archive_dir
+            / f"played-{self._session_file_label(timestamp)}.json"
+        )
+
+    @staticmethod
+    def _session_started_at_from_payload(
+        played_payload: dict[str, Any],
+        backup_payload: dict[str, Any],
+    ) -> float:
+        for payload in (played_payload, backup_payload):
+            try:
+                timestamp = float(payload.get("session_started_at") or 0.0)
+            except (TypeError, ValueError):
+                timestamp = 0.0
+            if timestamp > 0:
+                return timestamp
+        return time.time()
 
     def _touch(self, *, persist_backup: bool) -> None:
         self.updated_at = time.time()
@@ -769,7 +836,7 @@ class PlaylistStore:
 
             player_payload = self._read_json_payload_unlocked(self.player_state_file)
             if player_payload:
-                self.playback_mode = str(player_payload.get("playback_mode") or "local")
+                self.playback_mode = self._load_playback_mode(player_payload)
                 self.av_offset_ms = self._load_av_offset_ms(player_payload)
                 self.volume_percent = self._load_volume_percent(player_payload)
                 self.is_muted = self._load_is_muted(player_payload)
@@ -799,6 +866,12 @@ class PlaylistStore:
         if state_file.name == "state.json":
             return state_file.with_name(default_name)
         return state_file.with_name(f"{state_file.stem}-{suffix}.json")
+
+    @staticmethod
+    def _load_playback_mode(_payload: dict[str, Any]) -> str:
+        # Online embed playback is deprecated in the frontend. Keep the
+        # server-side mode field for compatibility, but never restore it.
+        return "local"
 
     @staticmethod
     def _load_av_offset_ms(payload: dict[str, Any]) -> int:

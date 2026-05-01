@@ -923,13 +923,14 @@ function render() {
   if (!data) {
     return;
   }
+  const playbackMode = frontendPlaybackMode(data.playback_mode);
 
   renderRequesterSelect(data.session_users || []);
-  renderCurrentItem(data.current_item, data.playback_mode);
-  renderAudioVariantBar(data.current_item, data.playback_mode);
-  renderPlayerControls(data.current_item, data.playback_mode);
-  renderRemoteAvSyncControls(data.playback_mode, data.player_settings);
-  renderRemoteVolumeControls(data.playback_mode, data.player_settings);
+  renderCurrentItem(data.current_item, playbackMode);
+  renderAudioVariantBar(data.current_item, playbackMode);
+  renderPlayerControls(data.current_item, playbackMode);
+  renderRemoteAvSyncControls(playbackMode, data.player_settings);
+  renderRemoteVolumeControls(playbackMode, data.player_settings);
   renderRemoteAccess(data.remote_access);
   renderFollowBrowse();
   renderListHeader(data.playlist || [], data.history || []);
@@ -938,6 +939,10 @@ function render() {
   syncListView();
   renderLayoutMode();
   renderGatchaUidView();
+}
+
+function frontendPlaybackMode(_mode) {
+  return "local";
 }
 
 function renderRequesterSelect(sessionUsers) {
@@ -973,7 +978,7 @@ function renderCurrentItem(current, playbackMode) {
     const requesterText = requesterBadgeText(current.requester_name);
     elements.currentRequester.textContent = requesterText;
     elements.currentRequester.classList.toggle("hidden", !requesterText);
-    const modeLabel = playbackMode === "online" ? "在线外挂" : "本地缓存";
+    const modeLabel = "本地缓存";
     const cacheText = current.cache_message || "等待缓存";
     elements.currentMeta.textContent = `${modeLabel} · ${cacheText}`;
     return;
@@ -1086,7 +1091,7 @@ function scheduleAudioVariantSwitchUnlock() {
     state.audioVariantSwitchUnlockAt = 0;
     state.audioVariantSwitchTimer = null;
     if (state.data) {
-      renderAudioVariantBar(state.data.current_item, state.data.playback_mode);
+      renderAudioVariantBar(state.data.current_item, frontendPlaybackMode(state.data.playback_mode));
     }
   }, remainingMs);
 }
@@ -1442,7 +1447,7 @@ async function setRemoteAvOffset(offsetMs) {
   if (elements.remoteAvOffsetInput) {
     elements.remoteAvOffsetInput.value = String(boundedOffsetMs);
   }
-  renderRemoteAvSyncControls(state.data?.playback_mode, state.data?.player_settings);
+  renderRemoteAvSyncControls(frontendPlaybackMode(state.data?.playback_mode), state.data?.player_settings);
   try {
     const nextData = await apiPost("/api/player/av-offset", { offset_ms: boundedOffsetMs });
     if (requestSeq !== state.remoteAvOffsetSaveSeq) {
@@ -1456,7 +1461,7 @@ async function setRemoteAvOffset(offsetMs) {
     state.remoteLocalAvOffsetMs = null;
     state.remoteAvOffsetEchoSuppressUntil = 0;
     setFormMessage(error.message, true);
-    renderRemoteAvSyncControls(state.data?.playback_mode, state.data?.player_settings);
+    renderRemoteAvSyncControls(frontendPlaybackMode(state.data?.playback_mode), state.data?.player_settings);
   }
 }
 
@@ -1483,7 +1488,7 @@ async function commitRemoteVolumeSettings(payload, requestSeq) {
     state.remoteLocalMuted = null;
     state.remoteSettingsEchoSuppressUntil = 0;
     setFormMessage(error.message, true);
-    renderRemoteVolumeControls(state.data?.playback_mode, state.data?.player_settings);
+    renderRemoteVolumeControls(frontendPlaybackMode(state.data?.playback_mode), state.data?.player_settings);
   }
 }
 
@@ -1504,7 +1509,7 @@ async function setRemoteVolumeSettings({ volumePercent, isMuted } = {}, options 
   }
 
   const requestSeq = markRemoteVolumeWrite(payload);
-  renderRemoteVolumeControls(state.data?.playback_mode, state.data?.player_settings);
+  renderRemoteVolumeControls(frontendPlaybackMode(state.data?.playback_mode), state.data?.player_settings);
   if (options.debounce) {
     clearRemoteVolumeCommitTimer();
     state.remoteVolumeCommitTimer = window.setTimeout(() => {
@@ -1574,7 +1579,7 @@ function renderPlayerControls(currentItem, playbackMode) {
   }
 
   if (playbackMode !== "local") {
-    elements.playerControlHint.textContent = "当前是在线外挂，暂不支持远程控制播放。";
+    elements.playerControlHint.textContent = "当前模式暂不支持远程控制播放。";
     return;
   }
   if (!hasLocalSplitMedia(currentItem)) {
@@ -1840,7 +1845,7 @@ async function addByUrl(url, position = "tail") {
 
 async function sendPlayerControl(action, deltaSeconds = 0) {
   const currentItem = state.data?.current_item;
-  const playbackMode = state.data?.playback_mode;
+  const playbackMode = frontendPlaybackMode(state.data?.playback_mode);
   if (!currentItem || !canRemoteControlPlayer(currentItem, playbackMode)) {
     return;
   }
@@ -1875,7 +1880,7 @@ async function sendPlayerControl(action, deltaSeconds = 0) {
     await fetchState().catch(() => {});
   }
   state.playerControlPendingAction = "";
-  renderPlayerControls(state.data?.current_item, state.data?.playback_mode);
+  renderPlayerControls(state.data?.current_item, frontendPlaybackMode(state.data?.playback_mode));
 }
 
 async function sendPlayerNext() {
@@ -1884,7 +1889,7 @@ async function sendPlayerNext() {
   }
   try {
     state.playerControlPendingAction = "next-track";
-    renderPlayerControls(state.data?.current_item, state.data?.playback_mode);
+    renderPlayerControls(state.data?.current_item, frontendPlaybackMode(state.data?.playback_mode));
     applyStateSnapshot(await apiPost("/api/player/next"));
     setFormMessage("已切到下一首。");
   } catch (error) {
@@ -1892,7 +1897,7 @@ async function sendPlayerNext() {
     await fetchState().catch(() => {});
   }
   state.playerControlPendingAction = "";
-  renderPlayerControls(state.data?.current_item, state.data?.playback_mode);
+  renderPlayerControls(state.data?.current_item, frontendPlaybackMode(state.data?.playback_mode));
 }
 
 function queueNoteText() {
@@ -2160,7 +2165,7 @@ elements.audioVariantBar.addEventListener("click", async (event) => {
   if (toggleButton) {
     state.audioVariantBarExpanded = !state.audioVariantBarExpanded;
     if (state.data?.current_item) {
-      renderAudioVariantBar(state.data.current_item, state.data.playback_mode);
+      renderAudioVariantBar(state.data.current_item, frontendPlaybackMode(state.data.playback_mode));
     }
     return;
   }
@@ -2222,7 +2227,7 @@ elements.audioVariantBar.addEventListener("click", async (event) => {
   try {
     state.audioVariantSwitchInFlight = true;
     state.audioVariantSwitchUnlockAt = Date.now() + audioVariantSwitchDebounceMs;
-    renderAudioVariantBar(currentItem, state.data?.playback_mode);
+    renderAudioVariantBar(currentItem, frontendPlaybackMode(state.data?.playback_mode));
     applyStateSnapshot(await apiPost("/api/player/audio-variant", {
       item_id: currentItem.id,
       variant_id: nextVariantId,

@@ -39,6 +39,21 @@ class PlaylistStoreTest(unittest.TestCase):
     def test_default_mode_is_local(self):
         self.assertEqual(self.store.playback_mode, "local")
 
+    def test_online_mode_from_player_state_restores_as_local(self):
+        player_state_file = self.state_file.parent / "player_state.json"
+        player_state_file.write_text(
+            json.dumps({"playback_mode": "online"}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        restored_store = PlaylistStore(
+            state_file=self.state_file,
+            backup_file=self.backup_file,
+            session_archive_dir=self.session_archive_dir,
+        )
+
+        self.assertEqual(restored_store.playback_mode, "local")
+
     def test_av_offset_persists_in_player_state_file(self):
         self.store.set_av_offset_ms(230)
 
@@ -365,6 +380,53 @@ class PlaylistStoreTest(unittest.TestCase):
         )
 
         self.assertEqual(restored_store.session_played, [])
+
+    def test_restore_backup_continues_existing_played_session_archive(self):
+        self.add_item("a", requester_name="A", song_key="song-a")
+        self.add_item("b", requester_name="B", song_key="song-b")
+        original_played_file = self.store.session_played_file
+        backup_payload = json.loads(self.backup_file.read_text(encoding="utf-8"))
+        self.assertEqual(backup_payload["played_session"]["file"], original_played_file.name)
+
+        restored_store = PlaylistStore(
+            state_file=self.state_file,
+            backup_file=self.backup_file,
+            session_archive_dir=self.session_archive_dir,
+        )
+
+        self.assertTrue(restored_store.restore_backup())
+        self.assertEqual(restored_store.session_played_file, original_played_file)
+        self.assertEqual([entry.item_id for entry in restored_store.session_played], ["a"])
+
+        restored_store.mark_item_playback_started("a")
+        restored_store.advance_to_next()
+
+        payload = json.loads(original_played_file.read_text(encoding="utf-8"))
+        self.assertEqual([entry["item_id"] for entry in payload["items"]], ["a", "b"])
+
+    def test_discard_restored_backup_starts_new_played_session_archive(self):
+        self.add_item("a", requester_name="A", song_key="song-a")
+        original_played_file = self.store.session_played_file
+
+        restored_store = PlaylistStore(
+            state_file=self.state_file,
+            backup_file=self.backup_file,
+            session_archive_dir=self.session_archive_dir,
+        )
+        self.assertTrue(restored_store.restore_backup())
+        self.assertEqual(restored_store.session_played_file, original_played_file)
+
+        with patch("bilikara.store.time.time", return_value=self.store.session_started_at + 60):
+            self.assertTrue(restored_store.discard_backup())
+        self.assertEqual(restored_store.session_played, [])
+        self.assertNotEqual(restored_store.session_played_file, original_played_file)
+
+        restored_store.add_item(self.make_item("c", song_key="song-c"), requester_name="C")
+
+        new_payload = json.loads(restored_store.session_played_file.read_text(encoding="utf-8"))
+        old_payload = json.loads(original_played_file.read_text(encoding="utf-8"))
+        self.assertEqual([entry["item_id"] for entry in new_payload["items"]], ["c"])
+        self.assertEqual([entry["item_id"] for entry in old_payload["items"]], ["a"])
 
     def test_active_duplicate_for_item_matches_current_or_playlist(self):
         first = self.make_item("a", song_key="song-a")

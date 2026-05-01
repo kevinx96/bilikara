@@ -332,11 +332,37 @@ class UpdateRouteTest(unittest.TestCase):
                 "release_url": "https://github.com/VZRXS/bilikara/releases/tag/v0.4.1",
                 "update_available": True,
             },
-        ):
+        ) as update_check:
             handler.do_GET()
 
         self.assertEqual(writes[0]["ok"], True)
         self.assertTrue(writes[0]["data"]["update_available"])
+        update_check.assert_called_once_with(include_preview=False)
+
+    def test_update_check_route_can_include_preview_releases(self):
+        handler = BilikaraHandler.__new__(BilikaraHandler)
+        writes: list[dict] = []
+        context = SimpleNamespace(touch_client=lambda client_id, is_host=True: None)
+
+        handler.path = "/api/app/update?include_preview=1"
+        handler.headers = {}
+        handler._write_json = lambda payload, status=None: writes.append(payload)
+
+        with patch("bilikara.server.CONTEXT", context), patch(
+            "bilikara.server.check_for_update",
+            return_value={
+                "current_version": "v0.4.0",
+                "latest_version": "v0.5.0-preview.1",
+                "release_url": "https://github.com/VZRXS/bilikara/releases/tag/v0.5.0-preview.1",
+                "update_available": True,
+                "include_preview": True,
+            },
+        ) as update_check:
+            handler.do_GET()
+
+        self.assertEqual(writes[0]["ok"], True)
+        self.assertTrue(writes[0]["data"]["include_preview"])
+        update_check.assert_called_once_with(include_preview=True)
 
 
 class PlayerResetRouteTest(unittest.TestCase):
