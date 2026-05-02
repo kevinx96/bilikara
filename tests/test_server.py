@@ -256,11 +256,11 @@ class PlaylistExportRouteTest(unittest.TestCase):
         self.assertEqual(rows[0]["UP 主"], "μ's")
         self.assertEqual(rows[0]["UP 主UID"], "12345")
         self.assertEqual(rows[0]["点歌次数"], "2")
-        self.assertTrue(rows[0]["点歌时间"])
+        self.assertTrue(rows[0]["播放时间"])
         self.assertEqual(rows[0]["视频链接"], "https://www.bilibili.com/video/BV1xx411c7mD?p=1")
         self.assertEqual(rows[0]["原始链接"], "BV1xx411c7mD")
         self.assertEqual(rows[0]["分P/版本"], "P1")
-        self.assertEqual(rows[2]["点歌时间"], "")
+        self.assertEqual(rows[2]["播放时间"], "")
 
     def test_playlist_export_image_route_uses_generated_suffix(self):
         handler = BilikaraHandler.__new__(BilikaraHandler)
