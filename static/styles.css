@@ -1098,6 +1098,10 @@ h2 {
   text-align: center;
 }
 
+.advance-delay-scale {
+  grid-template-columns: repeat(5, 1fr);
+}
+
 .cache-limit-scale span.active {
   color: var(--accent-deep);
   font-weight: 700;

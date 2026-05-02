@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
@@ -128,7 +128,6 @@
                   <p class="cache-panel-hint">调整后立即生效</p>
                 </div>
                 <div class="cache-slider-block">
-                  <strong class="cache-panel-value cache-limit-value" id="cache-limit-value">缓存 3 首</strong>
                   <input
                     id="cache-limit-slider"
                     class="cache-limit-slider"
@@ -185,6 +184,30 @@
                   <button type="button" class="toolbar-button cache-mode-toggle" id="mode-switch">
                     切换
                   </button>
+                </div>
+              </div>
+              <div class="cache-panel-row cache-panel-row-stack">
+                <div>
+                  <p class="cache-panel-label">切歌延迟</p>
+                  <p class="cache-panel-hint">切歌过渡界面的显示时长</p>
+                </div>
+                <div class="cache-slider-block">
+                  <input
+                    id="advance-delay-slider"
+                    class="cache-limit-slider"
+                    type="range"
+                    min="1"
+                    max="5"
+                    step="1"
+                    value="3"
+                  />
+                  <div class="cache-limit-scale advance-delay-scale" id="advance-delay-scale">
+                    <span>1</span>
+                    <span>2</span>
+                    <span>3</span>
+                    <span>4</span>
+                    <span>5</span>
+                  </div>
                 </div>
               </div>
               <div class="cache-panel-row cache-panel-danger-row">

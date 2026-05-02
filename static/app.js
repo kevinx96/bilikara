@@ -43,6 +43,8 @@ const state = {
   historyRenderSignature: "",
   playlistEmptyRenderSignature: "",
   cacheSliderRenderSignature: "",
+  advanceDelaySliderRenderSignature: "",
+  advanceDelaySaving: false,
   cachePolicyControlRenderSignature: "",
   playerFullscreenButtonRenderSignature: "",
   volumeControlsRenderSignature: "",
@@ -154,9 +156,10 @@ const elements = {
   ffmpegStatusRow: document.getElementById("ffmpeg-status-row"),
   bbdownPanelStatusIndicator: document.getElementById("bbdown-panel-status-indicator"),
   ffmpegPanelStatusIndicator: document.getElementById("ffmpeg-panel-status-indicator"),
-  cacheLimitValue: document.getElementById("cache-limit-value"),
   cacheLimitSlider: document.getElementById("cache-limit-slider"),
   cacheLimitScale: document.getElementById("cache-limit-scale"),
+  advanceDelaySlider: document.getElementById("advance-delay-slider"),
+  advanceDelayScale: document.getElementById("advance-delay-scale"),
   cacheQualitySelect: document.getElementById("cache-quality-select"),
   cacheHiresCheckbox: document.getElementById("cache-hires-checkbox"),
   dataResetButton: document.getElementById("data-reset-button"),
@@ -1655,6 +1658,7 @@ function renderCacheSettings(bbdown, ffmpeg, cachePolicy) {
   setTextContent(elements.cacheChipMeta, cacheChipMeta);
   setTextContent(elements.cacheUsageDetail, cacheUsageDetail);
   renderCacheSlider(cachePolicy);
+  renderAdvanceDelaySlider(state.data?.player_settings);
   renderCachePolicyControls(cachePolicy);
   renderUpdatePreviewControl();
   syncCachePanelVisibility();
@@ -1819,7 +1823,6 @@ function renderCacheSlider(cachePolicy) {
   elements.cacheLimitSlider.step = "1";
   elements.cacheLimitSlider.value = String(currentValue);
   elements.cacheLimitSlider.disabled = state.cacheLimitSaving;
-  elements.cacheLimitValue.textContent = `缓存 ${currentValue} 首`;
   updateCacheSliderFill(currentValue, minValue, maxValue);
 
   elements.cacheLimitScale.innerHTML = "";
@@ -1829,6 +1832,41 @@ function renderCacheSlider(cachePolicy) {
     mark.classList.toggle("active", Number(choice) === currentValue);
     elements.cacheLimitScale.appendChild(mark);
   });
+}
+
+function renderAdvanceDelaySlider(playerSettings) {
+  if (!elements.advanceDelaySlider) {
+    return;
+  }
+  const currentValue = currentSongAdvanceDelaySeconds(playerSettings);
+  const signature = JSON.stringify({
+    currentValue,
+    saving: state.advanceDelaySaving,
+  });
+
+  if (signature === state.advanceDelaySliderRenderSignature) {
+    return;
+  }
+  state.advanceDelaySliderRenderSignature = signature;
+
+  elements.advanceDelaySlider.min = "1";
+  elements.advanceDelaySlider.max = "5";
+  elements.advanceDelaySlider.step = "1";
+  elements.advanceDelaySlider.value = String(currentValue);
+  elements.advanceDelaySlider.disabled = state.advanceDelaySaving;
+  updateAdvanceDelaySliderFill(currentValue);
+
+  elements.advanceDelayScale.querySelectorAll("span").forEach((mark) => {
+    mark.classList.toggle("active", Number(mark.textContent || "0") === currentValue);
+  });
+}
+
+function updateAdvanceDelaySliderFill(value) {
+  const min = 1;
+  const max = 5;
+  const current = Number(value);
+  const ratio = max <= min ? 1 : (current - min) / (max - min);
+  elements.advanceDelaySlider.style.setProperty("--slider-progress", `${ratio * 100}%`);
 }
 
 function renderCachePolicyControls(cachePolicy) {
@@ -2099,7 +2137,7 @@ function currentSongAdvanceDelaySeconds(playerSettings = state.data?.player_sett
   if (!Number.isFinite(rawValue)) {
     return defaultSongAdvanceDelaySeconds;
   }
-  return Math.max(0, Math.min(maxSongAdvanceDelaySeconds, Math.round(rawValue)));
+  return Math.max(1, Math.min(maxSongAdvanceDelaySeconds, Math.round(rawValue)));
 }
 
 function queuedNextItem() {
@@ -2232,7 +2270,7 @@ function clearLocalPlayerSeekState() {
 }
 
 function playerDelayOverlay() {
-  return elements.playerFrame?.querySelector(".player-delay-overlay") || null;
+  return elements.playerPanel?.querySelector(".player-delay-overlay") || null;
 }
 
 function ensurePlayerDelayOverlay() {
@@ -2267,7 +2305,7 @@ function ensurePlayerDelayOverlay() {
       <p class="player-delay-total" data-delay-total>\u5171 0 \u9996</p>
     </div>
   `;
-  elements.playerFrame.appendChild(overlay);
+  elements.playerPanel.appendChild(overlay);
   return overlay;
 }
 
@@ -2310,7 +2348,9 @@ function showSongTransitionOverlayForData(data) {
     return;
   }
   const delaySeconds = manualTransitionOverlaySeconds(data);
-  clearLocalAdvanceDelay({ resetInFlight: false });
+  clearLocalAdvanceDelay({ resetInFlight: false, hideOverlay: false });
+  const token = state.localAdvanceDelayToken;
+
   state.localAdvanceOverlayMode = "manual";
   state.localAdvanceOverlayPrimaryItem = primaryItem;
   state.localAdvanceOverlayFollowItems = data.current_item ? playlist : playlist.slice(1);
@@ -2320,7 +2360,9 @@ function showSongTransitionOverlayForData(data) {
   updateLocalAdvanceDelayOverlay();
   state.localAdvanceCountdownTimer = window.setInterval(updateLocalAdvanceDelayOverlay, 250);
   state.localAdvanceDelayTimer = window.setTimeout(() => {
-    clearLocalAdvanceDelay({ resetInFlight: false });
+    if (state.localAdvanceDelayToken === token) {
+      clearLocalAdvanceDelay({ resetInFlight: false });
+    }
   }, state.localAdvanceOverlayDurationMs);
 }
 
@@ -2330,7 +2372,7 @@ function maybeShowSongTransitionOverlay(previousData, nextData, { force = false 
   }
   const previousId = currentItemIdFromData(previousData);
   const nextId = currentItemIdFromData(nextData);
-  if (!nextId || (!force && (!previousData || previousId === nextId))) {
+  if (!nextId || (!force && previousId === nextId)) {
     return;
   }
   const transitionKey = `${nextId}|${Number(nextData.state_revision || 0)}`;
@@ -2434,7 +2476,7 @@ function updateLocalAdvanceDelayOverlay() {
   const progress = Math.max(0, Math.min(1, remainingMs / totalDurationMs));
   overlay.style.setProperty("--delay-ring-offset", String(119.38 * (1 - progress)));
   renderLocalAdvanceDelayQueue(overlay);
-  if (state.localAdvanceDelayDeadline > 0) {
+  if (state.localAdvanceDelayDeadline > 0 && isPlayerPanelFullscreen()) {
     setPlayerDelayOverlayVisible(overlay);
   } else {
     hidePlayerDelayOverlay();
@@ -2450,18 +2492,17 @@ function clearLocalAdvanceDelay({ resetInFlight = false, hideOverlay = true } = 
     window.clearInterval(state.localAdvanceCountdownTimer);
     state.localAdvanceCountdownTimer = null;
   }
-  state.localAdvanceDelayDeadline = 0;
-  state.localAdvanceOverlayDurationMs = 0;
-  state.localAdvanceOverlayMode = "";
-  state.localAdvanceOverlayPrimaryItem = null;
-  state.localAdvanceOverlayFollowItems = null;
-  state.localAdvanceOverlayTotalCount = null;
-  state.localAdvanceDelayItemId = "";
-  state.localAdvanceDelayToken += 1;
-  const overlay = playerDelayOverlay();
-  if (overlay && hideOverlay) {
+  if (hideOverlay) {
+    state.localAdvanceDelayDeadline = 0;
+    state.localAdvanceOverlayDurationMs = 0;
+    state.localAdvanceOverlayMode = "";
+    state.localAdvanceOverlayPrimaryItem = null;
+    state.localAdvanceOverlayFollowItems = null;
+    state.localAdvanceOverlayTotalCount = null;
+    state.localAdvanceDelayItemId = "";
     hidePlayerDelayOverlay();
   }
+  state.localAdvanceDelayToken += 1;
   if (resetInFlight) {
     state.localAdvanceInFlight = false;
   }
@@ -4590,13 +4631,13 @@ async function advanceLocalPlayerNow({ showTransition = true } = {}) {
   if (state.localAdvanceInFlight) {
     return;
   }
-  clearLocalAdvanceDelay();
+  clearLocalAdvanceDelay({ hideOverlay: !showTransition });
   state.localAdvanceInFlight = true;
   try {
     const previousData = state.data;
     state.data = await apiPost("/api/player/next");
     if (showTransition) {
-      maybeShowSongTransitionOverlay(previousData, state.data);
+      maybeShowSongTransitionOverlay(previousData, state.data, { force: true });
     }
     render();
   } catch (error) {
@@ -4656,6 +4697,33 @@ async function setCacheLimit(maxCacheItems) {
     state.cacheLimitSaving = false;
     if (state.data) {
       renderCacheSlider(state.data.cache_policy);
+    }
+  }
+}
+
+async function setAdvanceDelay(delaySeconds) {
+  if (state.advanceDelaySaving) {
+    return;
+  }
+
+  const currentValue = currentSongAdvanceDelaySeconds();
+  if (delaySeconds === currentValue) {
+    return;
+  }
+
+  state.advanceDelaySaving = true;
+  renderAdvanceDelaySlider(state.data?.player_settings);
+  try {
+    state.data = await apiPost("/api/player/advance-delay", { delay_seconds: delaySeconds });
+    setAppMessage(`切歌延迟已调整为 ${delaySeconds} 秒。`);
+    render();
+  } catch (error) {
+    setAppMessage(error.message, true);
+    render();
+  } finally {
+    state.advanceDelaySaving = false;
+    if (state.data) {
+      renderAdvanceDelaySlider(state.data.player_settings);
     }
   }
 }
@@ -4760,7 +4828,7 @@ async function handlePlaylistAction(button) {
     const previousData = state.data;
     state.data = await apiPost(target[0], target[1]);
     if (action === "play-now") {
-      maybeShowSongTransitionOverlay(previousData, state.data);
+      maybeShowSongTransitionOverlay(previousData, state.data, { force: true });
     }
     render();
   } catch (error) {
@@ -4931,7 +4999,6 @@ elements.cacheLimitSlider.addEventListener("input", (event) => {
   const currentValue = Number(event.target.value || "1");
   const minValue = Number(elements.cacheLimitSlider.min || "1");
   const maxValue = Number(elements.cacheLimitSlider.max || "5");
-  elements.cacheLimitValue.textContent = `缓存 ${currentValue} 首`;
   updateCacheSliderFill(currentValue, minValue, maxValue);
   elements.cacheLimitScale.querySelectorAll("span").forEach((mark) => {
     mark.classList.toggle("active", Number(mark.textContent || "0") === currentValue);
@@ -4940,6 +5007,18 @@ elements.cacheLimitSlider.addEventListener("input", (event) => {
 
 elements.cacheLimitSlider.addEventListener("change", async (event) => {
   await setCacheLimit(Number(event.target.value || "1"));
+});
+
+elements.advanceDelaySlider?.addEventListener("input", (event) => {
+  const currentValue = Number(event.target.value || "1");
+  updateAdvanceDelaySliderFill(currentValue);
+  elements.advanceDelayScale.querySelectorAll("span").forEach((mark) => {
+    mark.classList.toggle("active", Number(mark.textContent || "0") === currentValue);
+  });
+});
+
+elements.advanceDelaySlider?.addEventListener("change", async (event) => {
+  await setAdvanceDelay(Number(event.target.value || "1"));
 });
 
 elements.cacheQualitySelect?.addEventListener("change", async (event) => {
@@ -5459,6 +5538,7 @@ document.addEventListener("visibilitychange", () => {
 function handleFullscreenChange() {
   if (!isPlayerPanelFullscreen()) {
     hideFullscreenRequestToast();
+    hidePlayerDelayOverlay();
   }
   renderPlayerFullscreenButton();
 }
