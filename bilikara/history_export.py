@@ -8,9 +8,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-HISTORY_IMAGE_PAGE_SIZE = 25
+from .title_cleanup import clean_display_title
+
+HISTORY_IMAGE_PAGE_SIZE = 80
 PROJECT_URL = "https://github.com/VZRXS/bilikara"
-RELEASES_URL = "https://github.com/VZRXS/bilikara/releases"
 
 _BV_RE = re.compile(r"(BV[0-9A-Za-z]+)", re.IGNORECASE)
 _AV_RE = re.compile(r"(av\d+)", re.IGNORECASE)
@@ -113,7 +114,15 @@ def _render_history_page(
     draw_module: Any,
     font_module: Any,
 ) -> Any:
-    width, height = 1600, 2200
+    width = 1600
+    table_y = 292
+    row_h = 104
+    header_h = 62
+    row_count = len(entries)
+    table_h = header_h + row_count * row_h + 24
+    footer_gap = 44
+    footer_h = footer_gap + 154 + 58
+    height = max(760, table_y + table_h + footer_h)
     image = image_module.new("RGB", (width, height), "#F6EFE3")
     draw = draw_module.Draw(image)
 
@@ -125,16 +134,12 @@ def _render_history_page(
     row_font = _load_font(font_module, 24)
     footer_font = _load_font(font_module, 22)
 
-    draw.text((86, 72), "BILIKARA", fill="#8B7B6D", font=subtitle_font)
-    draw.text((84, 112), title, fill="#1F1A16", font=title_font)
+    draw.text((84, 94), title, fill="#1F1A16", font=title_font)
     subtitle = f"共 {total_count} 首 · 第 {page_number}/{page_count} 页 · {datetime.now().strftime('%Y-%m-%d %H:%M')}"
-    draw.text((88, 206), subtitle, fill="#77695E", font=subtitle_font)
+    draw.text((88, 188), subtitle, fill="#77695E", font=subtitle_font)
 
     table_x = 70
-    table_y = 292
     table_w = width - table_x * 2
-    row_h = 66
-    header_h = 62
     columns = [
         ("#", 64),
         ("标题", 564),
@@ -144,7 +149,7 @@ def _render_history_page(
         ("时间", 280),
     ]
 
-    card_box = (table_x, table_y, table_x + table_w, table_y + header_h + HISTORY_IMAGE_PAGE_SIZE * row_h + 24)
+    card_box = (table_x, table_y, table_x + table_w, table_y + table_h)
     _rounded_rectangle(draw, card_box, 34, "#FFFCF7")
     draw.rounded_rectangle(card_box, radius=34, outline="#EADDD0", width=2)
     _rounded_rectangle(draw, (table_x + 18, table_y + 18, table_x + table_w - 18, table_y + header_h + 10), 24, "#F5E7DA")
@@ -161,7 +166,7 @@ def _render_history_page(
 
         values = [
             str(start_index + row_index + 1),
-            _text(entry.get("display_title") or entry.get("title")) or "未命名歌曲",
+            _export_title(entry) or "未命名歌曲",
             _video_id(entry),
             _text(entry.get("requester_name")) or "-",
             _text(entry.get("owner_name")) or "-",
@@ -172,13 +177,23 @@ def _render_history_page(
             fill = "#1F1A16" if col_index == 1 else "#6F6258"
             if col_index == 0:
                 fill = "#8F3E2B"
-            clipped = _fit_text(draw, value, row_font, col_w - 18)
-            draw.text((cursor_x, top + 20), clipped, fill=fill, font=row_font)
+            lines = _wrap_text(draw, value, row_font, col_w - 18, max_lines=3)
+            line_y = top + 17
+            for line in lines:
+                draw.text((cursor_x, line_y), line, fill=fill, font=row_font)
+                line_y += 29
             cursor_x += col_w
 
-    footer_y = height - 155
-    draw.line((86, footer_y - 28, width - 86, footer_y - 28), fill="#E2D5C8", width=2)
-    draw.text((92, footer_y), PROJECT_URL, fill="#8B7B6D", font=footer_font)
+    qr_matrix = _qr_matrix(PROJECT_URL)
+    qr_x = 92
+    qr_y = table_y + table_h + footer_gap
+    qr_size = 154
+    qr_quiet_px = _qr_quiet_zone_pixels(qr_matrix, qr_size)
+    _draw_qr(draw, qr_matrix, x=qr_x, y=qr_y, size=qr_size)
+
+    link_x = qr_x + 190
+    draw.text((link_x, qr_y + 76 - qr_quiet_px // 2), "项目地址", fill="#8F3E2B", font=header_font)
+    draw.text((link_x, qr_y + 118 - qr_quiet_px // 2), PROJECT_URL, fill="#8B7B6D", font=footer_font)
     return image
 
 
@@ -229,7 +244,7 @@ def _draw_qr(draw: Any, matrix: list[list[bool]], *, x: int, y: int, size: int) 
     quiet = 4
     cell = max(1, size // (count + quiet * 2))
     actual = cell * (count + quiet * 2)
-    draw.rounded_rectangle((x, y, x + actual, y + actual), radius=18, fill="#FFF8EC")
+    draw.rectangle((x, y, x + actual, y + actual), fill="#FFFCF7")
     offset = quiet * cell
     for row_index, row in enumerate(matrix):
         for col_index, dark in enumerate(row):
@@ -237,7 +252,14 @@ def _draw_qr(draw: Any, matrix: list[list[bool]], *, x: int, y: int, size: int) 
                 continue
             left = x + offset + col_index * cell
             top = y + offset + row_index * cell
-            draw.rectangle((left, top, left + cell - 1, top + cell - 1), fill="#11131C")
+            draw.rectangle((left, top, left + cell - 1, top + cell - 1), fill="#1F1A16")
+
+
+def _qr_quiet_zone_pixels(matrix: list[list[bool]], size: int) -> int:
+    quiet = 4
+    count = len(matrix)
+    cell = max(1, size // (count + quiet * 2))
+    return quiet * cell
 
 
 def _load_font(font_module: Any, size: int, *, bold: bool = False) -> Any:
@@ -283,6 +305,40 @@ def _fit_text(draw: Any, text: str, font: Any, max_width: int) -> str:
     return value + ellipsis if value else ellipsis
 
 
+def _wrap_text(draw: Any, text: str, font: Any, max_width: int, *, max_lines: int) -> list[str]:
+    value = _text(text)
+    if not value:
+        return [""]
+
+    lines: list[str] = []
+    current = ""
+    for char in value:
+        candidate = current + char
+        if current and draw.textlength(candidate, font=font) > max_width:
+            lines.append(current)
+            current = char
+            if len(lines) >= max_lines:
+                break
+        else:
+            current = candidate
+
+    if len(lines) < max_lines and current:
+        lines.append(current)
+
+    if len(lines) > max_lines:
+        lines = lines[:max_lines]
+
+    consumed = "".join(lines)
+    if len(consumed) < len(value) and lines:
+        ellipsis = "..."
+        last_line = lines[-1].rstrip()
+        while last_line and draw.textlength(last_line + ellipsis, font=font) > max_width:
+            last_line = last_line[:-1]
+        lines[-1] = f"{last_line}{ellipsis}" if last_line else ellipsis
+
+    return lines or [""]
+
+
 def _rounded_rectangle(draw: Any, box: tuple[int, int, int, int], radius: int, fill: str) -> None:
     draw.rounded_rectangle(box, radius=radius, fill=fill)
 
@@ -308,6 +364,14 @@ def _video_id(entry: dict[str, Any]) -> str:
         if match:
             return match.group(1)
     return ""
+
+
+def _export_title(entry: dict[str, Any]) -> str:
+    return clean_display_title(
+        title=_text(entry.get("title")),
+        display_title=_text(entry.get("display_title")),
+        part_title=_text(entry.get("part_title")),
+    )
 
 
 def _text(value: object) -> str:
