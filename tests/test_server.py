@@ -190,8 +190,8 @@ class PlaylistAddRequestTest(unittest.TestCase):
         fetch_video.assert_not_called()
 
 
-class HistoryRouteTest(unittest.TestCase):
-    def test_history_export_csv_route_downloads_friendly_csv(self):
+class PlaylistExportRouteTest(unittest.TestCase):
+    def test_playlist_export_csv_route_downloads_friendly_csv(self):
         handler = BilikaraHandler.__new__(BilikaraHandler)
         writes: list[dict] = []
         history = [
@@ -229,7 +229,7 @@ class HistoryRouteTest(unittest.TestCase):
             history_snapshot=lambda: history,
         )
 
-        handler.path = "/api/history/export?format=csv"
+        handler.path = "/api/playlist/export?format=csv"
         handler.headers = {}
         handler._write_download = lambda payload, content_type, filename: writes.append(
             {
@@ -262,7 +262,7 @@ class HistoryRouteTest(unittest.TestCase):
         self.assertEqual(rows[0]["分P/版本"], "P1")
         self.assertEqual(rows[2]["点歌时间"], "")
 
-    def test_history_export_image_route_uses_generated_suffix(self):
+    def test_playlist_export_image_route_uses_generated_suffix(self):
         handler = BilikaraHandler.__new__(BilikaraHandler)
         writes: list[dict] = []
         context = SimpleNamespace(
@@ -270,7 +270,7 @@ class HistoryRouteTest(unittest.TestCase):
             history_snapshot=lambda: [{"display_title": "song"}],
         )
 
-        handler.path = "/api/history/export?format=image"
+        handler.path = "/api/playlist/export?format=image"
         handler.headers = {}
         handler._write_download = lambda payload, content_type, filename: writes.append(
             {
@@ -284,8 +284,8 @@ class HistoryRouteTest(unittest.TestCase):
             "bilikara.server.time.strftime",
             return_value="20260430-123456",
         ), patch(
-            "bilikara.server.history_image_export",
-            return_value=(b"zip-bytes", "application/zip", "bilikara-history-images.zip"),
+            "bilikara.server.playlist_image_export",
+            return_value=(b"zip-bytes", "application/zip", "bilikara-playlist-images.zip"),
         ):
             handler.do_GET()
 
@@ -293,7 +293,7 @@ class HistoryRouteTest(unittest.TestCase):
         self.assertEqual(writes[0]["content_type"], "application/zip")
         self.assertEqual(writes[0]["filename"], "bilikara-history-20260430-123456.zip")
 
-    def test_history_export_played_source_downloads_session_csv(self):
+    def test_playlist_export_played_source_downloads_session_csv(self):
         handler = BilikaraHandler.__new__(BilikaraHandler)
         writes: list[dict] = []
         played = [
@@ -310,7 +310,7 @@ class HistoryRouteTest(unittest.TestCase):
             session_played_snapshot=lambda: played,
         )
 
-        handler.path = "/api/history/export?format=csv&source=played"
+        handler.path = "/api/playlist/export?format=csv&source=played"
         handler.headers = {}
         handler._write_download = lambda payload, content_type, filename: writes.append(
             {

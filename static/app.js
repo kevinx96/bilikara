@@ -4020,7 +4020,7 @@ async function downloadHistoryExport(format, source = "played") {
     format: normalizedFormat,
     source: normalizedSource,
   });
-  const response = await fetch(`/api/history/export?${params.toString()}`, {
+  const response = await fetch(`/api/playlist/export?${params.toString()}`, {
     cache: "no-store",
     headers: clientHeaders(),
   });

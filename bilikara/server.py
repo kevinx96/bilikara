@@ -43,7 +43,7 @@ from .config import (
     STATIC_DIR,
     ensure_directories,
 )
-from .history_export import history_csv_bytes, history_image_export
+from .playlist_export import playlist_csv_bytes, playlist_image_export
 from .store import PlaylistStore
 from .updater import check_for_update
 
@@ -572,7 +572,7 @@ class BilikaraHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._write_json({"ok": False, "error": str(e)})
             return
-        if route == "/api/history/export":
+        if route in ("/api/playlist/export", "/api/history/export"):
             query = parse_qs(urlparse(self.path).query)
             export_format = str(query.get("format", ["csv"])[0] or "csv").strip().lower()
             export_source = str(query.get("source", ["history"])[0] or "history").strip().lower()
@@ -580,7 +580,7 @@ class BilikaraHandler(BaseHTTPRequestHandler):
                 "history": {
                     "items": lambda: CONTEXT.history_snapshot(),
                     "filename": "history",
-                    "title": "Bilikara 点歌历史",
+                    "title": "Bilikara 全部历史",
                     "time_header": "点歌时间",
                 },
                 "played": {
@@ -599,15 +599,15 @@ class BilikaraHandler(BaseHTTPRequestHandler):
                 history = settings["items"]()
                 if export_format == "csv":
                     self._write_download(
-                        history_csv_bytes(history, time_header=str(settings["time_header"])),
+                        playlist_csv_bytes(history, time_header=str(settings["time_header"])),
                         content_type="text/csv; charset=utf-8",
                         filename=f"bilikara-{settings['filename']}-{timestamp}.csv",
                     )
                     return
                 if export_format == "image":
-                    payload, content_type, default_filename = history_image_export(
+                    payload, content_type, default_filename = playlist_image_export(
                         history,
-                        logo_path=_history_export_logo_path(),
+                        logo_path=_playlist_export_logo_path(),
                         title=str(settings["title"]),
                     )
                     suffix = Path(default_filename).suffix or ".png"
@@ -1174,7 +1174,7 @@ def run_webui(
     )
 
 
-def _history_export_logo_path() -> Path | None:
+def _playlist_export_logo_path() -> Path | None:
     for filename in ("bili.png", "bili.jpg", "bili.jpeg"):
         candidate = STATIC_DIR / "pic" / filename
         if candidate.exists():

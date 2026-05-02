@@ -8,17 +8,19 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .config import APP_VERSION
 from .title_cleanup import clean_display_title
 
-HISTORY_IMAGE_PAGE_SIZE = 80
+PLAYLIST_IMAGE_PAGE_SIZE = 80
 PROJECT_URL = "https://github.com/VZRXS/bilikara"
+QR_QUIET_MODULES = 2
 
 _BV_RE = re.compile(r"(BV[0-9A-Za-z]+)", re.IGNORECASE)
 _AV_RE = re.compile(r"(av\d+)", re.IGNORECASE)
 
 
-def history_csv_bytes(history: list[dict[str, Any]], *, time_header: str = "点歌时间") -> bytes:
-    ordered_history = _history_in_export_order(history)
+def playlist_csv_bytes(items: list[dict[str, Any]], *, time_header: str = "点歌时间") -> bytes:
+    ordered_items = _items_in_export_order(items)
     buffer = io.StringIO()
     writer = csv.DictWriter(
         buffer,
@@ -38,7 +40,7 @@ def history_csv_bytes(history: list[dict[str, Any]], *, time_header: str = "点�
         extrasaction="ignore",
     )
     writer.writeheader()
-    for index, entry in enumerate(ordered_history, start=1):
+    for index, entry in enumerate(ordered_items, start=1):
         writer.writerow(
             {
                 "序号": index,
@@ -57,28 +59,28 @@ def history_csv_bytes(history: list[dict[str, Any]], *, time_header: str = "点�
     return ("\ufeff" + buffer.getvalue()).encode("utf-8")
 
 
-def history_image_export(
-    history: list[dict[str, Any]],
+def playlist_image_export(
+    items: list[dict[str, Any]],
     *,
     logo_path: Path | None = None,
-    title: str = "Bilikara 点歌历史",
+    title: str = "Bilikara 歌单导出",
 ) -> tuple[bytes, str, str]:
     try:
         from PIL import Image, ImageDraw, ImageFont
     except ImportError as exc:  # pragma: no cover - depends on optional runtime dependency
         raise RuntimeError("图片导出需要安装 Pillow：py -m pip install Pillow") from exc
 
-    ordered_history = _history_in_export_order(history)
+    ordered_items = _items_in_export_order(items)
     pages = [
-        ordered_history[index : index + HISTORY_IMAGE_PAGE_SIZE]
-        for index in range(0, max(1, len(ordered_history)), HISTORY_IMAGE_PAGE_SIZE)
+        ordered_items[index : index + PLAYLIST_IMAGE_PAGE_SIZE]
+        for index in range(0, max(1, len(ordered_items)), PLAYLIST_IMAGE_PAGE_SIZE)
     ]
     rendered_pages = [
-        _render_history_page(
+        _render_playlist_page(
             page,
             page_number=page_index + 1,
             page_count=len(pages),
-            total_count=len(ordered_history),
+            total_count=len(ordered_items),
             logo_path=logo_path,
             title=title,
             image_module=Image,
@@ -91,18 +93,18 @@ def history_image_export(
     if len(rendered_pages) == 1:
         output = io.BytesIO()
         rendered_pages[0].save(output, format="PNG", optimize=True)
-        return output.getvalue(), "image/png", "bilikara-history.png"
+        return output.getvalue(), "image/png", "bilikara-playlist.png"
 
     archive = io.BytesIO()
     with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for index, page in enumerate(rendered_pages, start=1):
             output = io.BytesIO()
             page.save(output, format="PNG", optimize=True)
-            zf.writestr(f"bilikara-history-page-{index:02d}.png", output.getvalue())
-    return archive.getvalue(), "application/zip", "bilikara-history-images.zip"
+            zf.writestr(f"bilikara-playlist-page-{index:02d}.png", output.getvalue())
+    return archive.getvalue(), "application/zip", "bilikara-playlist-images.zip"
 
 
-def _render_history_page(
+def _render_playlist_page(
     entries: list[dict[str, Any]],
     *,
     page_number: int,
@@ -158,7 +160,7 @@ def _render_history_page(
         draw.text((cursor_x, table_y + 30), label, fill="#8F3E2B", font=header_font)
         cursor_x += col_w
 
-    start_index = (page_number - 1) * HISTORY_IMAGE_PAGE_SIZE
+    start_index = (page_number - 1) * PLAYLIST_IMAGE_PAGE_SIZE
     for row_index, entry in enumerate(entries):
         top = table_y + header_h + row_index * row_h
         bg = "#FFFFFF" if row_index % 2 == 0 else "#FBF6EF"
@@ -192,8 +194,10 @@ def _render_history_page(
     _draw_qr(draw, qr_matrix, x=qr_x, y=qr_y, size=qr_size)
 
     link_x = qr_x + 190
-    draw.text((link_x, qr_y + 76 - qr_quiet_px // 2), "项目地址", fill="#8F3E2B", font=header_font)
-    draw.text((link_x, qr_y + 118 - qr_quiet_px // 2), PROJECT_URL, fill="#8B7B6D", font=footer_font)
+    text_offset_y = qr_quiet_px // 2
+    draw.text((link_x, qr_y + 58 - text_offset_y), "项目地址", fill="#8F3E2B", font=header_font)
+    draw.text((link_x, qr_y + 100 - text_offset_y), PROJECT_URL, fill="#8B7B6D", font=footer_font)
+    draw.text((link_x, qr_y + 132 - text_offset_y), f"版本 {APP_VERSION}", fill="#A99B8E", font=footer_font)
     return image
 
 
@@ -241,7 +245,7 @@ def _draw_logo(image: Any, logo_path: Path | None, image_module: Any, *, size: i
 
 def _draw_qr(draw: Any, matrix: list[list[bool]], *, x: int, y: int, size: int) -> None:
     count = len(matrix)
-    quiet = 4
+    quiet = QR_QUIET_MODULES
     cell = max(1, size // (count + quiet * 2))
     actual = cell * (count + quiet * 2)
     draw.rectangle((x, y, x + actual, y + actual), fill="#FFFCF7")
@@ -256,7 +260,7 @@ def _draw_qr(draw: Any, matrix: list[list[bool]], *, x: int, y: int, size: int) 
 
 
 def _qr_quiet_zone_pixels(matrix: list[list[bool]], size: int) -> int:
-    quiet = 4
+    quiet = QR_QUIET_MODULES
     count = len(matrix)
     cell = max(1, size // (count + quiet * 2))
     return quiet * cell
@@ -385,17 +389,17 @@ def _request_count(entry: dict[str, Any]) -> int:
         return 1
 
 
-def _history_in_export_order(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _items_in_export_order(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [
         entry
         for _, entry in sorted(
-            enumerate(history),
-            key=lambda pair: _history_export_sort_key(pair[0], pair[1]),
+            enumerate(items),
+            key=lambda pair: _playlist_export_sort_key(pair[0], pair[1]),
         )
     ]
 
 
-def _history_export_sort_key(index: int, entry: dict[str, Any]) -> tuple[int, float | int, int]:
+def _playlist_export_sort_key(index: int, entry: dict[str, Any]) -> tuple[int, float | int, int]:
     timestamp = _timestamp(entry.get("requested_at"))
     if timestamp is None:
         return (1, index, index)
