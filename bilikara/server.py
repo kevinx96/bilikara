@@ -219,6 +219,9 @@ class AppContext:
     def retry_cache_item(self, item_id: str, *, force: bool = False) -> None:
         self.cache_manager.retry_item(item_id, force=force)
 
+    def is_current_item(self, item_id: str) -> bool:
+        return self.store.is_current_item(item_id)
+
     def issue_player_control(
         self,
         *,
@@ -751,8 +754,7 @@ class BilikaraHandler(BaseHTTPRequestHandler):
             if route == "/api/cache/retry":
                 self._require_id(body)
                 force = bool(body.get("force"))
-                current_item = CONTEXT.store.get_current_item()
-                if current_item and current_item.id == body["item_id"]:
+                if CONTEXT.is_current_item(body["item_id"]):
                     force = True
                 CONTEXT.retry_cache_item(body["item_id"], force=force)
                 self._write_json({"ok": True, "data": CONTEXT.snapshot()})

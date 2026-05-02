@@ -145,6 +145,12 @@
   white-space: nowrap;
 }
 
+.current-cache-state {
+  width: fit-content;
+  min-height: 28px;
+  padding: 0 10px;
+}
+
 .queue-item.ready .queue-order {
   border-color: rgba(43, 123, 96, 0.4);
   color: var(--green);
@@ -155,7 +161,7 @@
 
 .queue-item.ready .queue-state {
   background: transparent;
-  color: var(--green);
+  color: rgba(115, 101, 90, 0.92);
 }
 
 .queue-actions {

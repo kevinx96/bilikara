@@ -198,7 +198,8 @@ const elements = {
   historyList: document.getElementById("history-list"),
   queueCount: document.getElementById("queue-count"),
   queueCurrent: document.getElementById("queue-current"),
-  queueCurrentIndicator: document.getElementById("queue-current-indicator"),
+  queueCurrentProgressBadge: document.getElementById("queue-current-progress-badge"),
+  queueCurrentIconWrap: document.getElementById("queue-current-icon-wrap"),
   queueCurrentTag: document.getElementById("queue-current-tag"),
   queueCurrentTitle: document.getElementById("queue-current-title"),
   queueCurrentRequester: document.getElementById("queue-current-requester"),
@@ -1977,7 +1978,13 @@ function renderQueueCurrent(currentItem) {
     setElementTitle(elements.queueCurrentTitle, ownerTooltipForEntry(currentItem));
     setTextContent(elements.queueCurrentRequester, requesterText);
     setClassToggle(elements.queueCurrentRequester, "hidden", !requesterText);
+
+    setClassToggle(elements.queueCurrentProgressBadge, "idle", currentState.state === "pending");
+    setClassToggle(elements.queueCurrentProgressBadge, "active", currentState.state === "caching");
+    setClassToggle(elements.queueCurrentProgressBadge, "ready", currentState.state === "playing");
+    setClassToggle(elements.queueCurrentProgressBadge, "failed", currentState.state === "failed");
   }
+
   syncRetryButton(elements.queueCurrentRetry, currentItem);
 }
 
@@ -3560,8 +3567,6 @@ function renderPlaylist(playlist, currentItem, cachePolicy) {
       if (badge.style.getPropertyValue("--badge-delay") !== badgeDelay) {
         badge.style.setProperty("--badge-delay", badgeDelay);
       }
-      const progressPercent = Math.round(Number(item.cache_progress || 0));
-      badge.style.setProperty("--progress", `${progressPercent}%`);
       setClassToggle(readyIndicator, "hidden", item.cache_status !== "ready");
       setElementTitle(badge, badgeTitleForItem(item));
       setTextContent(sizeLabel, sizeText);

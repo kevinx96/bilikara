@@ -556,36 +556,47 @@
               <section class="list-face list-face-front">
                 <section class="queue-current hidden" id="queue-current">
                   <div class="queue-current-side">
-                    <div class="queue-current-status">
-                      <div class="queue-current-label">
-                        <span class="queue-current-indicator" id="queue-current-indicator" aria-hidden="true"></span>
-                        <p class="queue-current-tag" id="queue-current-tag">播放中</p>
-                        <button
-                          type="button"
-                          class="cache-retry-button queue-current-retry hidden"
-                          id="queue-current-retry"
-                          title="重新下载缓存"
-                          aria-label="重新下载缓存"
-                        >
-                          <svg viewBox="0 0 24 24" aria-hidden="true">
-                            <path
-                              d="M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5"
-                              fill="none"
-                              stroke="currentColor"
-                              stroke-linecap="round"
-                              stroke-linejoin="round"
-                              stroke-width="2"
-                            />
-                          </svg>
-                        </button>
+                    <div class="queue-current-progress-badge" id="queue-current-progress-badge">
+                      <div class="queue-current-icon-wrap" id="queue-current-icon-wrap">
+                        <!-- 播放中图标 -->
+                        <svg class="playing-icon icon-play" viewBox="0 0 24 24" fill="currentColor">
+                          <path d="M8 5v14l11-7z" />
+                        </svg>
+                        <!-- 缓存中图标 -->
+                        <svg class="playing-icon icon-download" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                          <path d="M12 17V3m0 14l-4-4m4 4l4-4M4 21h16" />
+                        </svg>
+                        <!-- 出错图标 -->
+                        <svg class="playing-icon icon-error" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                          <path d="M18 6L6 18M6 6l12 12" />
+                        </svg>
                       </div>
                     </div>
-                    <button class="next-button queue-current-next" id="next-button">切歌</button>
+                    <button
+                      type="button"
+                      class="cache-retry-button queue-current-retry hidden"
+                      id="queue-current-retry"
+                      title="重新下载缓存"
+                      aria-label="重新下载缓存"
+                    >
+                      <svg viewBox="0 0 24 24" aria-hidden="true">
+                        <path
+                          d="M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5"
+                          fill="none"
+                          stroke="currentColor"
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                          stroke-width="2"
+                        />
+                      </svg>
+                    </button>
+                    <p class="queue-current-tag" id="queue-current-tag">播放中</p>
                   </div>
                   <div class="queue-current-main">
                     <h3 class="queue-current-title" id="queue-current-title">还没有歌曲</h3>
                     <p class="queue-current-requester hidden" id="queue-current-requester"></p>
                   </div>
+                  <button class="next-button queue-current-next" id="next-button">切歌</button>
                 </section>
                 <div id="playlist" class="playlist"></div>
               </section>
@@ -603,30 +614,30 @@
     <!-- Templates -->
     <template id="playlist-item-template">
       <article class="song-item">
-        <div class="song-badge-column">
+        <div class="song-badge-column" draggable="true" data-drag-handle>
           <div class="song-progress-badge">
             <span class="song-index-label"></span>
             <span class="song-badge-check hidden">✓</span>
-            <button
-              type="button"
-              class="cache-retry-button song-retry-button hidden"
-              data-action="retry-cache"
-              draggable="false"
-              title="重新下载缓存"
-              aria-label="重新下载缓存"
-            >
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path
-                  d="M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  stroke-width="2"
-                />
-              </svg>
-            </button>
           </div>
+          <button
+            type="button"
+            class="cache-retry-button song-retry-button hidden"
+            data-action="retry-cache"
+            draggable="false"
+            title="重新下载缓存"
+            aria-label="重新下载缓存"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5"
+                fill="none"
+                stroke="currentColor"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2"
+              />
+            </svg>
+          </button>
           <span class="song-size-label"></span>
         </div>
         <div class="song-main">

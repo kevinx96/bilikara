@@ -68,6 +68,7 @@ const elements = {
   remotePopoverUrlHint: document.getElementById("remote-popover-url-hint"),
   currentTitle: document.getElementById("current-title"),
   currentRequester: document.getElementById("current-requester"),
+  currentCacheState: document.getElementById("current-cache-state"),
   currentMeta: document.getElementById("current-meta"),
   audioVariantBar: document.getElementById("audio-variant-bar"),
   playerControlPanel: document.getElementById("player-control-panel"),
@@ -1095,6 +1096,11 @@ function renderCurrentItem(current, playbackMode) {
     const requesterText = requesterBadgeText(current.requester_name);
     elements.currentRequester.textContent = requesterText;
     elements.currentRequester.classList.toggle("hidden", !requesterText);
+    const showCacheState = current.cache_status !== "ready";
+    elements.currentCacheState.textContent = showCacheState ? currentCacheStateLabel(current) : "";
+    elements.currentCacheState.classList.toggle("hidden", !showCacheState);
+    elements.currentCacheState.classList.toggle("ready", current.cache_status === "ready");
+    elements.currentCacheState.classList.toggle("failed", current.cache_status === "failed");
     const modeLabel = "本地缓存";
     const cacheText = current.cache_message || "等待缓存";
     elements.currentMeta.textContent = `${modeLabel} · ${cacheText}`;
@@ -1104,6 +1110,9 @@ function renderCurrentItem(current, playbackMode) {
   elements.currentTitle.textContent = "当前还没有正在播放的歌曲";
   elements.currentRequester.textContent = "";
   elements.currentRequester.classList.add("hidden");
+  elements.currentCacheState.textContent = "";
+  elements.currentCacheState.classList.add("hidden");
+  elements.currentCacheState.classList.remove("ready", "failed");
   elements.currentMeta.textContent = "点歌后会进入点歌列表，轮到时由服务端页面播放。";
 }
 
@@ -1793,7 +1802,7 @@ function queueStateLabel(item) {
     return "已缓存";
   }
   if (item.cache_status === "downloading") {
-    return `${Math.round(Number(item.cache_progress || 0))}%`;
+    return "缓存中";
   }
   if (item.cache_status === "failed") {
     return "失败";
@@ -1802,6 +1811,33 @@ function queueStateLabel(item) {
     return "排队中";
   }
   return "等待中";
+}
+
+function currentCacheStateLabel(item) {
+  if (!item) {
+    return "";
+  }
+  if (item.cache_status === "downloading") {
+    const size = Number(item.cache_size_bytes || 0);
+    return size > 0 ? `缓存中 · ${formatBytes(size)}` : "缓存中";
+  }
+  return queueStateLabel(item);
+}
+
+function formatBytes(value) {
+  const bytes = Number(value || 0);
+  if (bytes <= 0) {
+    return "0 MB";
+  }
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let size = bytes;
+  let unitIndex = 0;
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
+  const fractionDigits = size >= 100 || unitIndex === 0 ? 0 : 1;
+  return `${size.toFixed(fractionDigits)} ${units[unitIndex]}`;
 }
 
 function renderHistory(history) {

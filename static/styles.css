@@ -16,6 +16,10 @@
   --layout-control-width: 164px;
   --remote-mini-control-width: 100px;
   --playback-control-width: 228px;
+  --queue-badge-column-width: 54px;
+  --queue-badge-size: 48px;
+  --queue-badge-ring-inset: 4px;
+  --queue-badge-ring-width: 1.8px;
   --font-sans: "IBM Plex Sans", "Noto Sans SC", "PingFang SC", "Microsoft YaHei",
     sans-serif;
   --font-display: "Avenir Next", "Trebuchet MS", "Noto Sans SC", sans-serif;
@@ -1748,14 +1752,6 @@ h2 {
   display: none;
 }
 
-html:has(.player-panel:fullscreen) .tool-status-indicator.is-loading::after,
-html:has(.player-panel:fullscreen) .queue-current-indicator,
-html:has(.player-panel:-webkit-full-screen) .tool-status-indicator.is-loading::after,
-html:has(.player-panel:-webkit-full-screen) .queue-current-indicator {
-  animation: none;
-  opacity: 1;
-}
-
 .av-sync-copy {
   display: grid;
   gap: 6px;
@@ -2303,10 +2299,7 @@ select:disabled {
   content-visibility: hidden;
 }
 
-.list-stage.is-history-view:not(.is-flipping) .queue-current-indicator {
-  animation: none;
-  opacity: 1;
-}
+
 
 .queue-card-head h2 {
   display: inline-flex;
@@ -2352,17 +2345,19 @@ select:disabled {
 }
 
 .queue-current {
-  margin-right: 4px;
-  padding: 18px 18px;
-  border-radius: 20px;
-  background:
-    linear-gradient(135deg, rgba(255, 255, 255, 0.84), rgba(255, 245, 236, 0.7));
-  border: 1px solid rgba(208, 90, 63, 0.12);
   display: grid;
-  grid-template-columns: 68px minmax(0, 1fr);
-  gap: 18px;
-  align-items: stretch;
-  min-height: 122px;
+  grid-template-columns: var(--queue-badge-column-width) minmax(0, 1fr);
+  gap: 12px;
+  padding: 12px 14px 12px 10px;
+  background: rgba(255, 248, 242, 0.85);
+  border: 1.5px solid rgba(208, 90, 63, 0.4);
+  border-radius: 20px; /* 恢复为 20px 以对齐下方 tab */
+  margin-bottom: 8px;
+  position: relative;
+  overflow: hidden;
+  box-shadow: 0 4px 20px rgba(88, 56, 30, 0.04);
+  align-items: center;
+  min-height: 96px;
 }
 
 .queue-current.hidden,
@@ -2370,70 +2365,186 @@ select:disabled {
   display: none !important;
 }
 
-.queue-current-side {
-  display: grid;
-  grid-template-rows: auto auto;
-  gap: 12px;
-  align-content: space-between;
-  width: 92px;
-  contain: layout style;
+.song-progress-badge,
+.queue-current-progress-badge {
+  position: relative;
+  width: var(--queue-badge-size);
+  height: var(--queue-badge-size);
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.04);
+  display: flex;
+  align-items: center;
+  justify-content: center;
   isolation: isolate;
   overflow: visible;
 }
 
-.queue-current-indicator {
-  width: 10px;
-  height: 10px;
+.song-progress-badge::before,
+.queue-current-progress-badge::before {
+  content: "";
+  position: absolute;
+  inset: var(--queue-badge-ring-inset);
   border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 0 0 6px rgba(208, 90, 63, 0.12);
-  will-change: opacity;
+  border: var(--queue-badge-ring-width) solid rgba(109, 98, 88, 0.12);
+  transition:
+    background 0.3s ease,
+    border-color 0.3s ease,
+    box-shadow 0.3s ease;
 }
 
-.queue-current[data-state="playing"] .queue-current-indicator,
-.queue-current[data-state="caching"] .queue-current-indicator,
-.queue-current[data-state="pending"] .queue-current-indicator {
-  animation: low-cost-indicator-blink 2.6s steps(5, end) infinite;
+/* 状态：未缓存/待缓存/缓存中 (灰色) */
+.song-progress-badge.idle::before,
+.song-progress-badge.active::before,
+.queue-current-progress-badge.idle::before,
+.queue-current-progress-badge.active::before {
+  border-color: rgba(109, 98, 88, 0.4);
 }
 
-.queue-current[data-state="caching"] .queue-current-indicator {
-  background: rgba(109, 98, 88, 0.8);
-  box-shadow: 0 0 0 6px rgba(109, 98, 88, 0.12);
+/* 状态：缓存完成 (绿色) */
+.song-progress-badge.ready::before {
+  border-color: rgba(43, 123, 96, 0.4) !important;
+  box-shadow: 0 0 0 4px rgba(43, 123, 96, 0.12);
 }
 
-.queue-current[data-state="pending"] .queue-current-indicator {
-  background: rgba(141, 130, 120, 0.72);
-  box-shadow: 0 0 0 6px rgba(141, 130, 120, 0.12);
+/* 状态：正在播放 (橙色) - 仅限 Now Playing 卡片处于 ready(playing) 状态 */
+.queue-current-progress-badge.ready::before {
+  border-color: rgba(208, 90, 63, 0.7) !important;
+  box-shadow: 0 0 0 4px rgba(208, 90, 63, 0.12);
 }
 
-.queue-current[data-state="failed"] .queue-current-indicator {
-  background: var(--red);
-  box-shadow: 0 0 0 6px rgba(177, 69, 69, 0.12);
+/* 状态：出错 (红色) */
+.song-progress-badge.failed::before,
+.queue-current-progress-badge.failed::before {
+  border-color: rgba(177, 69, 69, 0.8) !important;
+  box-shadow: 0 0 0 4px rgba(177, 69, 69, 0.1);
 }
 
-.queue-current-status {
+/* 下载中：不依赖 BBDown 跳跃的百分比，只让细圆环上的一小段转动。 */
+.song-progress-badge.active,
+.queue-current-progress-badge.active {
+  background: rgba(255, 255, 255, 0.96);
+}
+
+.song-progress-badge.active::before,
+.queue-current-progress-badge.active::before {
+  inset: var(--queue-badge-ring-inset);
+  background: transparent;
+  box-shadow: none;
+}
+
+.song-progress-badge.active::after,
+.queue-current-progress-badge.active::after {
+  content: "";
+  position: absolute;
+  inset: var(--queue-badge-ring-inset);
+  border-radius: 50%;
+  border: var(--queue-badge-ring-width) solid transparent;
+  border-top-color: rgba(109, 98, 88, 0.6); /* 缓存中改为灰色单节 */
+  animation: cache-crescent-spin 1.2s linear infinite;
+  pointer-events: none;
+  will-change: transform;
+}
+
+.song-progress-badge.ready::before,
+.queue-current-progress-badge.ready::before {
+  /* Inherit specific ready styles from above */
+}
+
+.song-progress-badge.failed::before,
+.queue-current-progress-badge.failed::before {
+  /* Inherit specific failed styles from above */
+}
+
+.queue-current-icon-wrap {
+  position: relative;
+  z-index: 1;
   display: flex;
   align-items: center;
-  min-height: 28px;
-  position: relative;
+  justify-content: center;
 }
 
-.queue-current[data-state="caching"] .queue-current-tag,
-.queue-current[data-state="pending"] .queue-current-tag,
-.queue-current[data-state="failed"] .queue-current-tag {
+.playing-icon {
+  width: 24px;
+  height: 24px;
+  display: none;
+  transition: color 0.3s ease;
+}
+
+/* 状态：缓存中 -> 显示下箭头 (灰色) */
+.queue-current-progress-badge.active .icon-download {
+  display: block;
   color: var(--muted);
 }
 
-.queue-current-label {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
+/* 状态：正在播放 -> 显示播放按钮 (橙色) */
+.queue-current-progress-badge.ready .icon-play {
+  display: block;
+  color: var(--accent);
+  margin-left: 2px; /* 播放三角形视觉重心微调，确保绝对居中 */
 }
+
+/* 状态：出错 -> 显示叉号 (红色) */
+.queue-current-progress-badge.failed .icon-error {
+  display: block;
+  color: var(--red);
+}
+
+.song-index-label {
+  position: relative;
+  z-index: 1;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--muted);
+  transition: color 0.3s ease;
+}
+
+.song-progress-badge.ready .song-index-label {
+  color: var(--green);
+}
+
+.song-progress-badge.failed .song-index-label {
+  color: var(--red);
+}
+
+@keyframes cache-crescent-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.queue-current-side {
+  position: relative;
+  display: grid;
+  justify-items: center;
+  align-content: center;
+  align-self: center;
+  gap: 6px;
+  width: var(--queue-badge-column-width);
+  min-height: 100%;
+  flex-shrink: 0;
+}
+
+
+.queue-current[data-state="pending"] .queue-current-tag {
+  color: var(--muted);
+}
+
+.queue-current[data-state="caching"] .queue-current-tag {
+  color: var(--accent-deep);
+}
+
+.queue-current[data-state="playing"] .queue-current-tag {
+  color: rgba(43, 123, 96, 0.95);
+}
+
+
 
 .queue-current-retry {
   position: absolute;
-  top: -2px;
-  right: 0;
+  top: calc(50% - var(--queue-badge-size) / 2 - 4px);
+  right: calc((var(--queue-badge-column-width) - var(--queue-badge-size)) / 2 - 6px);
   z-index: 2;
 }
 
@@ -2467,16 +2578,27 @@ select:disabled {
 .queue-current-tag {
   letter-spacing: 0;
   text-transform: none;
-  font-size: 16px;
-  font-weight: 600;
+  min-height: 12px;
+  margin-top: 3px;
+  font-size: 11px;
+  font-weight: 700; /* 加粗 */
   line-height: 1.1;
+  color: var(--muted) !important;
+  width: var(--queue-badge-column-width);
+  text-align: center;
+  white-space: nowrap;
+  display: block !important;
 }
 
 .queue-current-main {
   min-width: 0;
-  display: grid;
-  align-content: center;
-  gap: 12px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 6px;
+  padding-right: 12px; /* 给右边缘留一点基本的呼吸空间 */
+  margin: 0;
+  padding-left: 0;
 }
 
 .queue-current-title {
@@ -2494,11 +2616,12 @@ select:disabled {
   align-items: center;
   justify-content: center;
   width: fit-content;
-  min-height: 38px;
-  padding: 0 16px;
+  height: 32px;
+  min-height: 32px;
+  padding: 0 14px;
   border-radius: 999px;
-  background: rgba(202, 91, 60, 0.1);
-  font-size: 15px;
+  background: rgba(208, 90, 63, 0.1);
+  font-size: 13px;
   font-weight: 500;
   line-height: 1;
   color: var(--accent-deep);
@@ -2506,15 +2629,17 @@ select:disabled {
 }
 
 .queue-current-next {
-  width: 80px;
-  height: 44px;
-  min-width: 80px;
+  position: absolute;
+  right: 14px;
+  bottom: 14px;
+  width: fit-content;
+  height: 32px;
+  min-width: 0;
   padding: 0 16px;
   border-radius: 999px;
-  font-size: 16px;
+  font-size: 13px;
   font-weight: 700;
   line-height: 1;
-  justify-self: start;
 }
 
 .playlist,
@@ -2544,11 +2669,11 @@ select:disabled {
 .song-item {
   position: relative;
   display: grid;
-  grid-template-columns: 68px 1fr auto;
+  grid-template-columns: var(--queue-badge-column-width) 1fr auto;
   gap: 12px;
   align-items: center;
   min-height: 96px;
-  padding: 12px 14px;
+  padding: 12px 10px;
   border-radius: 20px;
   border: 1px solid rgba(91, 66, 47, 0.1);
   background: rgba(255, 255, 255, 0.74);
@@ -2625,6 +2750,7 @@ select:disabled {
   overflow: visible;
   cursor: grab;
   user-select: none;
+  width: var(--queue-badge-column-width);
 }
 
 .song-badge-column:active {
@@ -2642,93 +2768,16 @@ select:disabled {
   justify-content: center;
 }
 
-.song-progress-badge {
-  --badge-orbit-radius: 25px;
-  --progress: 0%;
-  width: 58px;
-  height: 58px;
-  border-radius: 50%;
-  position: relative;
-  display: grid;
-  place-items: center;
-  align-content: center;
-  gap: 2px;
-  overflow: visible;
-  isolation: isolate;
-  background: rgba(255, 255, 255, 0.96);
-  box-shadow: 0 8px 18px rgba(88, 56, 30, 0.05);
-}
 
-.song-progress-badge::before {
-  content: "";
-  position: absolute;
-  inset: 4px;
-  border-radius: 50%;
-  border: 1.8px solid rgba(109, 98, 88, 0.12);
-}
-
-.song-progress-badge.active::before {
-  border-color: transparent;
-  background: padding-box, conic-gradient(var(--accent) var(--progress), transparent var(--progress));
-  -webkit-mask:
-    linear-gradient(#fff 0 0) content-box,
-    linear-gradient(#fff 0 0);
-  mask:
-    linear-gradient(#fff 0 0) content-box,
-    linear-gradient(#fff 0 0);
-  -webkit-mask-composite: xor;
-  mask-composite: exclude;
-  padding: 1.8px;
-}
-
-.song-progress-badge::after {
-  content: "";
-  position: absolute;
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  top: 50%;
-  left: 50%;
-  opacity: 0;
-  background: var(--accent);
-  box-shadow: 0 2px 6px rgba(208, 90, 63, 0.3);
-  transform:
-    translate(-50%, -50%)
-    rotate(calc(var(--progress) * 3.6deg - 90deg))
-    translateY(calc(-1 * var(--badge-orbit-radius)));
-  transition: transform 0.3s ease;
-}
-
-.song-progress-badge.active::after {
-  opacity: 1;
-}
-
-.song-progress-badge.idle::before {
-  border-color: rgba(109, 98, 88, 0.16);
-}
-
-.song-progress-badge.ready::before {
-  border-color: rgba(43, 123, 96, 0.4);
-  box-shadow: 0 0 0 4px rgba(43, 123, 96, 0.08);
-}
-
-.song-progress-badge.failed::before {
-  border-color: rgba(177, 69, 69, 0.36);
-  box-shadow: 0 0 0 4px rgba(177, 69, 69, 0.07);
-}
-
-.song-index-label,
-.song-size-label,
-.song-badge-check {
-  position: relative;
-  z-index: 1;
-}
-
-.song-index-label {
-  font-size: 14px;
-  font-weight: 700;
-  line-height: 1;
-  color: rgba(91, 78, 69, 0.92);
+.song-size-label {
+  width: 100%;
+  min-height: 12px;
+  margin-top: 3px;
+  font-size: 11px;
+  line-height: 1.1;
+  color: var(--muted) !important;
+  text-align: center;
+  white-space: nowrap;
 }
 
 .song-size-label {
@@ -2752,9 +2801,9 @@ select:disabled {
 
 .song-retry-button {
   position: absolute;
-  top: -2px;
-  right: 0;
-  z-index: 2;
+  top: calc(50% - var(--queue-badge-size) / 2 - 4px);
+  right: calc((var(--queue-badge-column-width) - var(--queue-badge-size)) / 2 - 6px);
+  z-index: 3;
 }
 
 .song-badge-check {
@@ -2767,11 +2816,12 @@ select:disabled {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  background: var(--green);
-  color: white;
+  background: #e1ece9;
+  color: var(--green);
+  border: 1.5px solid #aacabf;
   font-size: 11px;
   font-weight: 700;
-  box-shadow: 0 10px 22px rgba(43, 123, 96, 0.24);
+  box-shadow: 0 4px 12px rgba(43, 123, 96, 0.12);
 }
 
 /* Removed redundant .song-main */
@@ -2811,12 +2861,15 @@ select:disabled {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-height: 30px;
-  padding: 0 12px;
+  width: fit-content;
+  height: 32px;
+  min-height: 32px;
+  padding: 0 14px;
   border-radius: 999px;
   background: rgba(208, 90, 63, 0.1);
   color: var(--accent-deep);
   font-size: 13px;
+  font-weight: 500;
   line-height: 1;
   white-space: nowrap;
 }

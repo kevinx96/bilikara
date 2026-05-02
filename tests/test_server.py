@@ -428,6 +428,54 @@ class PlayerResetRouteTest(unittest.TestCase):
         self.assertEqual(writes[1], {"ok": True, "data": {"playback_mode": "local"}})
 
 
+class CacheRetryRouteTest(unittest.TestCase):
+    def test_retry_current_item_forces_recache(self):
+        handler = BilikaraHandler.__new__(BilikaraHandler)
+        writes: list[dict] = []
+        retries: list[dict] = []
+        context = SimpleNamespace(
+            touch_client=lambda client_id, is_host=True: None,
+            is_current_item=lambda item_id: item_id == "current-song",
+            retry_cache_item=lambda item_id, force=False: retries.append(
+                {"item_id": item_id, "force": force}
+            ),
+            snapshot=lambda: {"current_item": {"id": "current-song"}},
+        )
+
+        handler.path = "/api/cache/retry"
+        handler.headers = {}
+        handler._read_json_body = lambda: {"item_id": "current-song"}
+        handler._write_json = lambda payload, status=None: writes.append(payload)
+
+        with patch("bilikara.server.CONTEXT", context):
+            handler.do_POST()
+
+        self.assertEqual(retries, [{"item_id": "current-song", "force": True}])
+        self.assertEqual(writes[0], {"ok": True, "data": {"current_item": {"id": "current-song"}}})
+
+    def test_retry_playlist_item_keeps_requested_force_flag(self):
+        handler = BilikaraHandler.__new__(BilikaraHandler)
+        retries: list[dict] = []
+        context = SimpleNamespace(
+            touch_client=lambda client_id, is_host=True: None,
+            is_current_item=lambda item_id: False,
+            retry_cache_item=lambda item_id, force=False: retries.append(
+                {"item_id": item_id, "force": force}
+            ),
+            snapshot=lambda: {"playlist": [{"id": "queued-song"}]},
+        )
+
+        handler.path = "/api/cache/retry"
+        handler.headers = {}
+        handler._read_json_body = lambda: {"item_id": "queued-song"}
+        handler._write_json = lambda payload, status=None: None
+
+        with patch("bilikara.server.CONTEXT", context):
+            handler.do_POST()
+
+        self.assertEqual(retries, [{"item_id": "queued-song", "force": False}])
+
+
 class PlayerControlRouteTest(unittest.TestCase):
     def test_next_track_route_issues_player_control_command(self):
         handler = BilikaraHandler.__new__(BilikaraHandler)

@@ -356,6 +356,17 @@ h1 {
   color: var(--accent-deep);
 }
 
+.current-cache-state {
+  width: fit-content;
+  margin-top: 8px;
+  margin-left: -10px;
+}
+
+.current-cache-state.failed {
+  background: rgba(177, 69, 69, 0.12);
+  color: var(--red);
+}
+
 .history-requester {
   font-size: 13px;
   line-height: 1.4;
@@ -486,6 +497,14 @@ h1 {
   font-weight: 700;
   border: 1px solid rgba(67, 53, 41, 0.08);
   box-shadow: none;
+}
+
+.remote-step-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  white-space: nowrap;
 }
 
 .remote-step-button:hover,
@@ -1522,6 +1541,10 @@ select:disabled {
     padding-inline: 12px;
   }
 
+  #remote-av-sync-panel .remote-step-button {
+    gap: 2px;
+  }
+
   #remote-av-sync-panel .remote-input-wrap {
     grid-column: 2 / -1;
     width: 100%;
@@ -1560,5 +1583,11 @@ select:disabled {
     min-width: 44px;
     text-align: right;
     font-size: 16px;
+  }
+}
+
+@media (max-width: 420px) {
+  #remote-av-sync-panel .remote-step-button .step-symbol {
+    display: none;
   }
 }
