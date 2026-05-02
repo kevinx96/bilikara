@@ -14,6 +14,7 @@ const playerControlsAutoHideMs = 5000;
 const defaultSongAdvanceDelaySeconds = 3;
 const maxSongAdvanceDelaySeconds = 30;
 const appUpdateCheckTimeoutMs = 10000;
+const fullscreenRequestToastMs = 4200;
 const storageKeys = {
   playerVolume: "bilikara.player.volume",
   playerMuted: "bilikara.player.muted",
@@ -117,6 +118,7 @@ const state = {
   updateChecking: false,
   updatePreviewEnabled: false,
   appToastTimer: null,
+  fullscreenRequestToastTimer: null,
   layoutMode: "full",
 };
 
@@ -154,6 +156,7 @@ const elements = {
   playerPanel: document.querySelector(".player-panel"),
   playerFrame: document.getElementById("player-frame"),
   playerFullscreenButton: document.getElementById("player-fullscreen-button"),
+  fullscreenRequestToast: document.getElementById("fullscreen-request-toast"),
   audioVariantBar: document.getElementById("audio-variant-bar"),
   avSyncPanel: document.getElementById("av-sync-panel"),
   avOffsetInput: document.getElementById("av-offset-input"),
@@ -296,6 +299,60 @@ function setAppMessage(message, isError = false) {
       state.appToastTimer = null;
     }, isError ? 5200 : 3200);
   }
+}
+
+function hideFullscreenRequestToast() {
+  if (state.fullscreenRequestToastTimer) {
+    window.clearTimeout(state.fullscreenRequestToastTimer);
+    state.fullscreenRequestToastTimer = null;
+  }
+  elements.fullscreenRequestToast?.classList.add("hidden");
+}
+
+function showFullscreenRequestToast(title) {
+  const toast = elements.fullscreenRequestToast;
+  const normalizedTitle = String(title || "").trim();
+  if (!toast || !normalizedTitle || !isPlayerPanelFullscreen()) {
+    return;
+  }
+  if (state.fullscreenRequestToastTimer) {
+    window.clearTimeout(state.fullscreenRequestToastTimer);
+    state.fullscreenRequestToastTimer = null;
+  }
+  toast.replaceChildren();
+  const label = document.createElement("span");
+  label.className = "fullscreen-request-toast-label";
+  label.textContent = "新点歌";
+  const titleNode = document.createElement("span");
+  titleNode.className = "fullscreen-request-toast-title";
+  titleNode.textContent = normalizedTitle;
+  toast.append(label, titleNode);
+  toast.classList.remove("hidden");
+  state.fullscreenRequestToastTimer = window.setTimeout(() => {
+    hideFullscreenRequestToast();
+  }, fullscreenRequestToastMs);
+}
+
+function maybeShowIncomingRequestToast(previousData, nextData) {
+  if (!previousData || !nextData || !isPlayerPanelFullscreen()) {
+    return;
+  }
+  const previousItems = [
+    previousData.current_item,
+    ...(Array.isArray(previousData.playlist) ? previousData.playlist : []),
+  ];
+  const previousIds = new Set(previousItems.map((item) => String(item?.id || "")).filter(Boolean));
+  const nextItems = [
+    ...(Array.isArray(nextData.playlist) ? nextData.playlist : []),
+    nextData.current_item,
+  ];
+  const newItems = nextItems
+    .filter((item) => item?.id && !previousIds.has(String(item.id)));
+  if (!newItems.length) {
+    return;
+  }
+  const item = newItems[newItems.length - 1];
+  showFullscreenRequestToast(item.display_title || item.title || "新点歌");
 }
 
 function requesterBadgeText(requesterName) {
@@ -716,6 +773,7 @@ async function apiGet(url, options = {}) {
 
 async function fetchState() {
   const previousOffsetMs = currentAvOffsetMs();
+  const previousData = state.data;
   const response = await fetch("/api/state", {
     headers: clientHeaders(),
   });
@@ -724,6 +782,7 @@ async function fetchState() {
     throw new Error(payload.error || "获取状态失败");
   }
   state.data = payload.data;
+  maybeShowIncomingRequestToast(previousData, state.data);
   syncLocalPlayerSettingsFromSnapshot(state.data?.player_settings);
   if (!state.localOffsetRestoreApplied) {
     const rememberedOffset = rememberedAvOffsetMs();
@@ -5095,8 +5154,15 @@ document.addEventListener("visibilitychange", () => {
   }
 });
 
-document.addEventListener("fullscreenchange", renderPlayerFullscreenButton);
-document.addEventListener("webkitfullscreenchange", renderPlayerFullscreenButton);
+function handleFullscreenChange() {
+  if (!isPlayerPanelFullscreen()) {
+    hideFullscreenRequestToast();
+  }
+  renderPlayerFullscreenButton();
+}
+
+document.addEventListener("fullscreenchange", handleFullscreenChange);
+document.addEventListener("webkitfullscreenchange", handleFullscreenChange);
 
 elements.playlist.addEventListener("dragstart", (event) => {
   const item = event.target.closest(".song-item");
