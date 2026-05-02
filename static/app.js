@@ -3548,6 +3548,7 @@ function renderPlaylist(playlist, currentItem, cachePolicy) {
       badgeTitle: badgeTitleForItem(item),
       sizeText,
       noteText,
+      cacheProgress: item.cache_progress,
     });
     if (node.dataset.dynamicSignature !== dynamicSignature) {
       node.dataset.dynamicSignature = dynamicSignature;
@@ -3559,6 +3560,8 @@ function renderPlaylist(playlist, currentItem, cachePolicy) {
       if (badge.style.getPropertyValue("--badge-delay") !== badgeDelay) {
         badge.style.setProperty("--badge-delay", badgeDelay);
       }
+      const progressPercent = Math.round(Number(item.cache_progress || 0));
+      badge.style.setProperty("--progress", `${progressPercent}%`);
       setClassToggle(readyIndicator, "hidden", item.cache_status !== "ready");
       setElementTitle(badge, badgeTitleForItem(item));
       setTextContent(sizeLabel, sizeText);
@@ -3714,7 +3717,7 @@ function renderHistory(history) {
     requester.classList.toggle("hidden", !requesterText);
     node.querySelector(".history-time").textContent = formatHistoryTime(entry.requested_at);
     node.querySelector(".history-count").textContent = `点歌 ${entry.request_count} 次`;
-    node.querySelectorAll("button").forEach((button) => {
+    node.querySelectorAll("button[data-action]").forEach((button) => {
       button.dataset.url = entry.resolved_url || entry.original_url;
     });
     elements.historyList.appendChild(node);
@@ -5362,7 +5365,7 @@ elements.playlist.addEventListener("click", async (event) => {
 
 elements.historyList.addEventListener("click", async (event) => {
   const button = event.target.closest("button[data-action]");
-  if (!button) {
+  if (!button || button.dataset.action === "toggle-menu") {
     return;
   }
   const url = button.dataset.url;
@@ -5499,6 +5502,29 @@ document.addEventListener("click", (event) => {
   if (state.cacheSettingsOpen && !event.target.closest("#cache-settings")) {
     state.cacheSettingsOpen = false;
     syncCachePanelVisibility();
+  }
+});
+
+document.addEventListener("click", (event) => {
+  const toggle = event.target.closest('[data-action="toggle-menu"]');
+  if (toggle) {
+    const wrap = toggle.closest(".song-actions-wrap, .history-actions-wrap");
+    const menu = wrap?.querySelector(".menu-content");
+    if (menu) {
+      const isHidden = menu.classList.contains("hidden");
+      // Close all other menus first
+      document.querySelectorAll(".menu-content").forEach((m) => m.classList.add("hidden"));
+      if (isHidden) {
+        menu.classList.remove("hidden");
+      }
+      event.stopPropagation();
+      return;
+    }
+  }
+
+  // Close menus if clicking outside
+  if (!event.target.closest(".menu-content")) {
+    document.querySelectorAll(".menu-content").forEach((m) => m.classList.add("hidden"));
   }
 });
 

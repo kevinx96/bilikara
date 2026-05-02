@@ -349,11 +349,16 @@ h1 {
   line-height: 1.5;
 }
 
-.requester-line,
-.history-requester {
+.requester-line {
   margin-top: 4px;
   font-size: 13px;
-  line-height: 1.35;
+  line-height: 1.4;
+  color: var(--accent-deep);
+}
+
+.history-requester {
+  font-size: 13px;
+  line-height: 1.4;
   color: var(--accent-deep);
 }
 
@@ -1410,7 +1415,7 @@ select:disabled {
   gap: 10px;
   font-size: 13px;
   line-height: 1.4;
-  align-items: flex-end;
+  align-items: center;
 }
 
 

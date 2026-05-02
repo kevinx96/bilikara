@@ -1587,6 +1587,7 @@ h2 {
   line-height: 1.25;
   display: -webkit-box;
   -webkit-line-clamp: 2;
+  line-clamp: 2;
   -webkit-box-orient: vertical;
   white-space: normal;
   color: var(--ink);
@@ -2493,13 +2494,15 @@ select:disabled {
   align-items: center;
   justify-content: center;
   width: fit-content;
-  min-height: 44px;
+  min-height: 38px;
   padding: 0 16px;
   border-radius: 999px;
-  background: rgba(208, 90, 63, 0.1);
-  font-size: 16px;
+  background: rgba(202, 91, 60, 0.1);
+  font-size: 15px;
+  font-weight: 500;
   line-height: 1;
   color: var(--accent-deep);
+  border: none;
 }
 
 .queue-current-next {
@@ -2541,9 +2544,9 @@ select:disabled {
 .song-item {
   position: relative;
   display: grid;
-  grid-template-columns: 68px minmax(0, 1fr);
+  grid-template-columns: 68px 1fr auto;
   gap: 12px;
-  align-items: start;
+  align-items: center;
   min-height: 96px;
   padding: 12px 14px;
   border-radius: 20px;
@@ -2628,12 +2631,20 @@ select:disabled {
   cursor: grabbing;
 }
 
-.song-main {
-  user-select: text;
+/* Removed song-drag-handle styles */
+
+.song-main,
+.history-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  justify-content: center;
 }
 
 .song-progress-badge {
   --badge-orbit-radius: 25px;
+  --progress: 0%;
   width: 58px;
   height: 58px;
   border-radius: 50%;
@@ -2653,7 +2664,21 @@ select:disabled {
   position: absolute;
   inset: 4px;
   border-radius: 50%;
-  border: 1.6px solid rgba(109, 98, 88, 0.18);
+  border: 1.8px solid rgba(109, 98, 88, 0.12);
+}
+
+.song-progress-badge.active::before {
+  border-color: transparent;
+  background: padding-box, conic-gradient(var(--accent) var(--progress), transparent var(--progress));
+  -webkit-mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  padding: 1.8px;
 }
 
 .song-progress-badge::after {
@@ -2665,23 +2690,17 @@ select:disabled {
   top: 50%;
   left: 50%;
   opacity: 0;
-  background: rgba(109, 98, 88, 0.74);
-  box-shadow: 0 4px 10px rgba(109, 98, 88, 0.2);
+  background: var(--accent);
+  box-shadow: 0 2px 6px rgba(208, 90, 63, 0.3);
   transform:
     translate(-50%, -50%)
-    rotate(0deg)
+    rotate(calc(var(--progress) * 3.6deg - 90deg))
     translateY(calc(-1 * var(--badge-orbit-radius)));
-}
-
-.song-progress-badge.active::before {
-  border-color: rgba(109, 98, 88, 0.18);
+  transition: transform 0.3s ease;
 }
 
 .song-progress-badge.active::after {
   opacity: 1;
-  animation: badge-orbit 1.45s linear infinite;
-  animation-delay: var(--badge-delay, 0s);
-  will-change: transform;
 }
 
 .song-progress-badge.idle::before {
@@ -2755,14 +2774,7 @@ select:disabled {
   box-shadow: 0 10px 22px rgba(43, 123, 96, 0.24);
 }
 
-.song-main {
-  min-width: 0;
-  min-height: 96px;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 16px;
-}
+/* Removed redundant .song-main */
 
 .song-top-row,
 .song-bottom-row {
@@ -2795,8 +2807,7 @@ select:disabled {
   overflow: hidden;
 }
 
-.song-requester,
-.history-requester {
+.song-requester {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -2808,6 +2819,20 @@ select:disabled {
   font-size: 13px;
   line-height: 1;
   white-space: nowrap;
+}
+
+.history-requester {
+  display: inline-flex;
+  align-items: center;
+  color: var(--accent-deep);
+  font-size: 13px;
+  line-height: 1;
+  white-space: nowrap;
+  margin-left: 8px;
+  background: transparent !important;
+  padding: 0 !important;
+  border: none !important;
+  box-shadow: none !important;
 }
 
 .icon-button.danger {
@@ -2832,16 +2857,14 @@ select:disabled {
 }
 
 .song-actions {
-  display: grid;
-  grid-template-columns: max-content 36px;
-  grid-template-rows: 36px 36px;
+  display: flex;
+  flex-direction: row;
   gap: 8px;
   align-items: center;
-  width: fit-content;
 }
 
 .song-actions button {
-  width: 100%;
+  width: auto;
   min-width: 0;
   padding: 8px 12px;
   height: 36px;
@@ -2857,6 +2880,7 @@ select:disabled {
   grid-column: 1 / -1;
   grid-row: 1;
 }
+
 
 .song-actions button[data-action="move-next"] {
   grid-column: 1;
@@ -2889,15 +2913,13 @@ select:disabled {
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 14px;
   align-items: center;
-  padding: 14px;
+  padding: 10px 14px;
   border-radius: 20px;
   border: 1px solid rgba(91, 66, 47, 0.1);
   background: rgba(255, 255, 255, 0.74);
 }
 
-.history-main {
-  min-width: 0;
-}
+/* Combined with .song-main above */
 
 .history-title {
   max-width: 100%;
@@ -2913,25 +2935,14 @@ select:disabled {
   line-clamp: 2;
 }
 
-.history-meta {
-  margin-top: 8px;
-  display: flex;
-  gap: 12px;
-  flex-wrap: wrap;
-  font-size: 12px;
-  color: var(--muted);
-}
-
 .history-actions {
-  display: grid;
+  display: flex;
+  flex-direction: row;
   gap: 8px;
-  width: var(--action-button-width);
-  justify-items: stretch;
-  align-content: center;
 }
 
 .history-actions button {
-  width: 100%;
+  width: auto;
   min-width: 0;
   height: 36px;
   padding: 8px 12px;
@@ -3119,6 +3130,7 @@ select:disabled {
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
+  line-clamp: 2;
   overflow: hidden;
 }
 
@@ -3402,6 +3414,157 @@ select:disabled {
   gap: 12px;
 }
 
+.song-requester,
+.history-requester {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 10px;
+  min-height: 24px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--accent-deep);
+  background: rgba(202, 91, 60, 0.1);
+  border: none;
+  white-space: nowrap;
+  width: fit-content;
+}
+
+.song-actions-wrap,
+.history-actions-wrap {
+  position: relative;
+  margin-left: auto;
+  align-self: flex-end;
+  margin-bottom: 4px;
+  display: flex;
+  align-items: center;
+}
+
+.menu-toggle {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: none;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(99, 76, 60, 0.05);
+  color: var(--muted);
+  cursor: pointer;
+  transition: all 0.2s ease;
+  flex-shrink: 0;
+  -webkit-tap-highlight-color: transparent;
+  outline: none;
+}
+
+.menu-toggle svg {
+  width: 18px;
+  height: 18px;
+  pointer-events: none;
+}
+
+.menu-toggle:hover {
+  background: rgba(109, 98, 88, 0.12);
+  color: var(--ink);
+}
+
+.menu-content {
+  position: absolute;
+  right: 44px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: rgba(255, 251, 245, 0.98);
+  border: 1px solid rgba(87, 63, 43, 0.12);
+  border-radius: 22px;
+  padding: 6px;
+  box-shadow: 0 8px 24px rgba(79, 56, 39, 0.15);
+  backdrop-filter: blur(12px);
+  z-index: 100;
+  display: flex;
+  flex-direction: row;
+  flex-wrap: nowrap;
+  width: max-content;
+  gap: 8px;
+  animation: menu-appear 0.2s cubic-bezier(0.18, 0.89, 0.32, 1.28);
+}
+
+@keyframes menu-appear {
+  from { opacity: 0; transform: translateY(-50%) translateX(10px) scale(0.95); }
+  to { opacity: 1; transform: translateY(-50%) translateX(0) scale(1); }
+}
+
+.menu-content button {
+  width: auto;
+  flex: none;
+  min-height: 32px;
+  padding: 0 16px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.menu-content .primary-button {
+  background: #d5643d;
+  color: #fff;
+}
+
+.menu-content .secondary-button {
+  background: rgba(99, 76, 60, 0.08);
+  color: #5f4e42;
+}
+
+.menu-content .danger-button {
+  background: rgba(177, 69, 69, 0.12);
+  color: var(--accent-deep);
+}
+
+.menu-content .icon-button {
+  width: 32px;
+  height: 32px;
+  min-width: 32px;
+  min-height: 32px;
+  padding: 0;
+  flex-shrink: 0;
+}
+
+.menu-content .icon-button svg {
+  width: 16px;
+  height: 16px;
+  display: block;
+}
+
+
+
+/* Removed stale song-top-row */
+
+.history-title-row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.history-meta-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.song-title,
+.history-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 17px;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
 .search-inputs,
 .cookie-inputs {
   display: flex;
@@ -3495,6 +3658,7 @@ select:disabled {
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 3;
+  line-clamp: 3;
   overflow: hidden;
 }
 
@@ -3747,13 +3911,11 @@ select:disabled {
     width: 100%;
   }
 
-  .song-top-row {
-    align-items: stretch;
-  }
+/* Removed stale song-top-row */
 
-  .song-main {
-    grid-template-columns: 1fr;
-    gap: 14px;
+  .song-main,
+  .history-main {
+    gap: 8px;
   }
 
   .song-actions {

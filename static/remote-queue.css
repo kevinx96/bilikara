@@ -379,7 +379,7 @@
   transform: translateY(-50%);
   background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: 16px;
+  border-radius: 22px;
   padding: 6px;
   box-shadow: 0 8px 24px rgba(79, 56, 39, 0.15);
   z-index: 100;
