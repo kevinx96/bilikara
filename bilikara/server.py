@@ -1090,12 +1090,15 @@ class BilikaraHandler(BaseHTTPRequestHandler):
                     with file_path.open("rb") as handle:
                         handle.seek(start)
                         remaining = end - start + 1
-                        while remaining > 0:
-                            chunk = handle.read(min(64 * 1024, remaining))
-                            if not chunk:
-                                break
-                            self.wfile.write(chunk)
-                            remaining -= len(chunk)
+                        try:
+                            while remaining > 0:
+                                chunk = handle.read(min(64 * 1024, remaining))
+                                if not chunk:
+                                    break
+                                self.wfile.write(chunk)
+                                remaining -= len(chunk)
+                        except (BrokenPipeError, ConnectionResetError, OSError):
+                            pass
                     return
 
         self.send_response(HTTPStatus.OK)
@@ -1105,11 +1108,14 @@ class BilikaraHandler(BaseHTTPRequestHandler):
             self.send_header("Accept-Ranges", "bytes")
         self.end_headers()
         with file_path.open("rb") as handle:
-            while True:
-                chunk = handle.read(64 * 1024)
-                if not chunk:
-                    break
-                self.wfile.write(chunk)
+            try:
+                while True:
+                    chunk = handle.read(64 * 1024)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
 
     def _guess_type(self, file_path: Path) -> str:
         return mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"

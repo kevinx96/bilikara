@@ -58,6 +58,9 @@
       node.querySelectorAll("button[data-action]").forEach((button) => {
         button.dataset.id = item.id;
       });
+      if (state.openQueueMenuId === item.id) {
+        node.querySelector(".menu-content")?.classList.remove("hidden");
+      }
       elements.queueList.appendChild(node);
     });
   };
@@ -267,6 +270,9 @@
         document.querySelectorAll(".menu-content").forEach(el => el.classList.add("hidden"));
         if (isHidden) {
           content.classList.remove("hidden");
+          state.openQueueMenuId = button.dataset.id;
+        } else {
+          state.openQueueMenuId = null;
         }
       }
       return;

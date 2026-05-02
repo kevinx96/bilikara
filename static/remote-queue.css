@@ -376,6 +376,7 @@
   justify-content: center;
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
+  padding-bottom: 6px; /* 修正省略号符号的基线位置 */
 }
 
 .menu-content {

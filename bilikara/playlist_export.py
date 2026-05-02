@@ -189,9 +189,10 @@ def _render_playlist_page(
     qr_matrix = _qr_matrix(PROJECT_URL)
     qr_x = 92
     qr_y = table_y + table_h + footer_gap
+    qr_visual_y = qr_y + 28
     qr_size = 154
     qr_quiet_px = _qr_quiet_zone_pixels(qr_matrix, qr_size)
-    _draw_qr(draw, qr_matrix, x=qr_x, y=qr_y, size=qr_size)
+    _draw_qr(draw, qr_matrix, x=qr_x, y=qr_visual_y, size=qr_size)
 
     link_x = qr_x + 190
     text_offset_y = qr_quiet_px // 2

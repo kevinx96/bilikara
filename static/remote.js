@@ -2484,6 +2484,7 @@ elements.historyList.addEventListener("click", async (event) => {
 document.addEventListener("click", (event) => {
   if (!event.target.closest(".queue-actions-wrap") && !event.target.closest(".history-actions-wrap")) {
     document.querySelectorAll(".menu-content").forEach(el => el.classList.add("hidden"));
+    state.openQueueMenuId = null;
   }
 });
 

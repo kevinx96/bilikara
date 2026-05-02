@@ -1308,6 +1308,7 @@ function render() {
   renderAvSyncControls(playbackMode, data.player_settings);
   renderVolumeControls(playbackMode);
   applyStoredVolumeToMountedPlayer();
+  flushPendingSongTransitionOverlay();
   renderPlayer(currentItem, playbackMode);
   renderPlayerFullscreenButton();
   applyRemotePlayerControl(data.player_control_command, currentItem, playbackMode);
@@ -1326,7 +1327,6 @@ function render() {
   renderSearchCookieFace();
   renderGatchaUidFace();
   renderConfirmPopover();
-  flushPendingSongTransitionOverlay();
   state.lastPollRenderSignature = renderSignatureForData(data);
 }
 
@@ -2508,6 +2508,13 @@ function clearLocalAdvanceDelay({ resetInFlight = false, hideOverlay = true } = 
     state.localAdvanceOverlayTotalCount = null;
     state.localAdvanceDelayItemId = "";
     hidePlayerDelayOverlay();
+
+    // 延迟结束后自动开始播放音视频
+    const video = activePrimaryVideoElement();
+    if (video && video.paused) {
+      state.localShouldBePlaying = true;
+      video.play().catch(() => {});
+    }
   }
   state.localAdvanceDelayToken += 1;
   if (resetInFlight) {
@@ -3171,12 +3178,15 @@ function renderPlayer(currentItem, playbackMode) {
     return;
   }
 
+  const shouldAutoplay = !(state.localAdvanceDelayDeadline > 0 && Date.now() < state.localAdvanceDelayDeadline);
+  const autoplayAttr = shouldAutoplay ? "autoplay" : "";
+
   elements.playerFrame.innerHTML = `
     <video
       data-player-role="video"
       controls
       controlsList="nofullscreen"
-      autoplay
+      ${autoplayAttr}
       playsinline
       preload="metadata"
       src="${escapeHtml(selectedVideoUrl)}"
