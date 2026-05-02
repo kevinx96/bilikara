@@ -750,7 +750,11 @@ class BilikaraHandler(BaseHTTPRequestHandler):
                 return
             if route == "/api/cache/retry":
                 self._require_id(body)
-                CONTEXT.retry_cache_item(body["item_id"], force=bool(body.get("force")))
+                force = bool(body.get("force"))
+                current_item = CONTEXT.store.get_current_item()
+                if current_item and current_item.id == body["item_id"]:
+                    force = True
+                CONTEXT.retry_cache_item(body["item_id"], force=force)
                 self._write_json({"ok": True, "data": CONTEXT.snapshot()})
                 return
             if route == "/api/gatcha/uids/add":
@@ -779,7 +783,7 @@ class BilikaraHandler(BaseHTTPRequestHandler):
             if route == "/api/player/control":
                 action = str(body.get("action") or "").strip()
                 item_id = str(body.get("item_id") or "").strip()
-                if action not in {"toggle-play", "seek-relative", "seek-absolute"}:
+                if action not in {"toggle-play", "seek-relative", "seek-absolute", "next-track"}:
                     raise ValueError("invalid player control action")
                 delta_seconds = int(body.get("delta_seconds") or 0)
                 target_seconds = None

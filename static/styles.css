@@ -1426,12 +1426,15 @@ h2 {
   position: absolute;
   inset: 0;
   z-index: 3;
-  display: grid;
-  place-items: center;
-  padding: 32px;
-  color: #fff;
-  text-align: center;
-  background: rgba(0, 0, 0, 0.68);
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  color: var(--ink);
+  background:
+    radial-gradient(circle at top left, rgba(255, 255, 255, 0.55), transparent 50%),
+    linear-gradient(135deg, #f8efe2 0%, #f3e8d7 46%, #eadac7 100%); /* milk-tea color */
+  opacity: 0;
+  transition: opacity 500ms ease;
   pointer-events: none;
 }
 
@@ -1439,43 +1442,214 @@ h2 {
   display: none;
 }
 
-.player-delay-copy {
-  display: grid;
-  gap: 10px;
-  justify-items: center;
-  text-shadow: 0 3px 18px rgba(0, 0, 0, 0.5);
+.player-delay-overlay.is-visible {
+  opacity: 1;
 }
 
-.player-delay-label {
-  font-size: 13px;
-  letter-spacing: 0.14em;
-  line-height: 1.2;
-  text-transform: uppercase;
-  color: rgba(255, 255, 255, 0.78);
+.player-delay-card {
+  flex: 1;
+  width: 100%;
+  max-height: none;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  gap: clamp(16px, 2vw, 24px);
+  padding: clamp(32px, 5vw, 64px) clamp(32px, 8vw, 120px);
+  overflow: hidden;
+  border-radius: 0;
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  transform: translateY(20px);
+  transition: transform 500ms ease;
 }
 
-.player-delay-count {
-  font-size: 72px;
+.player-delay-overlay.is-visible .player-delay-card {
+  transform: translateY(0);
+}
+
+.player-delay-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.player-delay-heading {
+  font-size: clamp(28px, 3.5vw, 42px);
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  color: var(--ink);
+}
+
+.player-delay-countdown {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: clamp(64px, 6vw, 84px);
+  height: clamp(64px, 6vw, 84px);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.6);
+  color: var(--accent-deep);
+  font-size: clamp(20px, 2.5vw, 32px);
+  font-weight: 800;
   line-height: 1;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  box-shadow: 0 8px 22px rgba(208, 90, 63, 0.15);
+}
+
+.player-delay-count-ring {
+  position: absolute;
+  inset: 6px;
+  width: calc(100% - 12px);
+  height: calc(100% - 12px);
+  transform: rotate(-90deg);
+}
+
+.player-delay-count-track,
+.player-delay-count-progress {
+  fill: none;
+  stroke-width: 3.2;
+}
+
+.player-delay-count-track {
+  stroke: rgba(208, 90, 63, 0.15);
+}
+
+.player-delay-count-progress {
+  stroke: rgba(208, 90, 63, 0.82);
+  stroke-linecap: round;
+  stroke-dasharray: 119.38;
+  stroke-dashoffset: var(--delay-ring-offset, 0);
+  transition: stroke-dashoffset 260ms ease;
+}
+
+.player-delay-count-text {
+  position: relative;
+  z-index: 1;
+}
+
+.player-delay-now-row,
+.player-delay-list-row {
+  display: grid;
+  grid-template-columns: clamp(38px, 4vw, 48px) minmax(0, 1fr) clamp(100px, 15vw, 180px) clamp(70px, 10vw, 100px);
+  gap: 20px;
+  align-items: center;
+}
+
+.player-delay-now-row {
+  min-height: clamp(100px, 12vh, 140px);
+  padding: 24px 32px;
+  border-radius: 24px;
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.7), rgba(255, 255, 255, 0.4));
+  border: 1px solid rgba(255, 255, 255, 0.8);
+  box-shadow: 0 10px 30px rgba(88, 56, 30, 0.1);
+  color: var(--ink);
+}
+
+.player-delay-play-icon,
+.player-delay-list-index {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: clamp(34px, 3.5vw, 44px);
+  height: clamp(34px, 3.5vw, 44px);
+  border-radius: 999px;
+  font-weight: 800;
+  line-height: normal;
+  font-size: clamp(18px, 2vw, 24px);
+  background: rgba(208, 90, 63, 0.15);
+  color: var(--accent-deep);
+}
+
+.player-delay-play-icon {
+  padding-left: 3px;
+}
+
+.player-delay-list-index {
+  background: rgba(255, 255, 255, 0.5);
+  color: var(--muted);
+}
+
+.player-delay-song-title {
+  min-width: 0;
+  align-self: center;
+  overflow: hidden;
+  font-size: clamp(22px, 2.8vw, 36px);
+  font-weight: 800;
+  line-height: 1.25;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  white-space: normal;
+  color: var(--ink);
+}
+
+.player-delay-requester,
+.player-delay-duration {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: clamp(16px, 2vw, 24px);
   font-weight: 700;
+  line-height: 1.25;
+  white-space: nowrap;
+  color: var(--muted);
+}
+
+.player-delay-duration {
+  text-align: right;
   font-variant-numeric: tabular-nums;
 }
 
-.player-delay-next {
-  max-width: min(720px, calc(100vw - 48px));
-  color: rgba(255, 255, 255, 0.86);
-  font-size: 18px;
-  line-height: 1.45;
+.player-delay-section-title {
+  padding-top: 12px;
+  font-weight: 800;
+  color: var(--accent-deep);
+  font-size: clamp(20px, 2.5vw, 30px);
 }
 
-.player-panel:fullscreen .player-delay-count,
-.player-panel:-webkit-full-screen .player-delay-count {
-  font-size: 96px;
+.player-delay-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  overflow: hidden;
 }
 
-.player-panel:fullscreen .player-delay-next,
-.player-panel:-webkit-full-screen .player-delay-next {
-  font-size: 20px;
+.player-delay-list-row {
+  min-height: clamp(70px, 8vh, 90px);
+  padding: 16px 24px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.45);
+  border: 1px solid rgba(255, 255, 255, 0.6);
+  color: var(--ink);
+}
+
+.player-delay-list-row .player-delay-song-title {
+  font-size: clamp(18px, 2.2vw, 28px);
+}
+
+.player-delay-list-more {
+  padding: 16px 24px;
+  font-weight: 700;
+  text-align: center;
+  color: var(--muted);
+  font-size: clamp(16px, 2vw, 22px);
+}
+
+.player-delay-total {
+  align-self: flex-start;
+  margin-top: auto;
+  padding: 6px 16px;
+  border-radius: 999px;
+  font-weight: 800;
+  background: rgba(255, 255, 255, 0.6);
+  color: var(--ink);
+  font-size: clamp(18px, 2.2vw, 26px);
 }
 
 .audio-variant-bar {
@@ -1654,6 +1828,9 @@ html:has(.player-panel:-webkit-full-screen) .queue-current-indicator {
 .av-sync-step-button,
 .av-sync-reset-button {
   /* min-width: 78px; */
+  display: flex;
+  align-items: center;
+  justify-content: center;
   flex: 1 1 0;
   min-width: 0;
   white-space: nowrap;

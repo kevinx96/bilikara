@@ -429,6 +429,31 @@ class PlayerResetRouteTest(unittest.TestCase):
 
 
 class PlayerControlRouteTest(unittest.TestCase):
+    def test_next_track_route_issues_player_control_command(self):
+        handler = BilikaraHandler.__new__(BilikaraHandler)
+        writes: list[dict] = []
+        issued: list[dict] = []
+        context = SimpleNamespace(
+            touch_client=lambda client_id, is_host=True: None,
+            issue_player_control=lambda **kwargs: issued.append(kwargs),
+            snapshot=lambda: {"player_control_command": issued[-1]},
+        )
+
+        handler.path = "/api/player/control"
+        handler.headers = {}
+        handler._read_json_body = lambda: {
+            "action": "next-track",
+            "item_id": "song-1",
+        }
+        handler._write_json = lambda payload, status=None: writes.append(payload)
+
+        with patch("bilikara.server.CONTEXT", context):
+            handler.do_POST()
+
+        self.assertEqual(issued[0]["action"], "next-track")
+        self.assertEqual(issued[0]["item_id"], "song-1")
+        self.assertEqual(writes[0]["data"]["player_control_command"]["action"], "next-track")
+
     def test_absolute_seek_route_forwards_target_seconds(self):
         handler = BilikaraHandler.__new__(BilikaraHandler)
         writes: list[dict] = []
