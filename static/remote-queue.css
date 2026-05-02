@@ -168,7 +168,8 @@
   padding-left: 0;
 }
 
-.queue-actions button {
+.queue-actions button,
+.menu-content button {
   min-height: 32px;
   padding: 0 12px;
   border-radius: 999px;
@@ -179,7 +180,8 @@
   box-shadow: none;
 }
 
-.queue-actions .icon-button {
+.queue-actions .icon-button,
+.menu-content .icon-button {
   width: 32px;
   height: 32px;
   min-width: 32px;
@@ -198,12 +200,15 @@
   display: block;
 }
 
-.queue-actions .primary-button {
+.queue-actions .primary-button,
+.menu-content .primary-button {
   background: #d5643d;
 }
 
 .queue-actions .secondary-button,
-.queue-actions .ghost-button {
+.queue-actions .ghost-button,
+.menu-content .secondary-button,
+.menu-content .ghost-button {
   background: rgba(99, 76, 60, 0.08);
 }
 
@@ -211,7 +216,8 @@
   color: #5f4e42;
 }
 
-.queue-actions .danger-button {
+.queue-actions .danger-button,
+.menu-content .danger-button {
   color: var(--accent-deep);
   background: rgba(177, 69, 69, 0.12);
 }
@@ -222,7 +228,7 @@
 }
 
 .queue-list.drag-active,
-#queue-list.drag-active {
+.queue-list.drag-active {
   user-select: none;
 }
 
@@ -341,4 +347,58 @@
   .queue-title {
     font-size: 16px;
   }
+}
+
+.queue-actions-wrap,
+.history-actions-wrap {
+  position: relative;
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+}
+
+.menu-toggle {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(99, 76, 60, 0.05);
+  color: var(--muted);
+  font-size: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.menu-content {
+  position: absolute;
+  right: 44px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 6px;
+  box-shadow: 0 8px 24px rgba(79, 56, 39, 0.15);
+  z-index: 100;
+  display: flex;
+  flex-wrap: nowrap;
+  width: max-content;
+  gap: 8px;
+  animation: menuIn 0.2s cubic-bezier(0.18, 0.89, 0.32, 1.28);
+}
+
+.menu-content button {
+  flex-shrink: 0;
+}
+
+@keyframes menuIn {
+  from { opacity: 0; transform: translateY(-50%) translateX(10px) scale(0.95); }
+  to { opacity: 1; transform: translateY(-50%) translateX(0) scale(1); }
+}
+
+.menu-content.hidden {
+  display: none;
 }

@@ -266,6 +266,31 @@ def _qr_quiet_zone_pixels(matrix: list[list[bool]], size: int) -> int:
     return quiet * cell
 
 
+def _find_system_font(*, bold: bool = False) -> str | None:
+    import shutil
+    import subprocess
+
+    if not shutil.which("fc-list"):
+        return None
+    try:
+        # Try to find a CJK font specifically
+        pattern = ":lang=zh"
+        result = subprocess.run(
+            ["fc-list", pattern, "file"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode == 0 and result.stdout:
+            for line in result.stdout.splitlines():
+                path = line.split(":")[0].strip()
+                if path.lower().endswith((".ttf", ".ttc", ".otf")):
+                    return path
+    except Exception:
+        pass
+    return None
+
+
 def _load_font(font_module: Any, size: int, *, bold: bool = False) -> Any:
     candidates = [
         "C:/Windows/Fonts/msyhbd.ttc" if bold else "C:/Windows/Fonts/msyh.ttc",
@@ -284,9 +309,11 @@ def _load_font(font_module: Any, size: int, *, bold: bool = False) -> Any:
         "/usr/share/fonts/opentype/source-han-sans/SourceHanSansSC-Bold.otf" if bold else "/usr/share/fonts/opentype/source-han-sans/SourceHanSansSC-Regular.otf",
         "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
         "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+        "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
         "/usr/share/fonts/truetype/arphic/uming.ttc",
         "/usr/share/fonts/truetype/arphic/ukai.ttc",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        _find_system_font(bold=bold),
     ]
     for candidate in candidates:
         try:
@@ -295,6 +322,7 @@ def _load_font(font_module: Any, size: int, *, bold: bool = False) -> Any:
         except OSError:
             continue
     return font_module.load_default()
+
 
 
 def _fit_text(draw: Any, text: str, font: Any, max_width: int) -> str:

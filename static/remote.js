@@ -1822,7 +1822,7 @@ function renderHistory(history) {
     requesterNode.classList.toggle("hidden", !requesterText);
     node.querySelector(".history-time").textContent = formatHistoryTime(entry.requested_at);
     node.querySelector(".history-count").textContent = `点歌 ${entry.request_count} 次`;
-    node.querySelectorAll("button").forEach((button) => {
+    node.querySelectorAll("button[data-action]").forEach((button) => {
       button.dataset.url = entry.resolved_url || entry.original_url;
     });
     elements.historyList.appendChild(node);
@@ -2424,11 +2424,31 @@ elements.historyList.addEventListener("click", async (event) => {
   if (!button) {
     return;
   }
+
+  if (button.dataset.action === "toggle-menu") {
+    const wrap = button.closest(".history-actions-wrap");
+    const content = wrap?.querySelector(".menu-content");
+    if (content) {
+      const isHidden = content.classList.contains("hidden");
+      document.querySelectorAll(".menu-content").forEach(el => el.classList.add("hidden"));
+      if (isHidden) {
+        content.classList.remove("hidden");
+      }
+    }
+    return;
+  }
+
   const url = button.dataset.url;
   if (!url) {
     return;
   }
   await handleAddByHistory(url, button.dataset.action === "history-next" ? "next" : "tail");
+});
+
+document.addEventListener("click", (event) => {
+  if (!event.target.closest(".queue-actions-wrap") && !event.target.closest(".history-actions-wrap")) {
+    document.querySelectorAll(".menu-content").forEach(el => el.classList.add("hidden"));
+  }
 });
 
 document.addEventListener("keydown", (event) => {
