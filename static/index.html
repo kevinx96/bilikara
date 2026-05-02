@@ -21,7 +21,7 @@
 
       <header class="topbar">
         <div>
-          <p class="eyebrow">bilibili karaoke host</p>
+          <p class="eyebrow">bilikara host</p>
           <h1>bilikara</h1>
           <p class="designer">@VZRXS</p>
         </div>
@@ -189,7 +189,7 @@
               </div>
               <div class="cache-panel-row cache-panel-danger-row">
                 <div>
-                  <p class="cache-panel-label">数据维护</p>
+                  <p class="cache-panel-label">数据清理</p>
                   <p class="cache-panel-hint">保留已唱归档和抽卡缓存</p>
                 </div>
                 <button
@@ -282,17 +282,18 @@
             <section class="av-sync-panel" id="av-sync-panel">
               <div class="av-sync-copy">
                 <p class="section-tag">音画延迟</p>
-                <p class="av-sync-hint">正数表示音频延后，负数表示音频提前。</p>
+                <p class="av-sync-hint">正数表示画面提前，负数表示画面延后。</p>
               </div>
               <div class="av-sync-controls">
-                <button type="button" class="toolbar-button ghost av-sync-step-button" data-step="-200">-200ms</button>
-                <button type="button" class="toolbar-button ghost av-sync-step-button" data-step="-50">-50ms</button>
+                <button type="button" class="toolbar-button ghost av-sync-step-button" data-step="-200">« -200</button>
+                <button type="button" class="toolbar-button ghost av-sync-step-button" data-step="-50">‹ -50</button>
                 <label class="av-sync-input-wrap" for="av-offset-input">
                   <input id="av-offset-input" type="number" min="-5000" max="5000" step="10" value="0" />
                   <span>ms</span>
                 </label>
-                <button type="button" class="toolbar-button ghost av-sync-step-button" data-step="50">+50ms</button>
-                <button type="button" class="toolbar-button ghost av-sync-step-button" data-step="200">+200ms</button>
+                <button type="button" class="toolbar-button ghost av-sync-step-button" data-step="50">+50 ›</button>
+                <button type="button" class="toolbar-button ghost av-sync-step-button" data-step="200">+200 »</button>
+                <button type="button" class="toolbar-button ghost av-sync-reset-button" id="av-offset-reset-button" data-reset-av-offset disabled>复位</button>
               </div>
             </section>
             <section class="volume-panel" id="volume-panel">
@@ -301,7 +302,7 @@
                 <p class="volume-hint">直接控制服务端当前本地播放的音量。</p>
               </div>
               <div class="volume-controls">
-                <button type="button" class="toolbar-button ghost volume-mute-button" id="volume-mute-button">静音</button>
+                <button type="button" class="toolbar-button ghost volume-mute-button" id="volume-mute-button" aria-label="静音" title="静音">🔊</button>
                 <input
                   id="volume-slider"
                   class="volume-slider"
@@ -515,7 +516,7 @@
             <div class="queue-toolbar">
               <button type="button" id="clear-playlist-button" class="toolbar-button ghost">清空点歌列表</button>
               <button type="button" id="history-export-button" class="toolbar-button ghost hidden" title="导出历史记录">
-                <span aria-hidden="true">⇩</span>
+                <!-- <span aria-hidden="true">⇩</span> -->
                 <span>导出</span>
               </button>
               <button type="button" id="clear-history-button" class="toolbar-button ghost hidden">清空历史</button>
@@ -643,6 +644,10 @@
 
     <div class="confirm-popover hidden" id="confirm-popover" role="dialog" aria-modal="false">
       <p class="confirm-text" id="confirm-text">确定执行这个操作吗？</p>
+      <select id="confirm-source" class="confirm-source hidden" aria-label="导出范围">
+        <option value="played">本场记录</option>
+        <option value="history">全部历史</option>
+      </select>
       <div class="confirm-actions">
         <button type="button" id="confirm-cancel" class="toolbar-button">取消</button>
         <button type="button" id="confirm-secondary" class="toolbar-button hidden">导出 CSV</button>
