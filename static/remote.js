@@ -1096,14 +1096,12 @@ function renderCurrentItem(current, playbackMode) {
     const requesterText = requesterBadgeText(current.requester_name);
     elements.currentRequester.textContent = requesterText;
     elements.currentRequester.classList.toggle("hidden", !requesterText);
-    const showCacheState = false; // 始终隐藏，避免页面高度频繁变化
-    elements.currentCacheState.textContent = "";
-    elements.currentCacheState.classList.add("hidden");
+    const showCacheState = current.cache_status !== "ready";
+    elements.currentCacheState.textContent = showCacheState ? currentCacheStateLabel(current) : "";
+    elements.currentCacheState.classList.toggle("hidden", !showCacheState);
     elements.currentCacheState.classList.toggle("ready", current.cache_status === "ready");
     elements.currentCacheState.classList.toggle("failed", current.cache_status === "failed");
-    const modeLabel = "本地缓存";
-    const cacheText = current.cache_message || "等待缓存";
-    elements.currentMeta.textContent = `${modeLabel} · ${cacheText}`;
+    elements.currentMeta.textContent = ""; // 不显示 log 避免高度抖动
     return;
   }
 
