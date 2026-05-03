@@ -113,6 +113,7 @@ const state = {
   gatchaUidVisible: false,
   gatchaUidSaving: false,
   gatchaRefreshSaving: false,
+  gatchaFavlistSaving: false,
   bbdownLoginRequesting: false,
   updateChecking: false,
   updatePreviewEnabled: false,
@@ -263,6 +264,7 @@ const elements = {
   gatchaUidInput: document.getElementById("gatcha-uid-input"),
   addGatchaUidButton: document.getElementById("add-gatcha-uid-button"),
   refreshGatchaCacheButton: document.getElementById("refresh-gatcha-cache-button"),
+  pullGatchaFavlistButton: document.getElementById("pull-gatcha-favlist-button"),
   gatchaUidMessage: document.getElementById("gatcha-uid-message"),
 };
 
@@ -826,6 +828,10 @@ async function refreshGatchaCache() {
   return apiPost("/api/gatcha/refresh");
 }
 
+async function pullGatchaFavlist(uid) {
+  return apiPost("/api/gatcha/favlist", { uid: String(uid || "").trim() });
+}
+
 function gatchaUidResultMessage(result, fallbackUid = "") {
   const cache = result?.cache || {};
   const addedCount = Number(cache.added_count || 0);
@@ -1141,6 +1147,7 @@ function renderGatchaUidFace() {
     showUid,
     saving: state.gatchaUidSaving,
     refreshing: state.gatchaRefreshSaving,
+    favlistSaving: state.gatchaFavlistSaving,
   });
   if (signature === state.gatchaUidFaceRenderSignature) {
     return;
@@ -1162,6 +1169,10 @@ function renderGatchaUidFace() {
   if (elements.refreshGatchaCacheButton) {
     elements.refreshGatchaCacheButton.disabled = state.gatchaRefreshSaving;
     elements.refreshGatchaCacheButton.textContent = state.gatchaRefreshSaving ? "更新中" : "手动更新";
+  }
+  if (elements.pullGatchaFavlistButton) {
+    elements.pullGatchaFavlistButton.disabled = state.gatchaFavlistSaving;
+    elements.pullGatchaFavlistButton.textContent = state.gatchaFavlistSaving ? "拉取中" : "拉取收藏";
   }
 }
 
@@ -5397,6 +5408,29 @@ elements.refreshGatchaCacheButton?.addEventListener("click", async () => {
     setGatchaUidMessage(error.message, true);
   } finally {
     state.gatchaRefreshSaving = false;
+    renderGatchaUidFace();
+  }
+});
+
+elements.pullGatchaFavlistButton?.addEventListener("click", async () => {
+  const uid = String(elements.gatchaUidInput?.value || "").trim();
+  if (!uid) {
+    setGatchaUidMessage("请输入 UID", true);
+    return;
+  }
+
+  state.gatchaFavlistSaving = true;
+  renderGatchaUidFace();
+  setGatchaUidMessage("正在拉取公开收藏夹...(标题含🎤/卡拉/k)");
+  try {
+    const result = await pullGatchaFavlist(uid);
+    setGatchaUidMessage(
+      `已拉取 ${result?.matched_folder_count || 0} 个收藏夹，加入 ${result?.item_count || 0} 个稿件。`
+    );
+  } catch (error) {
+    setGatchaUidMessage(error.message, true);
+  } finally {
+    state.gatchaFavlistSaving = false;
     renderGatchaUidFace();
   }
 });

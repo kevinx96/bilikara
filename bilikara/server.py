@@ -27,6 +27,7 @@ from .bilibili import (
     gatcha_uid_snapshot,
     preview_gatcha_uid,
     refresh_gatcha_cache_in_background,
+    refresh_gatcha_favlist,
     search_gatcha_cache,
 )
 from .cache import CacheManager
@@ -766,6 +767,10 @@ class BilikaraHandler(BaseHTTPRequestHandler):
                     raise ValueError(MISSING_BILIBILI_COOKIE_MESSAGE)
                 started = refresh_gatcha_cache_in_background()
                 self._write_json({"ok": True, "data": {"started": started}})
+                return
+            if route == "/api/gatcha/favlist":
+                result = refresh_gatcha_favlist(body.get("uid"))
+                self._write_json({"ok": True, "data": result})
                 return
             if route == "/api/player/audio-variant":
                 self._require_id(body)

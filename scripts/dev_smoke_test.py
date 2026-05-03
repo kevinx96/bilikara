@@ -188,6 +188,7 @@ class SmokeRunner:
                 "update-check-button",
                 "gatcha-uid-form",
                 "refresh-gatcha-cache-button",
+                "pull-gatcha-favlist-button",
             ],
             "/remote": [
                 "follow-browse-toggle",
@@ -204,6 +205,7 @@ class SmokeRunner:
                 "downloadHistoryExport",
                 "previewGatchaUid",
                 "/api/gatcha/refresh",
+                "/api/gatcha/favlist",
                 "/api/app/update",
             ],
             "/remote.js": [
@@ -1346,8 +1348,17 @@ class SmokeRunner:
             if exc.status != 400:
                 raise RuntimeError(f"Gatcha UID preview invalid-input check returned HTTP {exc.status}") from exc
             print_ok("Gatcha UID preview rejects BV/video IDs before adding anything")
+        else:
+            raise RuntimeError("Gatcha UID preview accepted a BV/video ID")
+
+        try:
+            self.api_post("/api/gatcha/favlist", {"uid": "BV1xx411c7mD"}, timeout=10)
+        except ApiError as exc:
+            if exc.status != 400:
+                raise RuntimeError(f"Gatcha favlist invalid-input check returned HTTP {exc.status}") from exc
+            print_ok("Gatcha favlist pull rejects BV/video IDs before writing cache")
             return
-        raise RuntimeError("Gatcha UID preview accepted a BV/video ID")
+        raise RuntimeError("Gatcha favlist pull accepted a BV/video ID")
 
     def check_follow_browse_api(self, label: str, *, remote: bool) -> None:
         try:
