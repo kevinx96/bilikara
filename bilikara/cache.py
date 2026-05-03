@@ -26,7 +26,6 @@ from .config import (
     CACHE_DIR,
     CACHE_POLICY_FILE,
     # COOKIE,
-    FFMPEG_BUNDLED_PATH,
     FFMPEG_RUNTIME_PATH,
     FFMPEG_PATH_OVERRIDE,
     FFMPEG_TOOLS_DIR,
@@ -50,12 +49,12 @@ SW_HIDE = 0
 RETRY_REQUESTED_MESSAGE = "__retry_requested__"
 SUBPROCESS_OUTPUT_ENCODING = "gb18030" if os.name == "nt" else "utf-8"
 VIDEO_QUALITY_CHOICES = (
-    "8K 超高清",
-    "杜比视界",
-    "HDR 真彩",
-    "4K 超清",
-    "1080P 高码率",
+    # "8K 超高清",
+    # "杜比视界",
+    # "HDR 真彩",
+    # "4K 超清",
     "1080P 60帧",
+    "1080P 高码率",
     "1080P 高清",
     "720P 60帧",
     "720P 高清",
@@ -415,13 +414,13 @@ class CacheManager:
         self._terminate_process(process)
         self._clear_cache_root()
 
-    def retry_item(self, item_id: str) -> None:
+    def retry_item(self, item_id: str, *, force: bool = False) -> None:
         item = self.store.get_item(item_id)
         if not item:
             raise ValueError("没有找到要重新下载的歌曲")
-        if item.cache_status == "ready":
+        if item.cache_status == "ready" and not force:
             raise ValueError("这首歌已经缓存完成，无需重新下载")
-        if item.cache_status not in {"downloading", "failed"}:
+        if item.cache_status not in {"downloading", "failed", "ready", "pending", "queued"}:
             raise ValueError("当前缓存状态不能重新下载")
         if not self._should_cache(item_id):
             raise ValueError("当前不在自动缓存窗口中")
@@ -431,7 +430,8 @@ class CacheManager:
 
         with self.lock:
             active_process = self.active_process if self.active_item_id == item_id else None
-            if active_process is not None:
+            in_flight = item_id in self.pending_ids or self.active_item_id == item_id
+            if in_flight:
                 self.retry_requested_ids.add(item_id)
 
         self.store.update_item(
@@ -447,8 +447,9 @@ class CacheManager:
         )
         self._record_item_activity(item_id)
 
-        if active_process is not None:
-            self._terminate_process(active_process)
+        if in_flight:
+            if active_process is not None:
+                self._terminate_process(active_process)
             return
 
         self._remove_cache_dir(item_id)
@@ -493,6 +494,8 @@ class CacheManager:
     def _cache_item(self, item_id: str, allow_refresh_retry: bool = True) -> None:
         if self.stop_event.is_set() or not self._should_cache(item_id):
             return
+        if self._take_retry_request(item_id):
+            self._remove_cache_dir(item_id)
         item = self.store.get_item(item_id)
         if not item:
             self._remove_cache_dir(item_id)
@@ -553,6 +556,9 @@ class CacheManager:
 
         try:
             cache_result = self._download_selected_streams(item, binary_path, ffmpeg_path, item_dir, log_path)
+            self._raise_if_retry_requested(item_id)
+            self._validate_cache_result(item.id, cache_result, ffmpeg_path, log_path)
+            self._raise_if_retry_requested(item_id)
         except CacheCancelledError as exc:
             if str(exc) == RETRY_REQUESTED_MESSAGE:
                 self._append_log_line(log_path, f"[{self._log_timestamp()}] restarting cache by manual request")
@@ -565,6 +571,13 @@ class CacheManager:
             self._drop_item_cache(item_id, str(exc))
             return
         except DownloadCommandError as exc:
+            if self._take_retry_request(item_id):
+                self._append_log_line(log_path, f"[{self._log_timestamp()}] restarting cache by manual request")
+                self._remove_cache_dir(item_id)
+                fresh_item = self.store.get_item(item_id)
+                if fresh_item and self._should_cache(item_id):
+                    self._cache_item_multi(item_id, fresh_item, allow_refresh_retry=allow_refresh_retry)
+                return
             last_message = str(exc)
             if allow_refresh_retry and self._should_force_refresh_bbdown(last_message):
                 self._append_log_line(
@@ -573,7 +586,7 @@ class CacheManager:
                 )
                 try:
                     self._ensure_bbdown(force_refresh=True)
-                    shutil.rmtree(item_dir, ignore_errors=True)
+                    self._safe_rmtree(item_dir)
                     item_dir.mkdir(parents=True, exist_ok=True)
                     self._cache_item_multi(item_id, item, allow_refresh_retry=False)
                     return
@@ -845,28 +858,27 @@ class CacheManager:
             persist_backup=False,
         )
         self._record_item_activity(item.id)
-        variant_files = self._build_audio_variant_outputs(
-            item,
-            ffmpeg_path,
-            item_dir,
-            log_path,
-            video_file=video_file,
-            audio_files=audio_files,
-        )
+
+        # LEGACY: older split-cache builds generated one muxed MP4 per audio
+        # variant and exposed it as audio_variants[*].media_url. The current
+        # host player uses the independent video track plus audio_url directly,
+        # so keep the old mux path commented below as a reference only.
+        # variant_files = self._build_audio_variant_outputs(
+        #     item,
+        #     ffmpeg_path,
+        #     item_dir,
+        #     log_path,
+        #     video_file=video_file,
+        #     audio_files=audio_files,
+        # )
+
         audio_variants = []
-        for index, (variant_id, label, path) in enumerate(variant_files):
-            raw_audio_file = audio_files[index][1] if index < len(audio_files) else None
-            raw_audio_url = (
-                self._build_media_url(str(raw_audio_file.relative_to(CACHE_DIR)))
-                if raw_audio_file is not None
-                else ""
-            )
+        for index, (page, audio_file, label) in enumerate(audio_files):
             audio_variants.append(
                 {
-                    "id": variant_id,
+                    "id": self._variant_id(page, label, index),
                     "label": label,
-                    "media_url": self._build_media_url(str(path.relative_to(CACHE_DIR))),
-                    "audio_url": raw_audio_url,
+                    "audio_url": self._build_media_url(str(audio_file.relative_to(CACHE_DIR))),
                 }
             )
         existing_variant_id = str(item.selected_audio_variant_id or "").strip()
@@ -880,12 +892,38 @@ class CacheManager:
             if existing_variant_id and existing_variant_id in allowed_variant_ids
             else (str(audio_variants[0].get("id") or "").strip() if audio_variants else "")
         )
+        validation_files = [
+            {
+                "label": f"视频轨 P{video_page}",
+                "path": video_file,
+                "required_streams": {"video"},
+            },
+            *[
+                {
+                    "label": f"音轨 P{page}",
+                    "path": audio_file,
+                    "required_streams": {"audio"},
+                }
+                for page, audio_file, _label in audio_files
+            ],
+            # LEGACY: muxed variant files are no longer generated, so ffprobe
+            # no longer validates "播放文件 {label}" video+audio MP4 outputs.
+            # *[
+            #     {
+            #         "label": f"播放文件 {label}",
+            #         "path": path,
+            #         "required_streams": {"video", "audio"},
+            #     }
+            #     for _variant_id, label, path in variant_files
+            # ],
+        ]
         return {
             "video_file": video_file,
             "video_relative_path": str(video_file.relative_to(CACHE_DIR)),
             "video_media_url": self._build_media_url(str(video_file.relative_to(CACHE_DIR))),
             "audio_variants": audio_variants,
             "selected_audio_variant_id": selected_audio_variant_id,
+            "validation_files": validation_files,
         }
 
     def _download_page_stream(
@@ -941,6 +979,7 @@ class CacheManager:
         )
 
         allowed_extensions = MEDIA_EXTENSIONS if stream_kind == "video" else AUDIO_EXTENSIONS
+        self._raise_if_retry_requested(item.id)
         stream_file = self._find_stream_file(target_dir, allowed_extensions)
         if not stream_file:
             raise DownloadCommandError(f"{stage_label} 完成后未找到输出文件")
@@ -1036,6 +1075,7 @@ class CacheManager:
             persist_backup=False,
         )
         self._record_item_activity(item_id)
+        self._raise_if_retry_requested(item_id)
 
     # LEGACY: old mux step used by the single-output cache path. Split playback
     # keeps video and audio files separate, so this remains only as a reference.
@@ -1177,74 +1217,280 @@ class CacheManager:
     #         "selected_audio_variant_id": selected_audio_variant_id,
     #     }
 
-    def _build_audio_variant_outputs(
+    # LEGACY: old split-cache builds generated muxed MP4 files under
+    # cache/<item>/variants and exposed them as audio_variants[*].media_url.
+    # The current player uses split media (video_media_url + audio_url), so this
+    # mux path is intentionally disabled to avoid extra ffmpeg work and storage.
+    #
+    # def _build_audio_variant_outputs(
+    #     self,
+    #     item,
+    #     ffmpeg_path: Path,
+    #     item_dir: Path,
+    #     log_path: Path,
+    #     *,
+    #     video_file: Path,
+    #     audio_files: list[tuple[int, Path, str]],
+    # ) -> list[tuple[str, str, Path]]:
+    #     if not audio_files:
+    #         raise DownloadCommandError("没有可用的音轨文件，无法生成音轨变体")
+    #
+    #     variant_files: list[tuple[str, str, Path]] = []
+    #     variants_dir = item_dir / "variants"
+    #     variants_dir.mkdir(parents=True, exist_ok=True)
+    #
+    #     for index, (page, audio_file, label) in enumerate(audio_files):
+    #         variant_id = self._variant_id(page, label, index)
+    #         variant_path = variants_dir / f"{variant_id}.mp4"
+    #         variant_path.unlink(missing_ok=True)
+    #
+    #         command = [
+    #             str(ffmpeg_path),
+    #             "-y",
+    #             "-i",
+    #             str(video_file),
+    #             "-i",
+    #             str(audio_file),
+    #             "-map",
+    #             "0:v:0",
+    #             "-map",
+    #             "1:a:0",
+    #             "-c",
+    #             "copy",
+    #             "-movflags",
+    #             "+faststart",
+    #             "-strict",
+    #             "-2",
+    #             "-metadata:s:a:0",
+    #             f"title={label}",
+    #             str(variant_path),
+    #         ]
+    #         self._append_log_line(
+    #             log_path,
+    #             f"[{self._log_timestamp()}] command: {json.dumps(command, ensure_ascii=False)}",
+    #         )
+    #
+    #         process = subprocess.run(
+    #             command,
+    #             capture_output=True,
+    #             text=True,
+    #             errors="replace",
+    #             check=False,
+    #             cwd=str(BB_DOWN_DIR),
+    #             env=self._tool_process_env(ffmpeg_path),
+    #             **self._hidden_process_kwargs(),
+    #         )
+    #         if process.returncode != 0 or not variant_path.exists():
+    #             raise DownloadCommandError(
+    #                 process.stderr.strip()
+    #                 or process.stdout.strip()
+    #                 or f"生成音轨变体失败: {label}"
+    #             )
+    #
+    #         self._record_item_activity(item.id)
+    #         variant_files.append((variant_id, label, variant_path))
+    #     return variant_files
+
+    def _validate_cache_result(
         self,
-        item,
+        item_id: str,
+        cache_result: dict[str, object],
         ffmpeg_path: Path,
-        item_dir: Path,
         log_path: Path,
-        *,
-        video_file: Path,
-        audio_files: list[tuple[int, Path, str]],
-    ) -> list[tuple[str, str, Path]]:
-        if not audio_files:
-            raise DownloadCommandError("没有可用的音轨文件，无法生成音轨变体")
+    ) -> None:
+        validation_files = cache_result.get("validation_files")
+        if not isinstance(validation_files, list):
+            return
 
-        variant_files: list[tuple[str, str, Path]] = []
-        variants_dir = item_dir / "variants"
-        variants_dir.mkdir(parents=True, exist_ok=True)
-
-        for index, (page, audio_file, label) in enumerate(audio_files):
-            variant_id = self._variant_id(page, label, index)
-            variant_path = variants_dir / f"{variant_id}.mp4"
-            variant_path.unlink(missing_ok=True)
-
-            command = [
-                str(ffmpeg_path),
-                "-y",
-                "-i",
-                str(video_file),
-                "-i",
-                str(audio_file),
-                "-map",
-                "0:v:0",
-                "-map",
-                "1:a:0",
-                "-c",
-                "copy",
-                "-movflags",
-                "+faststart",
-                "-strict",
-                "-2",
-                "-metadata:s:a:0",
-                f"title={label}",
-                str(variant_path),
-            ]
+        ffprobe_path = self._ffprobe_path_for_ffmpeg(ffmpeg_path)
+        if not ffprobe_path:
             self._append_log_line(
                 log_path,
-                f"[{self._log_timestamp()}] command: {json.dumps(command, ensure_ascii=False)}",
+                f"[{self._log_timestamp()}] ffprobe validate: skipped, ffprobe unavailable",
             )
+            return
 
-            process = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                errors="replace",
-                check=False,
-                cwd=str(BB_DOWN_DIR),
-                env=self._tool_process_env(ffmpeg_path),
-                **self._hidden_process_kwargs(),
-            )
-            if process.returncode != 0 or not variant_path.exists():
-                raise DownloadCommandError(
-                    process.stderr.strip()
-                    or process.stdout.strip()
-                    or f"生成音轨变体失败: {label}"
+        self.store.update_item(
+            item_id,
+            cache_progress=99.5,
+            cache_message="正在校验缓存",
+            persist_backup=False,
+        )
+        self._record_item_activity(item_id)
+        self._append_log_line(
+            log_path,
+            f"[{self._log_timestamp()}] ffprobe validate: start ({len(validation_files)} files)",
+        )
+
+        failure_count = 0
+        for entry in validation_files:
+            self._raise_if_retry_requested(item_id)
+            if not isinstance(entry, dict):
+                continue
+            label = str(entry.get("label") or "媒体文件")
+            try:
+                path = entry.get("path")
+                required_streams = entry.get("required_streams")
+                if not isinstance(path, Path):
+                    raise DownloadCommandError(f"缓存校验失败: {label} 路径无效")
+                if not isinstance(required_streams, set):
+                    required_streams = set(required_streams or [])
+                self._validate_media_file(
+                    ffprobe_path,
+                    ffmpeg_path,
+                    path,
+                    label=label,
+                    required_streams={str(stream) for stream in required_streams},
+                    log_path=log_path,
+                )
+            except CacheCancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                failure_count += 1
+                self._append_log_line(
+                    log_path,
+                    f"[{self._log_timestamp()}] ffprobe validate {label}: failed: "
+                    f"{self._compact_probe_error(str(exc))}",
                 )
 
-            self._record_item_activity(item.id)
-            variant_files.append((variant_id, label, variant_path))
-        return variant_files
+        if failure_count:
+            self._append_log_line(
+                log_path,
+                f"[{self._log_timestamp()}] ffprobe validate: completed with {failure_count} warning(s)",
+            )
+        else:
+            self._append_log_line(log_path, f"[{self._log_timestamp()}] ffprobe validate: ok")
+
+    def _validate_media_file(
+        self,
+        ffprobe_path: Path,
+        ffmpeg_path: Path,
+        media_path: Path,
+        *,
+        label: str,
+        required_streams: set[str],
+        log_path: Path,
+    ) -> None:
+        if not media_path.exists():
+            raise DownloadCommandError(f"缓存校验失败: {label} 文件不存在")
+        size = media_path.stat().st_size
+        if size <= 0:
+            raise DownloadCommandError(f"缓存校验失败: {label} 文件为空")
+
+        command = [
+            str(ffprobe_path),
+            "-v",
+            "error",
+            "-print_format",
+            "json",
+            "-show_streams",
+            "-show_format",
+            str(media_path),
+        ]
+        self._append_log_line(
+            log_path,
+            f"[{self._log_timestamp()}] command: {json.dumps(command, ensure_ascii=False)}",
+        )
+        process = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            timeout=20,
+            cwd=str(BB_DOWN_DIR),
+            env=self._tool_process_env(ffmpeg_path),
+            **self._hidden_process_kwargs(),
+        )
+        if process.returncode != 0:
+            message = (process.stderr or process.stdout or "").strip() or f"ffprobe 退出码 {process.returncode}"
+            raise DownloadCommandError(f"缓存校验失败: {label}: {self._compact_probe_error(message)}")
+
+        try:
+            payload = json.loads(process.stdout or "{}")
+        except json.JSONDecodeError as exc:
+            raise DownloadCommandError(f"缓存校验失败: {label}: ffprobe 输出无法解析") from exc
+
+        streams = payload.get("streams")
+        if not isinstance(streams, list) or not streams:
+            raise DownloadCommandError(f"缓存校验失败: {label}: 未识别到媒体流")
+
+        detected_streams = {
+            str(stream.get("codec_type") or "").strip()
+            for stream in streams
+            if isinstance(stream, dict)
+        }
+        missing_streams = required_streams - detected_streams
+        if missing_streams:
+            missing_label = "/".join(sorted(missing_streams))
+            detected_label = "/".join(sorted(stream for stream in detected_streams if stream)) or "none"
+            raise DownloadCommandError(
+                f"缓存校验失败: {label}: 缺少 {missing_label} 流，实际为 {detected_label}"
+            )
+
+        duration = self._probe_duration(payload)
+        duration_label = f"{duration:.2f}s" if duration is not None else "unknown"
+        stream_label = "/".join(sorted(stream for stream in detected_streams if stream)) or "unknown"
+        self._append_log_line(
+            log_path,
+            f"[{self._log_timestamp()}] ffprobe validate {label}: ok "
+            f"(streams={stream_label}, duration={duration_label}, size={size})",
+        )
+
+    @staticmethod
+    def _probe_duration(payload: dict[str, object]) -> float | None:
+        candidates: list[object] = []
+        file_format = payload.get("format")
+        if isinstance(file_format, dict):
+            candidates.append(file_format.get("duration"))
+        streams = payload.get("streams")
+        if isinstance(streams, list):
+            candidates.extend(
+                stream.get("duration")
+                for stream in streams
+                if isinstance(stream, dict)
+            )
+        for candidate in candidates:
+            try:
+                duration = float(candidate)
+            except (TypeError, ValueError):
+                continue
+            if duration > 0:
+                return duration
+        return None
+
+    @staticmethod
+    def _compact_probe_error(message: str) -> str:
+        normalized = " ".join(str(message or "").split())
+        return normalized[:240] if normalized else "未知错误"
+
+    @classmethod
+    def _ffprobe_path_for_ffmpeg(cls, ffmpeg_path: Path) -> Path | None:
+        candidates = []
+        if FFPROBE_RUNTIME_PATH.exists():
+            candidates.append(FFPROBE_RUNTIME_PATH)
+        ffmpeg_dir = ffmpeg_path if ffmpeg_path.is_dir() else ffmpeg_path.parent
+        candidates.append(ffmpeg_dir / ("ffprobe.exe" if os.name == "nt" else "ffprobe"))
+        system_ffprobe = shutil.which("ffprobe")
+        if system_ffprobe:
+            candidates.append(Path(system_ffprobe))
+        seen: set[str] = set()
+        for candidate in candidates:
+            try:
+                candidate_key = os.path.normcase(str(candidate.resolve()))
+            except OSError:
+                candidate_key = os.path.normcase(str(candidate))
+            if candidate_key in seen:
+                continue
+            seen.add(candidate_key)
+            if cls._is_usable_ffprobe(candidate):
+                return candidate
+        return None
+
+    @staticmethod
+    def _is_usable_ffprobe(binary_path: Path) -> bool:
+        return bool(CacheManager._read_tool_version(binary_path, "ffprobe"))
 
     @staticmethod
     def _variant_id(page: int, label: str, index: int) -> str:
@@ -1424,25 +1670,33 @@ class CacheManager:
         return BB_DOWN_DIR / ("BBDown.exe" if os.name == "nt" else "BBDown")
 
     def _find_media_file(self, item_dir: Path) -> Path | None:
-        media_files = [
-            path
-            for path in item_dir.rglob("*")
-            if path.is_file() and path.suffix.lower() in MEDIA_EXTENSIONS
-        ]
-        if not media_files:
-            return None
-        return max(media_files, key=lambda path: path.stat().st_size)
+        return self._largest_media_file(item_dir, MEDIA_EXTENSIONS)
+
+    @classmethod
+    def _find_stream_file(cls, target_dir: Path, allowed_extensions: set[str]) -> Path | None:
+        return cls._largest_media_file(target_dir, allowed_extensions)
 
     @staticmethod
-    def _find_stream_file(target_dir: Path, allowed_extensions: set[str]) -> Path | None:
-        media_files = [
-            path
-            for path in target_dir.rglob("*")
-            if path.is_file() and path.suffix.lower() in allowed_extensions
-        ]
+    def _largest_media_file(root_dir: Path, allowed_extensions: set[str]) -> Path | None:
+        try:
+            candidate_paths = list(root_dir.rglob("*"))
+        except OSError:
+            return None
+
+        media_files: list[tuple[int, Path]] = []
+        for path in candidate_paths:
+            try:
+                if not path.is_file() or path.suffix.lower() not in allowed_extensions:
+                    continue
+                size = path.stat().st_size
+            except OSError:
+                continue
+            media_files.append((size, path))
+
         if not media_files:
             return None
-        return max(media_files, key=lambda path: path.stat().st_size)
+        media_files.sort(key=lambda entry: entry[0], reverse=True)
+        return media_files[0][1]
 
     @staticmethod
     def _iter_output_messages(stream: TextIO) -> Iterator[str]:
@@ -1544,11 +1798,20 @@ class CacheManager:
             return runtime_ffmpeg
 
     def _preferred_ffmpeg_sources(self) -> tuple[Path | None, Path | None]:
-        for vendor_dir in (VENDOR_DIR, INTERNAL_VENDOR_DIR):
-            ffmpeg_path = vendor_dir / ("ffmpeg.exe" if os.name == "nt" else "ffmpeg")
+        tool_suffix = ".exe" if os.name == "nt" else ""
+        vendor_pairs = (
+            (
+                VENDOR_DIR / f"ffmpeg{tool_suffix}",
+                VENDOR_DIR / f"ffprobe{tool_suffix}",
+            ),
+            (
+                INTERNAL_VENDOR_DIR / f"ffmpeg{tool_suffix}",
+                INTERNAL_VENDOR_DIR / f"ffprobe{tool_suffix}",
+            ),
+        )
+        for ffmpeg_path, ffprobe_path in vendor_pairs:
             if not ffmpeg_path.exists():
                 continue
-            ffprobe_path = vendor_dir / ("ffprobe.exe" if os.name == "nt" else "ffprobe")
             return ffmpeg_path, ffprobe_path if ffprobe_path.exists() else None
 
         system_ffmpeg = shutil.which("ffmpeg")
@@ -1571,7 +1834,10 @@ class CacheManager:
         shutil.copy2(source_resolved, target)
         target.chmod(target.stat().st_mode | stat.S_IEXEC)
 
-    def _read_ffmpeg_version(self, binary_path: Path) -> str:
+    @staticmethod
+    def _read_tool_version(binary_path: Path, tool_name: str) -> str:
+        if not binary_path.exists():
+            return ""
         try:
             process = subprocess.run(
                 [str(binary_path), "-version"],
@@ -1580,7 +1846,7 @@ class CacheManager:
                 errors="replace",
                 check=False,
                 timeout=10,
-                **self._hidden_process_kwargs(),
+                **CacheManager._hidden_process_kwargs(),
             )
         except (OSError, subprocess.SubprocessError):
             return ""
@@ -1592,9 +1858,18 @@ class CacheManager:
         if not first_line:
             return ""
         parts = first_line[0].split()
-        if len(parts) >= 3 and parts[0].lower() == "ffmpeg" and parts[1] == "version":
+        executable_name = Path(parts[0]).name.lower()
+        normalized_tool_name = tool_name.lower()
+        if (
+            len(parts) >= 3
+            and executable_name in {normalized_tool_name, f"{normalized_tool_name}.exe"}
+            and parts[1] == "version"
+        ):
             return parts[2]
         return ""
+
+    def _read_ffmpeg_version(self, binary_path: Path) -> str:
+        return self._read_tool_version(binary_path, "ffmpeg")
 
     @staticmethod
     def _bbdown_ffmpeg_path_arg(binary_path: Path) -> str:
@@ -1711,20 +1986,21 @@ class CacheManager:
         for child in CACHE_DIR.iterdir():
             if child.name not in valid_ids:
                 if child.is_dir():
-                    shutil.rmtree(child, ignore_errors=True)
+                    self._safe_rmtree(child)
                 else:
-                    child.unlink(missing_ok=True)
+                    self._safe_unlink(child)
                 self._remove_item_log(child.name)
 
     def _clear_cache_root(self) -> None:
         for child in CACHE_DIR.iterdir():
             if child.is_dir():
-                shutil.rmtree(child, ignore_errors=True)
+                self._safe_rmtree(child)
             else:
-                child.unlink(missing_ok=True)
+                self._safe_unlink(child)
         self._clear_log_root()
 
-    def _path_size(self, path: Path) -> int:
+    @staticmethod
+    def _path_size(path: Path) -> int:
         if not path.exists():
             return 0
         if path.is_file():
@@ -1734,19 +2010,22 @@ class CacheManager:
                 return 0
 
         total = 0
-        for child in path.rglob("*"):
-            if not child.is_file():
-                continue
-            try:
-                total += child.stat().st_size
-            except OSError:
-                continue
+        try:
+            for child in path.rglob("*"):
+                if not child.is_file():
+                    continue
+                try:
+                    total += child.stat().st_size
+                except OSError:
+                    continue
+        except OSError:
+            return total
         return total
 
     def _ensure_item_cached(self, item) -> None:
         video_path = CACHE_DIR / item.video_relative_path if item.video_relative_path else None
         has_audio_variants = any(
-            isinstance(variant, dict) and str(variant.get("audio_url") or variant.get("media_url") or "").strip()
+            isinstance(variant, dict) and str(variant.get("audio_url") or "").strip()
             for variant in item.audio_variants
         )
         if video_path and video_path.exists() and has_audio_variants:
@@ -1797,20 +2076,34 @@ class CacheManager:
         self._record_item_activity(item_id)
 
     def _remove_cache_dir(self, item_id: str) -> None:
-        shutil.rmtree(CACHE_DIR / item_id, ignore_errors=True)
+        self._safe_rmtree(CACHE_DIR / item_id)
         self._remove_item_log(item_id)
 
     def _remove_item_log(self, item_id: str) -> None:
-        self._item_log_path(item_id).unlink(missing_ok=True)
+        self._safe_unlink(self._item_log_path(item_id))
 
     def _clear_log_root(self) -> None:
         if not self.log_dir.exists():
             return
         for child in self.log_dir.iterdir():
             if child.is_dir():
-                shutil.rmtree(child, ignore_errors=True)
+                self._safe_rmtree(child)
             else:
-                child.unlink(missing_ok=True)
+                self._safe_unlink(child)
+
+    @staticmethod
+    def _safe_rmtree(path: Path) -> None:
+        try:
+            shutil.rmtree(path, ignore_errors=True)
+        except OSError:
+            return
+
+    @staticmethod
+    def _safe_unlink(path: Path) -> None:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            return
 
     def _record_item_activity(self, item_id: str) -> None:
         with self.lock:
@@ -1822,6 +2115,10 @@ class CacheManager:
                 return False
             self.retry_requested_ids.discard(item_id)
             return True
+
+    def _raise_if_retry_requested(self, item_id: str) -> None:
+        if self._take_retry_request(item_id):
+            raise CacheCancelledError(RETRY_REQUESTED_MESSAGE)
 
     def _should_cache(self, item_id: str) -> bool:
         with self.lock:

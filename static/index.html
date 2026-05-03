@@ -11,7 +11,7 @@
       <section class="backup-banner hidden" id="backup-banner">
         <div class="backup-copy">
           <p class="backup-title">Auto Restore</p>
-          <p class="backup-text" id="backup-text">检测到上次未完成的播放列表</p>
+          <p class="backup-text" id="backup-text">检测到上次未完成的点歌列表</p>
         </div>
         <div class="backup-actions">
           <button type="button" id="discard-backup-button" class="banner-action">清空备份</button>
@@ -21,7 +21,7 @@
 
       <header class="topbar">
         <div>
-          <p class="eyebrow">bilibili karaoke host</p>
+          <p class="eyebrow">bilikara host</p>
           <h1>bilikara</h1>
           <p class="designer">@VZRXS</p>
         </div>
@@ -174,10 +174,11 @@
                   重新生成二维码
                 </button>
               </div>
-              <div class="cache-panel-row cache-panel-mode-row">
+              <!-- LEGACY: 在线外挂模式暂时下线，保留元素 id 仅避免旧脚本引用失效。 -->
+              <div class="cache-panel-row cache-panel-mode-row hidden" aria-hidden="true">
                 <div>
                   <p class="cache-panel-label">播放模式</p>
-                  <p class="cache-panel-hint">⚠️在线外挂仅作为备用</p>
+                  <p class="cache-panel-hint">本地缓存</p>
                 </div>
                 <div class="cache-mode-control">
                   <span id="playback-mode-current">本地缓存</span>
@@ -188,7 +189,7 @@
               </div>
               <div class="cache-panel-row cache-panel-danger-row">
                 <div>
-                  <p class="cache-panel-label">数据维护</p>
+                  <p class="cache-panel-label">数据清理</p>
                   <p class="cache-panel-hint">保留已唱归档和抽卡缓存</p>
                 </div>
                 <button
@@ -199,6 +200,54 @@
                 >
                   清空
                 </button>
+              </div>
+              <div class="cache-panel-row cache-panel-danger-row">
+                <div>
+                  <p class="cache-panel-label">播放异常处理</p>
+                  <p class="cache-panel-hint">本地播放出错时重新缓存或重置播放器</p>
+                </div>
+                <div class="cache-panel-actions">
+                  <button
+                    type="button"
+                    class="toolbar-button cache-retry-current-button"
+                    id="current-cache-retry-button"
+                    title="重新缓存当前歌曲"
+                    disabled
+                  >
+                    重新缓存
+                  </button>
+                  <button
+                    type="button"
+                    class="toolbar-button cache-data-reset-button"
+                    id="player-reset-button"
+                    title="重置播放器状态"
+                  >
+                    重置
+                  </button>
+                </div>
+              </div>
+              <div class="cache-panel-row cache-panel-update-row">
+                <div>
+                  <p class="cache-panel-label">应用更新</p>
+                  <p class="cache-panel-hint">默认检查正式版</p>
+                </div>
+                <div class="cache-update-control">
+                  <label class="cache-preview-field" for="update-preview-checkbox" title="同时检查预览版 Release">
+                    <span>预览版</span>
+                    <input id="update-preview-checkbox" type="checkbox" />
+                    <span class="cache-preview-switch" aria-hidden="true">
+                      <span class="cache-preview-switch-thumb"></span>
+                    </span>
+                  </label>
+                  <button
+                    type="button"
+                    class="toolbar-button cache-update-button"
+                    id="update-check-button"
+                    title="检查 bilikara 新版本"
+                  >
+                    检查更新
+                  </button>
+                </div>
               </div>
             </div>
           </div>
@@ -226,24 +275,25 @@
 
             <div class="player-frame" id="player-frame">
               <div class="empty-state">
-                <p>把 Bilibili 视频链接加入列表后，这里会开始播放。</p>
+                <p>把 Bilibili 视频链接加入点歌列表后，这里会开始播放。</p>
               </div>
             </div>
             <div class="audio-variant-bar hidden" id="audio-variant-bar"></div>
             <section class="av-sync-panel" id="av-sync-panel">
               <div class="av-sync-copy">
                 <p class="section-tag">音画延迟</p>
-                <p class="av-sync-hint">正数表示音频延后，负数表示音频提前。</p>
+                <p class="av-sync-hint">正数表示画面提前，负数表示画面延后。</p>
               </div>
               <div class="av-sync-controls">
-                <button type="button" class="toolbar-button ghost av-sync-step-button" data-step="-200">-200ms</button>
-                <button type="button" class="toolbar-button ghost av-sync-step-button" data-step="-50">-50ms</button>
+                <button type="button" class="toolbar-button ghost av-sync-step-button" data-step="-200">« -200</button>
+                <button type="button" class="toolbar-button ghost av-sync-step-button" data-step="-50">‹ -50</button>
                 <label class="av-sync-input-wrap" for="av-offset-input">
                   <input id="av-offset-input" type="number" min="-5000" max="5000" step="10" value="0" />
                   <span>ms</span>
                 </label>
-                <button type="button" class="toolbar-button ghost av-sync-step-button" data-step="50">+50ms</button>
-                <button type="button" class="toolbar-button ghost av-sync-step-button" data-step="200">+200ms</button>
+                <button type="button" class="toolbar-button ghost av-sync-step-button" data-step="50">+50 ›</button>
+                <button type="button" class="toolbar-button ghost av-sync-step-button" data-step="200">+200 »</button>
+                <button type="button" class="toolbar-button ghost av-sync-reset-button" id="av-offset-reset-button" data-reset-av-offset disabled>复位</button>
               </div>
             </section>
             <section class="volume-panel" id="volume-panel">
@@ -252,7 +302,7 @@
                 <p class="volume-hint">直接控制服务端当前本地播放的音量。</p>
               </div>
               <div class="volume-controls">
-                <button type="button" class="toolbar-button ghost volume-mute-button" id="volume-mute-button">静音</button>
+                <button type="button" class="toolbar-button ghost volume-mute-button" id="volume-mute-button" aria-label="静音" title="静音">🔊</button>
                 <input
                   id="volume-slider"
                   class="volume-slider"
@@ -273,6 +323,7 @@
                 <p class="section-tag">Song Request</p>
                 <h2>点歌</h2>
               </div>
+              <button type="button" id="resort-playlist-button" class="toolbar-button ghost">重新排序</button>
             </div>
 
             <form id="add-form" class="add-form compact-form">
@@ -347,22 +398,60 @@
               </div>
             </section>
 
-            <section class="list-card sub-card search-sub-card">
+            <section class="list-card sub-card search-sub-card" id="search-panel">
               <div class="search-card">
                 <div class="search-sub-card-head">
                   <div>
-                    <p class="section-tag">Local Search</p>
-                    <h2>搜索</h2>
+                    <p class="section-tag" id="search-tag">Local Search</p>
+                    <h2 id="search-title">搜索</h2>
+                  </div>
+                  <button type="button" id="search-cookie-toggle" class="toolbar-button ghost search-cookie-toggle">
+                    关注浏览
+                  </button>
+                </div>
+
+                <div id="search-stage" class="search-stage">
+                  <div class="search-stage-inner">
+                    <div id="search-main-view" class="search-face search-face-front">
+                      <form id="search-form" class="search-inputs">
+                        <div class="input-group">
+                          <input type="text" id="search-query" placeholder="搜索本地歌曲目录 (需要登录或者 cookie)" autocomplete="off">
+                        </div>
+                        <button type="submit" id="search-button" class="next-button">搜索</button>
+                      </form>
+                      <p class="search-message" id="search-message" role="status"></p>
+                      <div id="search-results" class="search-results hidden"></div>
+                    </div>
+
+                    <div id="search-cookie-view" class="search-face search-face-back search-cookie-view">
+                      <div class="follow-browser" id="follow-browser">
+                        <div id="follow-up-list-view" class="follow-up-list-view">
+                          <div id="follow-up-grid" class="follow-up-grid" role="list"></div>
+                        </div>
+                        <div id="follow-up-items-view" class="follow-up-items-view hidden">
+                          <div class="follow-browser-head">
+                            <button type="button" id="follow-browse-back" class="toolbar-button ghost">返回</button>
+                            <div class="follow-browser-title-block">
+                              <h3 id="follow-browse-title">UP 主稿件</h3>
+                              <p id="follow-browse-count" class="follow-browser-count">0 首</p>
+                            </div>
+                          </div>
+                          <form id="follow-search-form" class="follow-search-form">
+                            <input
+                              type="text"
+                              id="follow-search-query"
+                              placeholder="在这个 UP 的缓存稿件里搜索"
+                              autocomplete="off"
+                            >
+                            <button type="submit" id="follow-search-button" class="next-button">搜索</button>
+                          </form>
+                          <div id="follow-song-results" class="search-results"></div>
+                        </div>
+                        <p class="gatcha-message" id="follow-browse-message" role="status"></p>
+                      </div>
+                    </div>
                   </div>
                 </div>
-                <form id="search-form" class="search-inputs">
-                  <div class="input-group">
-                    <input type="text" id="search-query" placeholder="搜索本地歌曲目录 (需要登录或者 cookie)" autocomplete="off">
-                  </div>
-                  <button type="submit" id="search-button" class="next-button">搜索</button>
-                </form>
-                <p class="search-message" id="search-message" role="status"></p>
-                <div id="search-results" class="search-results hidden"></div>
               </div>
             </section>
             
@@ -372,8 +461,8 @@
                  <p class="section-tag" id="gatcha-tag">gatcha Draw</p>
                  <h2 id="gatcha-title">试试运气</h2>
                 </div>
-                <button type="button" id="gatcha-cookie-toggle" class="toolbar-button ghost gatcha-cookie-toggle">
-                  输入 Cookie
+                <button type="button" id="gatcha-uid-toggle" class="toolbar-button ghost gatcha-uid-toggle">
+                  添加 UID
                 </button>
               </div>
       
@@ -397,20 +486,19 @@
                     </div>
                   </div>
 
-                  <div id="gatcha-cookie-view" class="gatcha-face gatcha-face-back gatcha-cookie-view">
-                    <div class="cookie-config-bar">
-                      <div class="cookie-inputs">
+                  <div id="gatcha-uid-view" class="gatcha-face gatcha-face-back gatcha-uid-view">
+                    <div class="gatcha-uid-bar">
+                      <form id="gatcha-uid-form" class="gatcha-uid-form">
                         <div class="input-group">
-                          <label>SESSDATA</label>
-                          <input type="text" id="cookie-sessdata" placeholder="从浏览器获取的 SESSDATA">
+                          <label>UID</label>
+                          <input type="text" id="gatcha-uid-input" placeholder="UID 或 UP 主空间链接">
                         </div>
-                        <div class="input-group">
-                          <label>bili_jct</label>
-                          <input type="text" id="cookie-jct" placeholder="从浏览器获取的 bili_jct">
-                        </div>
-                        <button type="button" id="save-cookie-button" class="next-button">更新配置</button>
-                      </div>
-                      <p class="gatcha-message" id="cookie-message" role="status"></p>
+                        <button type="submit" id="add-gatcha-uid-button" class="next-button">添加</button>
+                      </form>
+                      <button type="button" id="refresh-gatcha-cache-button" class="toolbar-button gatcha-refresh-button">
+                        手动更新
+                      </button>
+                      <p class="gatcha-message" id="gatcha-uid-message" role="status"></p>
                     </div>
                   </div>
                 </div>
@@ -422,11 +510,16 @@
         <aside class="queue-card list-card">
           <div class="queue-card-head">
             <div>
-              <p class="section-tag" id="list-tag">Queue</p>
-              <h2><span id="list-title">播放列表</span> <span class="queue-count" id="queue-count">(0首)</span></h2>
+              <p class="section-tag" id="list-tag">Requests</p>
+              <h2><span id="list-title">点歌列表</span> <span class="queue-count" id="queue-count">(0首)</span></h2>
             </div>
             <div class="queue-toolbar">
-              <button type="button" id="clear-playlist-button" class="toolbar-button ghost">清空列表</button>
+              <button type="button" id="clear-playlist-button" class="toolbar-button ghost">清空点歌列表</button>
+              <button type="button" id="history-export-button" class="toolbar-button ghost hidden" title="导出历史记录">
+                <!-- <span aria-hidden="true">⇩</span> -->
+                <span>导出</span>
+              </button>
+              <button type="button" id="clear-history-button" class="toolbar-button ghost hidden">清空历史</button>
               <button type="button" id="history-toggle-button" class="toolbar-button ghost">历史记录</button>
             </div>
           </div>
@@ -481,8 +574,8 @@
 
     <!-- Templates -->
     <template id="playlist-item-template">
-      <article class="song-item" draggable="true">
-        <div class="song-badge-column">
+      <article class="song-item">
+        <div class="song-badge-column" draggable="true" data-drag-handle title="拖动调整顺序">
           <div class="song-progress-badge">
             <span class="song-index-label"></span>
             <span class="song-badge-check hidden">✓</span>
@@ -490,6 +583,7 @@
               type="button"
               class="cache-retry-button song-retry-button hidden"
               data-action="retry-cache"
+              draggable="false"
               title="重新下载缓存"
               aria-label="重新下载缓存"
             >
@@ -550,8 +644,13 @@
 
     <div class="confirm-popover hidden" id="confirm-popover" role="dialog" aria-modal="false">
       <p class="confirm-text" id="confirm-text">确定执行这个操作吗？</p>
+      <select id="confirm-source" class="confirm-source hidden" aria-label="导出范围">
+        <option value="played">本场记录</option>
+        <option value="history">全部历史</option>
+      </select>
       <div class="confirm-actions">
         <button type="button" id="confirm-cancel" class="toolbar-button">取消</button>
+        <button type="button" id="confirm-secondary" class="toolbar-button hidden">导出 CSV</button>
         <button type="button" id="confirm-ok" class="next-button">确认</button>
       </div>
     </div>
@@ -564,7 +663,7 @@
             <p class="section-tag">Part Binding</p>
             <h2>选择分P绑定</h2>
           </div>
-          <button type="button" id="binding-modal-close" class="banner-close" aria-label="关闭">x</button>
+          <button type="button" id="binding-modal-close" class="banner-close" aria-label="关闭">×</button>
         </div>
         <p class="selection-modal-text" id="binding-modal-text">请选择要下载的视频分P和音频分P。</p>
         <div class="selection-modal-grid">
@@ -579,7 +678,7 @@
         </div>
         <div class="selection-modal-actions">
           <button type="button" id="binding-modal-cancel" class="toolbar-button">取消</button>
-          <button type="button" id="binding-modal-confirm" class="next-button">加入列表</button>
+          <button type="button" id="binding-modal-confirm" class="next-button">加入点歌列表</button>
         </div>
       </div>
     </div>

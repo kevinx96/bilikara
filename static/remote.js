@@ -1,8 +1,9 @@
-const pollIntervalMs = 1500;
 const audioVariantSwitchDebounceMs = 350;
-const gatchaCooldownMs = 15000;
 const playerSettingsEchoSuppressMs = 1800;
 const remoteVolumeCommitDebounceMs = 160;
+const viewportScaleResetDelaysMs = [0, 120, 360];
+const eventStreamInitialRetryMs = 1000;
+const eventStreamMaxRetryMs = 15000;
 const storageKeys = {
   layoutMode: "bilikara.remote.layout.mode",
 };
@@ -33,15 +34,38 @@ const state = {
     video: false,
     audio: false,
   },
+  eventSource: null,
+  eventStreamReconnectTimer: null,
+  eventStreamRetryMs: eventStreamInitialRetryMs,
   gatchaCandidate: null,
-  gatchaCooldownUntil: 0,
-  gatchaCooldownTimer: null,
+  gatchaUidVisible: false,
+  gatchaUidSaving: false,
+  followBrowseVisible: false,
+  followBrowseData: null,
+  followBrowseSelectedUid: "",
+  followBrowseLoading: false,
+  followBrowseRenderSignature: "",
   layoutMode: "full",
+  remoteAccessRenderSignature: "",
+  remoteQrPopoverOpen: false,
+  appToastTimer: null,
+  viewportScaleResetTimers: [],
 };
 
 const elements = {
+  viewportMeta: document.getElementById("viewport-meta"),
   remoteShell: document.getElementById("remote-shell"),
   layoutModeSwitch: document.getElementById("layout-mode-switch"),
+  remoteQrControl: document.getElementById("remote-qr-control"),
+  remoteQrToggle: document.getElementById("remote-qr-toggle"),
+  remoteMiniQrImage: document.getElementById("remote-mini-qr-image"),
+  remoteMiniQrPlaceholder: document.getElementById("remote-mini-qr-placeholder"),
+  remoteQrPopover: document.getElementById("remote-qr-popover"),
+  remoteQrPopoverClose: document.getElementById("remote-qr-popover-close"),
+  remotePopoverQrImage: document.getElementById("remote-popover-qr-image"),
+  remotePopoverQrPlaceholder: document.getElementById("remote-popover-qr-placeholder"),
+  remotePopoverUrlLink: document.getElementById("remote-popover-url-link"),
+  remotePopoverUrlHint: document.getElementById("remote-popover-url-hint"),
   currentTitle: document.getElementById("current-title"),
   currentRequester: document.getElementById("current-requester"),
   currentMeta: document.getElementById("current-meta"),
@@ -50,6 +74,7 @@ const elements = {
   playerControlHint: document.getElementById("player-control-hint"),
   remoteAvSyncPanel: document.getElementById("remote-av-sync-panel"),
   remoteAvOffsetInput: document.getElementById("remote-av-offset-input"),
+  remoteAvOffsetResetButton: document.getElementById("remote-av-offset-reset-button"),
   remoteVolumePanel: document.getElementById("remote-volume-panel"),
   remoteVolumeMuteButton: document.getElementById("remote-volume-mute-button"),
   remoteVolumeSlider: document.getElementById("remote-volume-slider"),
@@ -73,9 +98,25 @@ const elements = {
   searchForm: document.getElementById("search-form"),
   searchQuery: document.getElementById("search-query"),
   searchButton: document.getElementById("search-button"),
+  searchMessage: document.getElementById("search-message"),
   searchResults: document.getElementById("search-results"),
+  followBrowseToggle: document.getElementById("follow-browse-toggle"),
+  followBrowseView: document.getElementById("follow-browse-view"),
+  followUpListView: document.getElementById("follow-up-list-view"),
+  followUpGrid: document.getElementById("follow-up-grid"),
+  followUpItemsView: document.getElementById("follow-up-items-view"),
+  followBrowseBack: document.getElementById("follow-browse-back"),
+  followBrowseTitle: document.getElementById("follow-browse-title"),
+  followBrowseCount: document.getElementById("follow-browse-count"),
+  followSearchForm: document.getElementById("follow-search-form"),
+  followSearchQuery: document.getElementById("follow-search-query"),
+  followSearchButton: document.getElementById("follow-search-button"),
+  followSongResults: document.getElementById("follow-song-results"),
+  followBrowseMessage: document.getElementById("follow-browse-message"),
   addNextButton: document.getElementById("add-next-button"),
+  resortPlaylistButton: document.getElementById("resort-playlist-button"),
   refreshButton: document.getElementById("refresh-button"),
+  gatchaUidToggle: document.getElementById("gatcha-uid-toggle"),
   gatchaButton: document.getElementById("gatcha-button"),
   gatchaConfirmButton: document.getElementById("gatcha-confirm-button"),
   gatchaRetryButton: document.getElementById("gatcha-retry-button"),
@@ -83,11 +124,21 @@ const elements = {
   gatchaInitView: document.getElementById("gatcha-init-view"),
   gatchaResultView: document.getElementById("gatcha-result-view"),
   gatchaCandidateTitle: document.getElementById("gatcha-candidate-title"),
+  gatchaUidView: document.getElementById("gatcha-uid-view"),
+  gatchaUidForm: document.getElementById("gatcha-uid-form"),
+  gatchaUidInput: document.getElementById("gatcha-uid-input"),
+  addGatchaUidButton: document.getElementById("add-gatcha-uid-button"),
+  gatchaUidMessage: document.getElementById("gatcha-uid-message"),
   listTag: document.getElementById("list-tag"),
   listTitle: document.getElementById("list-title"),
   listCount: document.getElementById("list-count"),
   queueViewButton: document.getElementById("queue-view-button"),
   historyViewButton: document.getElementById("history-view-button"),
+  historyExportRow: document.getElementById("history-export-row"),
+  historyExportSource: document.getElementById("history-export-source"),
+  historyExportImageButton: document.getElementById("history-export-image-button"),
+  historyExportCsvButton: document.getElementById("history-export-csv-button"),
+  appToast: document.getElementById("app-toast"),
   queueList: document.getElementById("queue-list"),
   historyList: document.getElementById("history-list"),
   queueItemTemplate: document.getElementById("queue-item-template"),
@@ -134,6 +185,84 @@ function writeLocalPreference(key, value) {
   }
 }
 
+function isEditableElement(element) {
+  return element instanceof HTMLElement
+    && (
+      element.tagName === "INPUT"
+      || element.tagName === "TEXTAREA"
+      || element.tagName === "SELECT"
+      || element.isContentEditable
+    );
+}
+
+function blurActiveEditableElement() {
+  const activeElement = document.activeElement;
+  if (!isEditableElement(activeElement) || typeof activeElement.blur !== "function") {
+    return;
+  }
+  activeElement.blur();
+}
+
+function isAppleTabletClient() {
+  const userAgent = String(window.navigator?.userAgent || "");
+  if (/iPad/i.test(userAgent)) {
+    return true;
+  }
+  return window.navigator?.platform === "MacIntel" && Number(window.navigator?.maxTouchPoints || 0) > 1;
+}
+
+function currentViewportScale() {
+  const scale = Number(window.visualViewport?.scale || 1);
+  return Number.isFinite(scale) && scale > 0 ? scale : 1;
+}
+
+function clearViewportScaleResetTimers() {
+  state.viewportScaleResetTimers.forEach((timerId) => {
+    window.clearTimeout(timerId);
+  });
+  state.viewportScaleResetTimers = [];
+}
+
+function forceViewportScaleReset(force = false) {
+  if (!isAppleTabletClient() || isEditableElement(document.activeElement) || document.hidden) {
+    return;
+  }
+  const viewportMeta = elements.viewportMeta;
+  if (!viewportMeta) {
+    return;
+  }
+  const currentScale = currentViewportScale();
+  if (!force && currentScale <= 1.01) {
+    return;
+  }
+
+  const baseContent = viewportMeta.dataset.baseContent || viewportMeta.getAttribute("content") || "";
+  if (!baseContent) {
+    return;
+  }
+
+  viewportMeta.dataset.baseContent = baseContent;
+  viewportMeta.setAttribute("content", `${baseContent}, maximum-scale=1, user-scalable=no`);
+
+  window.requestAnimationFrame(() => {
+    window.requestAnimationFrame(() => {
+      viewportMeta.setAttribute("content", baseContent);
+    });
+  });
+}
+
+function scheduleViewportScaleReset(force = false) {
+  if (!isAppleTabletClient()) {
+    return;
+  }
+  clearViewportScaleResetTimers();
+  state.viewportScaleResetTimers = viewportScaleResetDelaysMs.map((delayMs) => (
+    window.setTimeout(() => {
+      forceViewportScaleReset(force);
+    }, delayMs)
+  ));
+}
+
 function normalizeLayoutMode(value) {
   if (value === "basic" || value === "normal") {
     return "basic";
@@ -165,19 +294,136 @@ function setLayoutMode(mode) {
   renderLayoutMode();
 }
 
+function setRemoteQrPopoverOpen(open) {
+  state.remoteQrPopoverOpen = Boolean(open);
+  elements.remoteQrPopover?.classList.toggle("hidden", !state.remoteQrPopoverOpen);
+  elements.remoteQrToggle?.setAttribute("aria-expanded", String(state.remoteQrPopoverOpen));
+}
+
+function renderRemoteAccess(remoteAccess) {
+  const preferredUrl = String(remoteAccess?.preferred_url || "");
+  const lanUrls = Array.isArray(remoteAccess?.lan_urls) ? remoteAccess.lan_urls : [];
+  const localUrl = String(remoteAccess?.local_url || "");
+  const displayUrl = preferredUrl || localUrl || `${window.location.origin}/remote`;
+  const displayHint = lanUrls.length > 1
+    ? `可用局域网地址: ${lanUrls.join(" · ")}`
+    : lanUrls.length === 1
+      ? "请确保手机和服务端在同一个局域网内。"
+      : "暂未检测到局域网地址，可稍后刷新或手动检查网络。";
+  const signature = JSON.stringify({ displayUrl, displayHint });
+  if (signature === state.remoteAccessRenderSignature) {
+    return;
+  }
+  state.remoteAccessRenderSignature = signature;
+
+  if (elements.remotePopoverUrlLink) {
+    elements.remotePopoverUrlLink.href = displayUrl;
+    elements.remotePopoverUrlLink.textContent = displayUrl;
+  }
+  if (elements.remotePopoverUrlHint) {
+    elements.remotePopoverUrlHint.textContent = displayHint;
+  }
+  renderRemoteQr(displayUrl, [
+    { image: elements.remoteMiniQrImage, placeholder: elements.remoteMiniQrPlaceholder, size: 132 },
+    { image: elements.remotePopoverQrImage, placeholder: elements.remotePopoverQrPlaceholder, size: 220 },
+  ]);
+}
+
+function renderRemoteQr(url, targets = []) {
+  const normalizedUrl = String(url || "").trim();
+  if (!normalizedUrl) {
+    targets.forEach(({ image, placeholder }) => {
+      image?.classList.add("hidden");
+      if (placeholder) {
+        placeholder.textContent = "暂无可用访问地址";
+        placeholder.classList.remove("hidden");
+      }
+    });
+    return;
+  }
+
+  targets.forEach(({ image, placeholder, size = 220 }) => {
+    if (!image || !placeholder) {
+      return;
+    }
+    const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=${size}x${size}&margin=0&data=${encodeURIComponent(normalizedUrl)}`;
+    if (image.dataset.qrUrl === qrUrl) {
+      return;
+    }
+
+    image.dataset.qrUrl = qrUrl;
+    image.classList.add("hidden");
+    placeholder.textContent = "正在生成二维码...";
+    placeholder.classList.remove("hidden");
+    image.onload = () => {
+      placeholder.classList.add("hidden");
+      image.classList.remove("hidden");
+    };
+    image.onerror = () => {
+      image.classList.add("hidden");
+      placeholder.textContent = "二维码生成失败";
+      placeholder.classList.remove("hidden");
+    };
+    image.src = qrUrl;
+  });
+}
+
 function setFormMessage(message, isError = false) {
   elements.formMessage.textContent = message;
   elements.formMessage.classList.toggle("error", isError);
+}
+
+function setAppMessage(message, isError = false) {
+  if (!elements.appToast) {
+    return;
+  }
+  if (state.appToastTimer) {
+    window.clearTimeout(state.appToastTimer);
+    state.appToastTimer = null;
+  }
+  elements.appToast.textContent = message || "";
+  elements.appToast.classList.toggle("is-error", Boolean(isError));
+  elements.appToast.classList.toggle("hidden", !message);
+  if (message) {
+    state.appToastTimer = window.setTimeout(() => {
+      elements.appToast.classList.add("hidden");
+      state.appToastTimer = null;
+    }, 2800);
+  }
+}
+
+function setSearchMessage(message, isError = false) {
+  if (!elements.searchMessage) {
+    return;
+  }
+  elements.searchMessage.textContent = message || "";
+  elements.searchMessage.classList.toggle("error", Boolean(isError));
+}
+
+function setMessageForSource(source, message, isError = false) {
+  if (source === "search") {
+    setSearchMessage(message, isError);
+    return;
+  }
+  if (source === "follow") {
+    setFollowBrowseMessage(message, isError);
+    return;
+  }
+  if (source === "gatcha") {
+    setGatchaMessage(message, isError);
+    return;
+  }
+  setFormMessage(message, isError);
 }
 
 function duplicateConfirmMessage(duplicateItem, sessionEntry, activeItem) {
   const title = duplicateItem?.display_title || activeItem?.display_title || sessionEntry?.display_title || "这首歌";
   const count = Number(sessionEntry?.request_count || 0);
   if (activeItem && count > 0) {
-    return `《${title}》当前列表里已经有了，而且本次已点过 ${count} 次，仍要继续点歌吗？`;
+    return `《${title}》当前点歌列表里已经有了，而且本次已点过 ${count} 次，仍要继续点歌吗？`;
   }
   if (activeItem) {
-    return `《${title}》当前列表里已经有了，仍要继续点歌吗？`;
+    return `《${title}》当前点歌列表里已经有了，仍要继续点歌吗？`;
   }
   return `《${title}》本次已经点过 ${count || 1} 次，仍要继续点歌吗？`;
 }
@@ -197,6 +443,72 @@ async function apiPost(url, payload = {}) {
     throw error;
   }
   return data.data;
+}
+
+function filenameFromContentDisposition(headerValue, fallback) {
+  const value = String(headerValue || "");
+  const quotedMatch = value.match(/filename="([^"]+)"/i);
+  if (quotedMatch) {
+    return quotedMatch[1];
+  }
+  const plainMatch = value.match(/filename=([^;]+)/i);
+  return plainMatch ? plainMatch[1].trim() : fallback;
+}
+
+function selectedHistoryExportSource() {
+  const source = String(elements.historyExportSource?.value || "played").trim().toLowerCase();
+  return source === "history" ? "history" : "played";
+}
+
+async function downloadHistoryExport(format, source = selectedHistoryExportSource()) {
+  const normalizedFormat = String(format || "").trim().toLowerCase();
+  const normalizedSource = source === "history" ? "history" : "played";
+  if (!["csv", "image"].includes(normalizedFormat)) {
+    return;
+  }
+  const params = new URLSearchParams({
+    format: normalizedFormat,
+    source: normalizedSource,
+  });
+  const response = await fetch(`/api/history/export?${params.toString()}`, {
+    cache: "no-store",
+    headers: clientHeaders(),
+  });
+  if (!response.ok) {
+    let message = "导出失败";
+    try {
+      const payload = await response.json();
+      message = payload.error || message;
+    } catch {
+      // Keep the generic message when the response is not JSON.
+    }
+    throw new Error(message);
+  }
+  const blob = await response.blob();
+  const sourceName = normalizedSource === "played" ? "played" : "history";
+  const fallback = normalizedFormat === "csv" ? `bilikara-${sourceName}.csv` : `bilikara-${sourceName}.png`;
+  const filename = filenameFromContentDisposition(response.headers.get("Content-Disposition"), fallback);
+  const downloadUrl = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = downloadUrl;
+  link.download = filename;
+  link.rel = "noopener";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(downloadUrl), 1000);
+}
+
+async function exportHistory(format) {
+  const source = selectedHistoryExportSource();
+  const sourceLabel = source === "played" ? "本场记录" : "全部历史";
+  setAppMessage(format === "csv" ? `正在导出${sourceLabel} CSV...` : `正在导出${sourceLabel}图片...`);
+  try {
+    await downloadHistoryExport(format, source);
+    setAppMessage(format === "csv" ? `${sourceLabel} CSV 已开始下载。` : `${sourceLabel}图片已开始下载。`);
+  } catch (error) {
+    setAppMessage(error.message, true);
+  }
 }
 
 async function submitAddRequest(url, position, options = {}) {
@@ -248,8 +560,93 @@ async function fetchState() {
   if (!response.ok || !payload.ok) {
     throw new Error(payload.error || "获取状态失败");
   }
-  state.data = payload.data;
+  applyStateSnapshot(payload.data, { forceRender: !state.data });
+}
+function currentStateRevision(snapshot = state.data) {
+  const revision = Number(snapshot?.state_revision || 0);
+  return Number.isFinite(revision) && revision >= 0 ? revision : 0;
+}
+
+function applyStateSnapshot(snapshot, { forceRender = false } = {}) {
+  if (!snapshot || typeof snapshot !== "object") {
+    return false;
+  }
+  const nextRevision = currentStateRevision(snapshot);
+  const currentRevision = currentStateRevision(state.data);
+  if (!forceRender && state.data) {
+    if (nextRevision > 0 && nextRevision <= currentRevision) {
+      return false;
+    }
+    if (nextRevision === 0 && currentRevision > 0) {
+      return false;
+    }
+  }
+  state.data = snapshot;
   render();
+  return true;
+}
+
+function clearEventStreamReconnectTimer() {
+  if (!state.eventStreamReconnectTimer) {
+    return;
+  }
+  window.clearTimeout(state.eventStreamReconnectTimer);
+  state.eventStreamReconnectTimer = null;
+}
+
+function closeEventStream() {
+  clearEventStreamReconnectTimer();
+  if (!state.eventSource) {
+    return;
+  }
+  state.eventSource.close();
+  state.eventSource = null;
+}
+
+function scheduleEventStreamReconnect() {
+  clearEventStreamReconnectTimer();
+  const delayMs = state.eventStreamRetryMs;
+  state.eventStreamReconnectTimer = window.setTimeout(() => {
+    state.eventStreamReconnectTimer = null;
+    connectStateStream();
+  }, delayMs);
+  state.eventStreamRetryMs = Math.min(eventStreamMaxRetryMs, delayMs * 2);
+}
+
+function connectStateStream() {
+  if (typeof window.EventSource !== "function") {
+    return;
+  }
+  closeEventStream();
+  const source = new window.EventSource(`/api/events?client_id=${encodeURIComponent(state.clientId)}`);
+  state.eventSource = source;
+
+  source.addEventListener("open", () => {
+    state.eventStreamRetryMs = eventStreamInitialRetryMs;
+  });
+
+  source.addEventListener("state", (event) => {
+    try {
+      const snapshot = JSON.parse(event.data);
+      applyStateSnapshot(snapshot);
+      state.eventStreamRetryMs = eventStreamInitialRetryMs;
+    } catch {
+      // Ignore malformed events and wait for the next valid snapshot.
+    }
+  });
+
+  source.addEventListener("error", async () => {
+    if (state.eventSource !== source) {
+      return;
+    }
+    closeEventStream();
+    try {
+      await fetchState();
+    } catch {
+      // Keep the last successful state on screen while reconnecting.
+    }
+    scheduleEventStreamReconnect();
+  });
 }
 
 async function searchGatchaCache(query) {
@@ -262,6 +659,46 @@ async function searchGatchaCache(query) {
     throw new Error(payload.error || "搜索失败");
   }
   return Array.isArray(payload.data?.items) ? payload.data.items : [];
+}
+
+async function fetchGatchaBrowse(uid = "", query = "") {
+  const params = new URLSearchParams();
+  const normalizedUid = String(uid || "").trim();
+  const normalizedQuery = String(query || "").trim();
+  if (normalizedUid) {
+    params.set("uid", normalizedUid);
+  }
+  if (normalizedQuery) {
+    params.set("q", normalizedQuery);
+  }
+  const queryString = params.toString();
+  const response = await fetch(`/api/gatcha/browse${queryString ? `?${queryString}` : ""}`, {
+    cache: "no-store",
+    headers: clientHeaders(),
+  });
+  const payload = await response.json();
+  if (!response.ok || !payload.ok) {
+    throw new Error(payload.error || "关注浏览失败");
+  }
+  return payload.data || { owners: [], items: [] };
+}
+
+async function previewGatchaUid(uid) {
+  return apiPost("/api/gatcha/uids/preview", { uid: String(uid || "").trim() });
+}
+
+async function addGatchaUid(uid) {
+  return apiPost("/api/gatcha/uids/add", { uid: String(uid || "").trim() });
+}
+
+function gatchaUidResultMessage(result, fallbackUid = "") {
+  const cache = result?.cache || {};
+  const addedCount = Number(cache.added_count || 0);
+  const totalCount = Number(cache.total_count || 0);
+  const modeLabel = cache.mode === "incremental" ? "最新" : "所有";
+  const ownerLabel = result?.name ? `UP 主 ${result.name}` : `UID ${result?.uid || fallbackUid}`;
+  const listAction = result?.added ? "已添加" : "已在关注列表中";
+  return `${ownerLabel} ${listAction}，已拉取${modeLabel}稿件，新增 ${addedCount} 条，缓存共 ${totalCount} 条。`;
 }
 
 function hideSearchResults() {
@@ -307,11 +744,193 @@ function renderSearchResults(items) {
   });
 }
 
-async function handleGatchaDraw() {
-  if (gatchaCooldownRemainingSeconds() > 0) {
-    syncGatchaCooldownButtons();
+function setFollowBrowseMessage(message, isError = false) {
+  if (!elements.followBrowseMessage) {
     return;
   }
+  elements.followBrowseMessage.textContent = message || "";
+  elements.followBrowseMessage.classList.toggle("is-error", Boolean(isError));
+}
+
+function selectedFollowOwner() {
+  const owners = Array.isArray(state.followBrowseData?.owners) ? state.followBrowseData.owners : [];
+  return owners.find((owner) => String(owner.uid || "") === state.followBrowseSelectedUid) || null;
+}
+
+function ownerNameFromStateByUid(uid) {
+  const normalizedUid = String(uid || "").trim();
+  if (!normalizedUid || !state.data) {
+    return "";
+  }
+  const entries = [
+    state.data.current_item,
+    ...(Array.isArray(state.data.playlist) ? state.data.playlist : []),
+    ...(Array.isArray(state.data.history) ? state.data.history : []),
+  ];
+  for (const entry of entries) {
+    if (String(entry?.owner_mid || "").trim() !== normalizedUid) {
+      continue;
+    }
+    const ownerName = String(entry?.owner_name || "").trim();
+    if (ownerName) {
+      return ownerName;
+    }
+  }
+  return "";
+}
+
+function followOwnerDisplayName(owner) {
+  const uid = String(owner?.uid || "").trim();
+  const ownerName = String(owner?.name || "").trim();
+  const stateOwnerName = ownerNameFromStateByUid(uid);
+  if (ownerName && ownerName !== `UID ${uid}`) {
+    return ownerName;
+  }
+  return stateOwnerName || ownerName || `UID ${uid}`;
+}
+
+function renderFollowSongResults(items, emptyText) {
+  if (!elements.followSongResults) {
+    return;
+  }
+  elements.followSongResults.innerHTML = "";
+  elements.followSongResults.classList.remove("hidden");
+
+  if (!items.length) {
+    const empty = document.createElement("div");
+    empty.className = "search-empty";
+    empty.textContent = emptyText;
+    elements.followSongResults.appendChild(empty);
+    return;
+  }
+
+  items.forEach((item) => {
+    const row = document.createElement("div");
+    row.className = "search-result-item";
+
+    const meta = document.createElement("div");
+    const title = document.createElement("div");
+    title.className = "search-result-title";
+    title.textContent = String(item.title || "");
+
+    const url = document.createElement("div");
+    url.className = "search-result-url";
+    url.textContent = String(item.bvid || "");
+
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "primary-button";
+    button.dataset.url = String(item.url || "");
+    button.textContent = "点歌";
+
+    meta.append(title, url);
+    row.append(meta, button);
+    elements.followSongResults.appendChild(row);
+  });
+}
+
+function renderFollowBrowse() {
+  if (!elements.followBrowseView || !elements.followUpGrid || !elements.followSongResults) {
+    return;
+  }
+
+  elements.searchForm?.classList.toggle("hidden", state.followBrowseVisible);
+  elements.searchResults?.classList.toggle("hidden", state.followBrowseVisible || !elements.searchResults.children.length);
+  elements.followBrowseView.classList.toggle("hidden", !state.followBrowseVisible);
+  if (elements.followBrowseToggle) {
+    elements.followBrowseToggle.textContent = state.followBrowseVisible ? "返回搜索" : "关注浏览";
+    elements.followBrowseToggle.setAttribute("aria-pressed", String(state.followBrowseVisible));
+  }
+  if (!state.followBrowseVisible) {
+    return;
+  }
+
+  const owners = Array.isArray(state.followBrowseData?.owners) ? state.followBrowseData.owners : [];
+  const items = Array.isArray(state.followBrowseData?.items) ? state.followBrowseData.items : [];
+  const signature = JSON.stringify({
+    loading: state.followBrowseLoading,
+    selected: state.followBrowseSelectedUid,
+    owners,
+    items,
+  });
+  if (signature === state.followBrowseRenderSignature) {
+    return;
+  }
+  state.followBrowseRenderSignature = signature;
+
+  const hasSelectedUid = Boolean(state.followBrowseSelectedUid);
+  elements.followUpListView?.classList.toggle("hidden", hasSelectedUid);
+  elements.followUpItemsView?.classList.toggle("hidden", !hasSelectedUid);
+
+  if (!hasSelectedUid) {
+    elements.followUpGrid.innerHTML = "";
+    if (!owners.length) {
+      const empty = document.createElement("div");
+      empty.className = "search-empty";
+      empty.textContent = state.followBrowseLoading ? "正在读取关注列表..." : "还没有可浏览的关注 UID。";
+      elements.followUpGrid.appendChild(empty);
+    } else {
+      owners.forEach((owner) => {
+        const displayName = followOwnerDisplayName(owner);
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "follow-up-button";
+        button.dataset.uid = String(owner.uid || "");
+        button.title = displayName;
+
+        const name = document.createElement("span");
+        name.className = "follow-up-name";
+        name.textContent = displayName;
+
+        const count = document.createElement("span");
+        count.className = "follow-up-count";
+        count.textContent = `${Number(owner.count || 0)} 首`;
+
+        button.append(name, count);
+        elements.followUpGrid.appendChild(button);
+      });
+    }
+    setFollowBrowseMessage(state.followBrowseLoading ? "正在读取关注列表..." : "");
+    return;
+  }
+
+  const owner = selectedFollowOwner();
+  if (elements.followBrowseTitle) {
+    elements.followBrowseTitle.textContent = followOwnerDisplayName(owner) || `UID ${state.followBrowseSelectedUid}`;
+  }
+  if (elements.followBrowseCount) {
+    const totalCount = Number(owner?.count || items.length || 0);
+    elements.followBrowseCount.textContent = `${items.length}/${totalCount} 首`;
+  }
+  renderFollowSongResults(
+    items,
+    state.followBrowseLoading ? "正在读取稿件..." : "这个 UP 的缓存稿件里没有匹配结果。",
+  );
+  setFollowBrowseMessage(state.followBrowseLoading ? "正在读取稿件..." : "");
+}
+
+async function loadFollowBrowse({ uid = state.followBrowseSelectedUid, query = "", keepQuery = false } = {}) {
+  state.followBrowseLoading = true;
+  state.followBrowseSelectedUid = String(uid || "").trim();
+  renderFollowBrowse();
+  try {
+    const nextData = await fetchGatchaBrowse(state.followBrowseSelectedUid, query);
+    state.followBrowseData = nextData;
+    state.followBrowseSelectedUid = String(nextData.selected_uid || state.followBrowseSelectedUid || "");
+    if (!keepQuery && elements.followSearchQuery) {
+      elements.followSearchQuery.value = String(nextData.query || "");
+    }
+  } catch (error) {
+    setFollowBrowseMessage(error.message, true);
+  } finally {
+    state.followBrowseLoading = false;
+    renderFollowBrowse();
+  }
+}
+
+async function handleGatchaDraw() {
+  state.gatchaUidVisible = false;
+  renderGatchaUidView();
   setGatchaMessage("正在随机抽取一首歌曲...");
   try {
     const response = await fetch("/api/gatcha/candidate", { headers: clientHeaders() });
@@ -322,9 +941,7 @@ async function handleGatchaDraw() {
 
     state.gatchaCandidate = payload.data;
     elements.gatchaCandidateTitle.textContent = state.gatchaCandidate.title;
-    startGatchaCooldown();
-    elements.gatchaInitView.classList.add("hidden");
-    elements.gatchaResultView.classList.remove("hidden");
+    renderGatchaUidView();
     setGatchaMessage("");
   } catch (error) {
     setGatchaMessage(error.message, true);
@@ -339,36 +956,82 @@ function setGatchaMessage(message, isError = false) {
   elements.gatchaMessage.classList.toggle("is-error", Boolean(isError));
 }
 
-function gatchaCooldownRemainingSeconds() {
-  return Math.max(0, Math.ceil((state.gatchaCooldownUntil - Date.now()) / 1000));
-}
-
-function startGatchaCooldown() {
-  state.gatchaCooldownUntil = Date.now() + gatchaCooldownMs;
-  syncGatchaCooldownButtons();
-  if (state.gatchaCooldownTimer) {
-    clearInterval(state.gatchaCooldownTimer);
+function setGatchaUidMessage(message, isError = false) {
+  if (!elements.gatchaUidMessage) {
+    return;
   }
-  state.gatchaCooldownTimer = setInterval(() => {
-    syncGatchaCooldownButtons();
-    if (gatchaCooldownRemainingSeconds() <= 0) {
-      clearInterval(state.gatchaCooldownTimer);
-      state.gatchaCooldownTimer = null;
-    }
-  }, 250);
+  elements.gatchaUidMessage.textContent = message || "";
+  elements.gatchaUidMessage.classList.toggle("is-error", Boolean(isError));
 }
 
-function syncGatchaCooldownButtons() {
-  const remainingSeconds = gatchaCooldownRemainingSeconds();
-  const coolingDown = remainingSeconds > 0;
-  const cooldownText = `等待 ${remainingSeconds}s`;
+function renderGatchaUidView() {
+  const showUid = Boolean(state.gatchaUidVisible);
+  const hasCandidate = Boolean(state.gatchaCandidate);
+  if (elements.gatchaCandidateTitle && state.gatchaCandidate?.title) {
+    elements.gatchaCandidateTitle.textContent = state.gatchaCandidate.title;
+  }
+  elements.gatchaUidView?.classList.toggle("hidden", !showUid);
+  elements.gatchaInitView?.classList.toggle("hidden", showUid || hasCandidate);
+  elements.gatchaResultView?.classList.toggle("hidden", showUid || !hasCandidate);
+  if (elements.gatchaUidToggle) {
+    elements.gatchaUidToggle.textContent = showUid ? "返回抽卡" : "添加 UID";
+    elements.gatchaUidToggle.setAttribute("aria-pressed", String(showUid));
+  }
   if (elements.gatchaButton) {
-    elements.gatchaButton.disabled = coolingDown;
-    elements.gatchaButton.textContent = coolingDown ? cooldownText : "试试运气";
+    elements.gatchaButton.disabled = false;
+    elements.gatchaButton.textContent = "试试运气";
   }
   if (elements.gatchaRetryButton) {
-    elements.gatchaRetryButton.disabled = coolingDown;
-    elements.gatchaRetryButton.textContent = coolingDown ? cooldownText : "重新再来";
+    elements.gatchaRetryButton.disabled = false;
+    elements.gatchaRetryButton.textContent = "重新再来";
+  }
+  if (elements.gatchaUidInput) {
+    elements.gatchaUidInput.disabled = state.gatchaUidSaving;
+  }
+  if (elements.addGatchaUidButton) {
+    elements.addGatchaUidButton.disabled = state.gatchaUidSaving;
+    elements.addGatchaUidButton.textContent = state.gatchaUidSaving ? "处理中" : "添加";
+  }
+}
+
+async function handleGatchaUidSubmit(event) {
+  event.preventDefault();
+  const uid = String(elements.gatchaUidInput?.value || "").trim();
+  if (!uid) {
+    setGatchaUidMessage("请输入 UID", true);
+    return;
+  }
+  if (state.gatchaUidSaving) {
+    return;
+  }
+
+  state.gatchaUidSaving = true;
+  renderGatchaUidView();
+  setGatchaUidMessage("正在检测 UID...");
+  try {
+    const preview = await previewGatchaUid(uid);
+    const ownerName = preview?.name || `UID ${preview?.uid || uid}`;
+    const modeLabel = preview?.cache_mode_label || (preview?.cache_mode === "incremental" ? "最新" : "所有");
+    const followedPrefix = preview?.already_followed ? "已在关注列表中，" : "";
+    setGatchaUidMessage(`${followedPrefix}检测到 UP 主：${ownerName}`);
+
+    if (!window.confirm(`确认拉取 UP 主：${ownerName} 的${modeLabel}稿件？`)) {
+      setGatchaUidMessage("已取消添加 UID。");
+      return;
+    }
+
+    const normalizedUid = preview?.uid || uid;
+    setGatchaUidMessage(`正在拉取 UP 主：${ownerName} 的稿件...`);
+    const result = await addGatchaUid(normalizedUid);
+    setGatchaUidMessage(gatchaUidResultMessage(result, normalizedUid));
+    if (elements.gatchaUidInput) {
+      elements.gatchaUidInput.value = "";
+    }
+  } catch (error) {
+    setGatchaUidMessage(error.message, true);
+  } finally {
+    state.gatchaUidSaving = false;
+    renderGatchaUidView();
   }
 }
 
@@ -377,18 +1040,26 @@ function render() {
   if (!data) {
     return;
   }
+  const playbackMode = frontendPlaybackMode(data.playback_mode);
 
   renderRequesterSelect(data.session_users || []);
-  renderCurrentItem(data.current_item, data.playback_mode);
-  renderAudioVariantBar(data.current_item, data.playback_mode);
-  renderPlayerControls(data.current_item, data.playback_mode);
-  renderRemoteAvSyncControls(data.playback_mode, data.player_settings);
-  renderRemoteVolumeControls(data.playback_mode, data.player_settings);
+  renderCurrentItem(data.current_item, playbackMode);
+  renderAudioVariantBar(data.current_item, playbackMode);
+  renderPlayerControls(data.current_item, playbackMode);
+  renderRemoteAvSyncControls(playbackMode, data.player_settings);
+  renderRemoteVolumeControls(playbackMode, data.player_settings);
+  renderRemoteAccess(data.remote_access);
+  renderFollowBrowse();
   renderListHeader(data.playlist || [], data.history || []);
   renderQueue(Array.isArray(data.playlist) ? data.playlist : []);
   renderHistory(Array.isArray(data.history) ? data.history : []);
   syncListView();
   renderLayoutMode();
+  renderGatchaUidView();
+}
+
+function frontendPlaybackMode(_mode) {
+  return "local";
 }
 
 function renderRequesterSelect(sessionUsers) {
@@ -424,7 +1095,7 @@ function renderCurrentItem(current, playbackMode) {
     const requesterText = requesterBadgeText(current.requester_name);
     elements.currentRequester.textContent = requesterText;
     elements.currentRequester.classList.toggle("hidden", !requesterText);
-    const modeLabel = playbackMode === "online" ? "在线外挂" : "本地缓存";
+    const modeLabel = "本地缓存";
     const cacheText = current.cache_message || "等待缓存";
     elements.currentMeta.textContent = `${modeLabel} · ${cacheText}`;
     return;
@@ -433,7 +1104,7 @@ function renderCurrentItem(current, playbackMode) {
   elements.currentTitle.textContent = "当前还没有正在播放的歌曲";
   elements.currentRequester.textContent = "";
   elements.currentRequester.classList.add("hidden");
-  elements.currentMeta.textContent = "点歌后会进入主队列，轮到时由服务端页面播放。";
+  elements.currentMeta.textContent = "点歌后会进入点歌列表，轮到时由服务端页面播放。";
 }
 
 function audioVariantsForItem(item) {
@@ -441,7 +1112,7 @@ function audioVariantsForItem(item) {
     return [];
   }
   return item.audio_variants.filter(
-    (variant) => variant && (variant.media_url || variant.audio_url),
+    (variant) => variant && variant.audio_url,
   );
 }
 
@@ -502,8 +1173,10 @@ function partOptionsForItem(item) {
     const cachedVariant = cachedVariantsById.get(entry.id);
     return {
       ...entry,
-      media_url: String(cachedVariant?.media_url || ""),
       audio_url: String(cachedVariant?.audio_url || ""),
+      // LEGACY: cachedVariant.media_url used to point to a muxed MP4 variant.
+      // Remote controls only need to know whether split audio_url exists.
+      // media_url: String(cachedVariant?.media_url || ""),
     };
   });
 }
@@ -535,7 +1208,7 @@ function scheduleAudioVariantSwitchUnlock() {
     state.audioVariantSwitchUnlockAt = 0;
     state.audioVariantSwitchTimer = null;
     if (state.data) {
-      renderAudioVariantBar(state.data.current_item, state.data.playback_mode);
+      renderAudioVariantBar(state.data.current_item, frontendPlaybackMode(state.data.playback_mode));
     }
   }, remainingMs);
 }
@@ -688,14 +1361,22 @@ function setRangeFillPercent(input, percent) {
   input.style.setProperty("--range-fill-percent", `${normalizedPercent}%`);
 }
 
+function muteIcon(isMuted) {
+  return isMuted ? "🔇" : "🔊";
+}
+
 function renderRemoteAvSyncControls(playbackMode, playerSettings) {
   if (!elements.remoteAvSyncPanel || !elements.remoteAvOffsetInput) {
     return;
   }
-  const isLocalMode = playbackMode === "local" && normalizeLayoutMode(state.layoutMode) === "full";
+  const isLocalMode = playbackMode === "local";
   elements.remoteAvSyncPanel.classList.toggle("hidden", !isLocalMode);
+  const offsetMs = currentRemoteAvOffsetMs(playerSettings);
+  if (elements.remoteAvOffsetResetButton) {
+    elements.remoteAvOffsetResetButton.disabled = offsetMs === 0;
+  }
   if (document.activeElement !== elements.remoteAvOffsetInput) {
-    elements.remoteAvOffsetInput.value = String(currentRemoteAvOffsetMs(playerSettings));
+    elements.remoteAvOffsetInput.value = String(offsetMs);
   }
 }
 
@@ -703,14 +1384,17 @@ function renderRemoteVolumeControls(playbackMode, playerSettings) {
   if (!elements.remoteVolumePanel || !elements.remoteVolumeSlider || !elements.remoteVolumeMuteButton || !elements.remoteVolumeValue) {
     return;
   }
-  const isLocalMode = playbackMode === "local" && normalizeLayoutMode(state.layoutMode) === "full";
+  const isLocalMode = playbackMode === "local";
   elements.remoteVolumePanel.classList.toggle("hidden", !isLocalMode);
   const volumePercent = currentRemoteVolumePercent(playerSettings);
   const isMuted = currentRemoteMuted(playerSettings);
   elements.remoteVolumeSlider.value = String(volumePercent);
   setRangeFillPercent(elements.remoteVolumeSlider, volumePercent);
   elements.remoteVolumeValue.textContent = `${Math.round(volumePercent)}%`;
-  elements.remoteVolumeMuteButton.textContent = isMuted ? "取消静音" : "静音";
+  const muteLabel = isMuted ? "取消静音" : "静音";
+  elements.remoteVolumeMuteButton.textContent = muteIcon(isMuted);
+  elements.remoteVolumeMuteButton.setAttribute("aria-label", muteLabel);
+  elements.remoteVolumeMuteButton.setAttribute("title", muteLabel);
   elements.remoteVolumeMuteButton.classList.toggle("is-muted", isMuted);
 }
 
@@ -825,18 +1509,19 @@ async function confirmBindingSheet() {
   if (!intent?.url || state.submitting) {
     return;
   }
+  const source = intent.source || "request-form";
   const { selectedVideoPage, selectedAudioPages } = currentBindingSelection();
   if (!selectedVideoPage) {
-    setFormMessage("请先选择一个视频分P", true);
+    setMessageForSource(source, "请先选择一个视频分P", true);
     return;
   }
   if (!selectedAudioPages.length) {
-    setFormMessage("请至少选择一个音频分P", true);
+    setMessageForSource(source, "请至少选择一个音频分P", true);
     return;
   }
 
   state.submitting = true;
-  setFormMessage(intent.position === "next" ? "正在按绑定关系顶歌..." : "正在按绑定关系加入列表...");
+  setMessageForSource(source, intent.position === "next" ? "正在按绑定关系顶歌..." : "正在按绑定关系加入点歌列表...");
   try {
     const result = await submitAddRequestWithDuplicateConfirm(
       intent.url,
@@ -848,10 +1533,10 @@ async function confirmBindingSheet() {
       },
     );
     if (result.cancelled) {
-      setFormMessage("已取消重复添加");
+      setMessageForSource(source, "已取消重复添加");
       return;
     }
-    state.data = result.data;
+    applyStateSnapshot(result.data, { forceRender: true });
     closeBindingSheet();
     if (intent.clearInput) {
       elements.urlInput.value = "";
@@ -860,19 +1545,20 @@ async function confirmBindingSheet() {
       hideSearchResults();
       elements.searchQuery.value = "";
     }
+    if (intent.source === "follow") {
+      setFollowBrowseMessage("");
+    }
     if (intent.source === "gatcha") {
       state.gatchaCandidate = null;
-      elements.gatchaResultView.classList.add("hidden");
-      elements.gatchaInitView.classList.remove("hidden");
+      renderGatchaUidView();
     }
-    setFormMessage(intent.position === "next" ? "已按绑定关系顶歌到下一首" : "已按绑定关系加入列表");
-    render();
+    setMessageForSource(source, intent.position === "next" ? "已按绑定关系顶歌到下一首" : "已按绑定关系加入点歌列表");
   } catch (error) {
     if (error.code === "manual_binding_required") {
       openBindingSheet(intent, error.payload?.binding);
       return;
     }
-    setFormMessage(error.message, true);
+    setMessageForSource(source, error.message, true);
   } finally {
     state.submitting = false;
   }
@@ -893,14 +1579,13 @@ async function setRemoteAvOffset(offsetMs) {
   if (elements.remoteAvOffsetInput) {
     elements.remoteAvOffsetInput.value = String(boundedOffsetMs);
   }
-  renderRemoteAvSyncControls(state.data?.playback_mode, state.data?.player_settings);
+  renderRemoteAvSyncControls(frontendPlaybackMode(state.data?.playback_mode), state.data?.player_settings);
   try {
     const nextData = await apiPost("/api/player/av-offset", { offset_ms: boundedOffsetMs });
     if (requestSeq !== state.remoteAvOffsetSaveSeq) {
       return;
     }
-    state.data = nextData;
-    render();
+    applyStateSnapshot(nextData);
   } catch (error) {
     if (requestSeq !== state.remoteAvOffsetSaveSeq) {
       return;
@@ -908,7 +1593,7 @@ async function setRemoteAvOffset(offsetMs) {
     state.remoteLocalAvOffsetMs = null;
     state.remoteAvOffsetEchoSuppressUntil = 0;
     setFormMessage(error.message, true);
-    renderRemoteAvSyncControls(state.data?.playback_mode, state.data?.player_settings);
+    renderRemoteAvSyncControls(frontendPlaybackMode(state.data?.playback_mode), state.data?.player_settings);
   }
 }
 
@@ -926,8 +1611,7 @@ async function commitRemoteVolumeSettings(payload, requestSeq) {
     if (requestSeq !== state.remoteVolumeSaveSeq) {
       return;
     }
-    state.data = nextData;
-    render();
+    applyStateSnapshot(nextData);
   } catch (error) {
     if (requestSeq !== state.remoteVolumeSaveSeq) {
       return;
@@ -936,7 +1620,7 @@ async function commitRemoteVolumeSettings(payload, requestSeq) {
     state.remoteLocalMuted = null;
     state.remoteSettingsEchoSuppressUntil = 0;
     setFormMessage(error.message, true);
-    renderRemoteVolumeControls(state.data?.playback_mode, state.data?.player_settings);
+    renderRemoteVolumeControls(frontendPlaybackMode(state.data?.playback_mode), state.data?.player_settings);
   }
 }
 
@@ -957,7 +1641,7 @@ async function setRemoteVolumeSettings({ volumePercent, isMuted } = {}, options 
   }
 
   const requestSeq = markRemoteVolumeWrite(payload);
-  renderRemoteVolumeControls(state.data?.playback_mode, state.data?.player_settings);
+  renderRemoteVolumeControls(frontendPlaybackMode(state.data?.playback_mode), state.data?.player_settings);
   if (options.debounce) {
     clearRemoteVolumeCommitTimer();
     state.remoteVolumeCommitTimer = window.setTimeout(() => {
@@ -977,7 +1661,7 @@ function hasLocalSplitMedia(item) {
       && item.video_media_url
       && Array.isArray(item.audio_variants)
       && item.audio_variants.some((variant) => (
-        variant && String(variant.audio_url || variant.media_url || "").trim()
+        variant && String(variant.audio_url || "").trim()
       ))
   );
 }
@@ -1027,7 +1711,7 @@ function renderPlayerControls(currentItem, playbackMode) {
   }
 
   if (playbackMode !== "local") {
-    elements.playerControlHint.textContent = "当前是在线外挂，暂不支持远程控制播放。";
+    elements.playerControlHint.textContent = "当前模式暂不支持远程控制播放。";
     return;
   }
   if (!hasLocalSplitMedia(currentItem)) {
@@ -1041,14 +1725,15 @@ function renderPlayerControls(currentItem, playbackMode) {
 
 function renderListHeader(playlist, history) {
   const isHistoryView = state.listView === "history";
-  elements.listTag.textContent = isHistoryView ? "History" : "Queue";
-  elements.listTitle.textContent = isHistoryView ? "点歌历史" : "播放队列";
+  elements.listTag.textContent = isHistoryView ? "History" : "Requests";
+  elements.listTitle.textContent = isHistoryView ? "历史记录" : "点歌列表";
   elements.listCount.textContent = `${isHistoryView ? history.length : playlist.length} 首`;
 
   elements.queueViewButton.classList.toggle("active", !isHistoryView);
   elements.queueViewButton.setAttribute("aria-selected", String(!isHistoryView));
   elements.historyViewButton.classList.toggle("active", isHistoryView);
   elements.historyViewButton.setAttribute("aria-selected", String(isHistoryView));
+  elements.historyExportRow?.classList.toggle("hidden", !isHistoryView);
 }
 
 function syncListView() {
@@ -1060,7 +1745,7 @@ function syncListView() {
 function renderQueue(playlist) {
   elements.queueList.innerHTML = "";
   if (!playlist.length) {
-    elements.queueList.innerHTML = '<div class="queue-empty">队列暂时是空的，可以继续点下一首歌。</div>';
+    elements.queueList.innerHTML = '<div class="queue-empty">点歌列表暂时是空的，可以继续点下一首歌。</div>';
     return;
   }
 
@@ -1171,17 +1856,16 @@ async function submitRequest(position) {
   }
 
   state.submitting = true;
-  setFormMessage(position === "next" ? "正在顶歌..." : "正在加入队列...");
+  setFormMessage(position === "next" ? "正在顶歌..." : "正在加入点歌列表...");
   try {
     const result = await submitAddRequestWithDuplicateConfirm(url, position, requesterName);
     if (result.cancelled) {
       setFormMessage("已取消重复点歌。");
       return;
     }
-    state.data = result.data;
+    applyStateSnapshot(result.data, { forceRender: true });
     elements.urlInput.value = "";
-    setFormMessage(position === "next" ? "已经顶歌到下一首。" : "已经加入播放队列。");
-    render();
+    setFormMessage(position === "next" ? "已经顶歌到下一首。" : "已经加入点歌列表。");
   } catch (error) {
     if (error.code === "manual_binding_required") {
       openBindingSheet(
@@ -1213,16 +1897,15 @@ async function handleAddByHistory(url, position) {
   }
 
   state.submitting = true;
-  setFormMessage(position === "next" ? "正在从历史记录顶歌..." : "正在从历史记录加入队列...");
+  setFormMessage(position === "next" ? "正在从历史记录顶歌..." : "正在从历史记录加入点歌列表...");
   try {
     const result = await submitAddRequestWithDuplicateConfirm(url, position, requesterName);
     if (result.cancelled) {
       setFormMessage("已取消重复点歌。");
       return;
     }
-    state.data = result.data;
-    setFormMessage(position === "next" ? "已从历史记录顶歌到下一首。" : "已从历史记录加入队列。");
-    render();
+    applyStateSnapshot(result.data, { forceRender: true });
+    setFormMessage(position === "next" ? "已从历史记录顶歌到下一首。" : "已从历史记录加入点歌列表。");
   } catch (error) {
     if (error.code === "manual_binding_required") {
       openBindingSheet(
@@ -1243,32 +1926,40 @@ async function handleAddByHistory(url, position) {
   }
 }
 
-async function addByUrl(url, position = "tail") {
+async function resortPlaylistByCycle() {
+  state.data = await apiPost("/api/playlist/resort");
+  applyStateSnapshot(state.data, { forceRender: true });
+  setFormMessage("已按本场用户座次重新排序点歌列表。");
+}
+
+async function addByUrl(url, position = "tail", source = "search") {
   const requesterName = selectedRequesterName();
   if (!url || state.submitting) {
     return;
   }
   if (!requesterName) {
-    setFormMessage("请先选择点歌人。", true);
+    setMessageForSource(source, "请先选择点歌人。", true);
     return;
   }
 
   state.submitting = true;
-  setFormMessage("正在添加已选歌曲...");
+  setMessageForSource(source, "正在添加已选歌曲...");
   try {
     const result = await submitAddRequestWithDuplicateConfirm(url, position, requesterName);
     if (result.cancelled) {
-      setFormMessage("已取消重复点歌。");
+      setMessageForSource(source, "已取消重复点歌。");
       return;
     }
-    state.data = result.data;
-    hideSearchResults();
-    elements.searchQuery.value = "";
-    state.gatchaCandidate = null;
-    elements.gatchaResultView.classList.add("hidden");
-    elements.gatchaInitView.classList.remove("hidden");
-    setFormMessage("点歌成功。");
-    render();
+    applyStateSnapshot(result.data, { forceRender: true });
+    if (source === "search") {
+      hideSearchResults();
+      elements.searchQuery.value = "";
+    }
+    if (source === "gatcha") {
+      state.gatchaCandidate = null;
+      renderGatchaUidView();
+    }
+    setMessageForSource(source, "点歌成功。");
   } catch (error) {
     if (error.code === "manual_binding_required") {
       openBindingSheet(
@@ -1277,13 +1968,13 @@ async function addByUrl(url, position = "tail") {
           position,
           requesterName,
           clearInput: false,
-          source: state.gatchaCandidate?.url === url ? "gatcha" : "search",
+          source,
         },
         error.payload?.binding,
       );
       return;
     }
-    setFormMessage(error.message, true);
+    setMessageForSource(source, error.message, true);
   } finally {
     state.submitting = false;
   }
@@ -1291,7 +1982,7 @@ async function addByUrl(url, position = "tail") {
 
 async function sendPlayerControl(action, deltaSeconds = 0) {
   const currentItem = state.data?.current_item;
-  const playbackMode = state.data?.playback_mode;
+  const playbackMode = frontendPlaybackMode(state.data?.playback_mode);
   if (!currentItem || !canRemoteControlPlayer(currentItem, playbackMode)) {
     return;
   }
@@ -1315,19 +2006,18 @@ async function sendPlayerControl(action, deltaSeconds = 0) {
     } else {
       renderPlayerControls(currentItem, playbackMode);
     }
-    state.data = await apiPost("/api/player/control", {
+    applyStateSnapshot(await apiPost("/api/player/control", {
       action,
       item_id: currentItem.id,
       delta_seconds: deltaSeconds,
-    });
+    }));
     setFormMessage(message);
-    render();
   } catch (error) {
     setFormMessage(error.message, true);
     await fetchState().catch(() => {});
   }
   state.playerControlPendingAction = "";
-  renderPlayerControls(state.data?.current_item, state.data?.playback_mode);
+  renderPlayerControls(state.data?.current_item, frontendPlaybackMode(state.data?.playback_mode));
 }
 
 async function sendPlayerNext() {
@@ -1336,16 +2026,15 @@ async function sendPlayerNext() {
   }
   try {
     state.playerControlPendingAction = "next-track";
-    renderPlayerControls(state.data?.current_item, state.data?.playback_mode);
-    state.data = await apiPost("/api/player/next");
+    renderPlayerControls(state.data?.current_item, frontendPlaybackMode(state.data?.playback_mode));
+    applyStateSnapshot(await apiPost("/api/player/next"));
     setFormMessage("已切到下一首。");
-    render();
   } catch (error) {
     setFormMessage(error.message, true);
     await fetchState().catch(() => {});
   }
   state.playerControlPendingAction = "";
-  renderPlayerControls(state.data?.current_item, state.data?.playback_mode);
+  renderPlayerControls(state.data?.current_item, frontendPlaybackMode(state.data?.playback_mode));
 }
 
 function queueNoteText() {
@@ -1353,6 +2042,7 @@ function queueNoteText() {
 }
 
 function disconnectClient() {
+  closeEventStream();
   if (state.disconnectSent) {
     return;
   }
@@ -1380,19 +2070,19 @@ elements.searchForm.addEventListener("submit", async (event) => {
   const query = String(elements.searchQuery.value || "").trim();
   if (!query) {
     hideSearchResults();
-    setFormMessage("请输入搜索关键词。", true);
+    setSearchMessage("请输入搜索关键词。", true);
     return;
   }
 
   elements.searchButton.disabled = true;
-  setFormMessage("正在搜索本地目录...");
+  setSearchMessage("正在搜索本地目录...");
   try {
     const items = await searchGatchaCache(query);
     renderSearchResults(items);
-    setFormMessage(items.length ? `找到 ${items.length} 条缓存结果。` : "未找到缓存结果。");
+    setSearchMessage(items.length ? `找到 ${items.length} 条缓存结果。` : "未找到缓存结果。");
   } catch (error) {
     hideSearchResults();
-    setFormMessage(error.message, true);
+    setSearchMessage(error.message, true);
   } finally {
     elements.searchButton.disabled = false;
   }
@@ -1403,11 +2093,82 @@ elements.searchResults.addEventListener("click", async (event) => {
   if (!button) {
     return;
   }
-  await addByUrl(String(button.dataset.url || ""), "tail");
+  await addByUrl(String(button.dataset.url || ""), "tail", "search");
+});
+
+elements.followBrowseToggle?.addEventListener("click", () => {
+  state.followBrowseVisible = !state.followBrowseVisible;
+  renderFollowBrowse();
+  if (state.followBrowseVisible && !state.followBrowseLoading) {
+    state.followBrowseSelectedUid = "";
+    if (elements.followSearchQuery) {
+      elements.followSearchQuery.value = "";
+    }
+    loadFollowBrowse({ uid: "", query: "" });
+  }
+});
+
+elements.followUpGrid?.addEventListener("click", async (event) => {
+  const button = event.target.closest("button[data-uid]");
+  if (!button) {
+    return;
+  }
+  const uid = String(button.dataset.uid || "").trim();
+  if (!uid) {
+    return;
+  }
+  state.followBrowseSelectedUid = uid;
+  if (elements.followSearchQuery) {
+    elements.followSearchQuery.value = "";
+  }
+  await loadFollowBrowse({ uid, query: "" });
+});
+
+elements.followBrowseBack?.addEventListener("click", () => {
+  state.followBrowseSelectedUid = "";
+  if (elements.followSearchQuery) {
+    elements.followSearchQuery.value = "";
+  }
+  renderFollowBrowse();
+});
+
+elements.followSearchForm?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const query = String(elements.followSearchQuery?.value || "").trim();
+  await loadFollowBrowse({
+    uid: state.followBrowseSelectedUid,
+    query,
+    keepQuery: true,
+  });
+});
+
+elements.followSongResults?.addEventListener("click", async (event) => {
+  const button = event.target.closest("button[data-url]");
+  if (!button) {
+    return;
+  }
+  const url = String(button.dataset.url || "").trim();
+  if (!url) {
+    return;
+  }
+  button.disabled = true;
+  try {
+    await addByUrl(url, "tail", "follow");
+  } finally {
+    button.disabled = false;
+  }
 });
 
 elements.addNextButton.addEventListener("click", async () => {
   await submitRequest("next");
+});
+
+elements.resortPlaylistButton?.addEventListener("click", async () => {
+  try {
+    await resortPlaylistByCycle();
+  } catch (error) {
+    setFormMessage(error.message, true);
+  }
 });
 
 elements.layoutModeSwitch?.addEventListener("click", (event) => {
@@ -1418,10 +2179,34 @@ elements.layoutModeSwitch?.addEventListener("click", (event) => {
   setLayoutMode(button.dataset.layoutMode);
 });
 
+elements.remoteQrToggle?.addEventListener("click", () => {
+  setRemoteQrPopoverOpen(!state.remoteQrPopoverOpen);
+});
+
+elements.remoteQrPopoverClose?.addEventListener("click", () => {
+  setRemoteQrPopoverOpen(false);
+});
+
+document.addEventListener("click", (event) => {
+  if (!state.remoteQrPopoverOpen) {
+    return;
+  }
+  if (event.target.closest("#remote-qr-control")) {
+    return;
+  }
+  setRemoteQrPopoverOpen(false);
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {
+    setRemoteQrPopoverOpen(false);
+  }
+});
+
 elements.refreshButton.addEventListener("click", async () => {
   try {
     await fetchState();
-    setFormMessage("列表已刷新。");
+    setFormMessage("点歌列表已刷新。");
   } catch (error) {
     setFormMessage(error.message, true);
   } finally {
@@ -1431,8 +2216,15 @@ elements.refreshButton.addEventListener("click", async () => {
 });
 
 elements.remoteAvSyncPanel?.addEventListener("click", async (event) => {
-  const button = event.target.closest("button[data-av-step]");
+  const button = event.target.closest("button[data-av-step], button[data-reset-av-offset]");
   if (!button) {
+    return;
+  }
+  if (button.disabled) {
+    return;
+  }
+  if (button.hasAttribute("data-reset-av-offset")) {
+    await setRemoteAvOffset(0);
     return;
   }
   await setRemoteAvOffset(
@@ -1472,11 +2264,18 @@ elements.remoteVolumeMuteButton?.addEventListener("click", async () => {
 elements.gatchaButton.addEventListener("click", handleGatchaDraw);
 elements.gatchaRetryButton.addEventListener("click", handleGatchaDraw);
 
+elements.gatchaUidToggle?.addEventListener("click", () => {
+  state.gatchaUidVisible = !state.gatchaUidVisible;
+  renderGatchaUidView();
+});
+
+elements.gatchaUidForm?.addEventListener("submit", handleGatchaUidSubmit);
+
 elements.gatchaConfirmButton.addEventListener("click", async () => {
   if (!state.gatchaCandidate?.url) {
     return;
   }
-  await addByUrl(String(state.gatchaCandidate.url), "tail");
+  await addByUrl(String(state.gatchaCandidate.url), "tail", "gatcha");
 });
 
 elements.bindingSheetClose?.addEventListener("click", () => {
@@ -1510,7 +2309,7 @@ elements.audioVariantBar.addEventListener("click", async (event) => {
   if (toggleButton) {
     state.audioVariantBarExpanded = !state.audioVariantBarExpanded;
     if (state.data?.current_item) {
-      renderAudioVariantBar(state.data.current_item, state.data.playback_mode);
+      renderAudioVariantBar(state.data.current_item, frontendPlaybackMode(state.data.playback_mode));
     }
     return;
   }
@@ -1549,9 +2348,8 @@ elements.audioVariantBar.addEventListener("click", async (event) => {
         setFormMessage("已取消重复添加");
         return;
       }
-      state.data = result.data;
-      setFormMessage("已将分P加入下载列表");
-      render();
+      applyStateSnapshot(result.data, { forceRender: true });
+      setFormMessage("已将分P加入缓存任务");
     } catch (error) {
       setFormMessage(error.message, true);
     } finally {
@@ -1573,12 +2371,11 @@ elements.audioVariantBar.addEventListener("click", async (event) => {
   try {
     state.audioVariantSwitchInFlight = true;
     state.audioVariantSwitchUnlockAt = Date.now() + audioVariantSwitchDebounceMs;
-    renderAudioVariantBar(currentItem, state.data?.playback_mode);
-    state.data = await apiPost("/api/player/audio-variant", {
+    renderAudioVariantBar(currentItem, frontendPlaybackMode(state.data?.playback_mode));
+    applyStateSnapshot(await apiPost("/api/player/audio-variant", {
       item_id: currentItem.id,
       variant_id: nextVariantId,
-    });
-    render();
+    }));
     const activeItem = state.data?.current_item;
     const activeVariant = activeItem ? selectedAudioVariantForItem(activeItem) : null;
     setFormMessage(`已切换到 ${activeVariant?.label || nextVariantId}`);
@@ -1614,6 +2411,14 @@ elements.historyViewButton.addEventListener("click", () => {
   render();
 });
 
+elements.historyExportImageButton?.addEventListener("click", async () => {
+  await exportHistory("image");
+});
+
+elements.historyExportCsvButton?.addEventListener("click", async () => {
+  await exportHistory("csv");
+});
+
 elements.historyList.addEventListener("click", async (event) => {
   const button = event.target.closest("button[data-action]");
   if (!button) {
@@ -1632,10 +2437,41 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    clearViewportScaleResetTimers();
+    blurActiveEditableElement();
+    return;
+  }
+  scheduleViewportScaleReset();
+});
+
+window.addEventListener("pageshow", () => {
+  window.requestAnimationFrame(() => {
+    blurActiveEditableElement();
+  });
+  scheduleViewportScaleReset();
+});
+
+window.addEventListener("focus", () => {
+  scheduleViewportScaleReset();
+});
+
+if (window.visualViewport) {
+  window.visualViewport.addEventListener("resize", () => {
+    if (document.hidden || isEditableElement(document.activeElement) || currentViewportScale() <= 1.01) {
+      return;
+    }
+    scheduleViewportScaleReset();
+  });
+}
+
+window.addEventListener("pagehide", blurActiveEditableElement);
+window.addEventListener("pagehide", clearViewportScaleResetTimers);
 window.addEventListener("pagehide", disconnectClient);
 window.addEventListener("beforeunload", disconnectClient);
 
-async function startPolling() {
+async function startRemoteSession() {
   hydrateLocalPreferences();
   renderLayoutMode();
   try {
@@ -1643,13 +2479,7 @@ async function startPolling() {
   } catch (error) {
     setFormMessage(error.message, true);
   }
-  window.setInterval(async () => {
-    try {
-      await fetchState();
-    } catch {
-      // Keep the last successful state on screen.
-    }
-  }, pollIntervalMs);
+  connectStateStream();
 }
 
-startPolling();
+startRemoteSession();

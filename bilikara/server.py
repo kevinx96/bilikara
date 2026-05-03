@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import atexit
+from email.utils import formatdate
 import json
 import mimetypes
 import re
@@ -17,16 +18,21 @@ from .bilibili import (
     BilibiliError,
     ManualBindingRequiredError,
     MISSING_BILIBILI_COOKIE_MESSAGE,
+    add_gatcha_uid,
+    browse_gatcha_cache,
     effective_bilibili_cookie,
     fetch_gatcha_candidate,
     fetch_owner_info,
     fetch_video_item,
-    refresh_gatcha_cache,
+    gatcha_uid_snapshot,
+    preview_gatcha_uid,
     refresh_gatcha_cache_in_background,
     search_gatcha_cache,
 )
 from .cache import CacheManager
 from .config import (
+    APP_RELEASES_URL,
+    APP_VERSION,
     BACKUP_FILE,
     CACHE_DIR,
     HOST,
@@ -37,7 +43,9 @@ from .config import (
     STATIC_DIR,
     ensure_directories,
 )
+from .history_export import history_csv_bytes, history_image_export
 from .store import PlaylistStore
+from .updater import check_for_update
 
 RANGE_RE = re.compile(r"bytes=(\d*)-(\d*)")
 
@@ -53,7 +61,14 @@ class DuplicateSessionRequestError(ValueError):
 class AppContext:
     def __init__(self) -> None:
         ensure_directories()
-        self.store = PlaylistStore(STATE_FILE, BACKUP_FILE, PLAYED_SESSION_DIR)
+        self._state_change_condition = threading.Condition()
+        self._state_revision = 0
+        self.store = PlaylistStore(
+            STATE_FILE,
+            BACKUP_FILE,
+            PLAYED_SESSION_DIR,
+            on_change=self._notify_state_changed,
+        )
         self.auto_restored_backup = self.store.restore_backup()
         self.cache_manager = CacheManager(
             self.store,
@@ -90,6 +105,8 @@ class AppContext:
         self._startup_started = False
 
     def snapshot(self) -> dict:
+        with self._state_change_condition:
+            state_revision = self._state_revision
         payload = self.store.snapshot()
         metrics = self.cache_manager.cache_metrics()
         self.cache_manager.enrich_snapshot(payload, metrics)
@@ -102,6 +119,11 @@ class AppContext:
         payload["remote_access"] = self.remote_access_snapshot()
         payload["player_control_command"] = self.player_control_command_snapshot()
         payload["player_status"] = self.player_status_snapshot(payload.get("current_item"))
+        payload["app"] = {
+            "version": APP_VERSION,
+            "releases_url": APP_RELEASES_URL,
+        }
+        payload["state_revision"] = state_revision
         return payload
 
     def add_item(self, item, *, position: str, requester_name: str) -> None:
@@ -123,12 +145,26 @@ class AppContext:
         self.store.clear_playlist()
         self.cache_manager.sync_with_playlist()
 
+    def clear_history(self) -> None:
+        self.store.clear_history()
+
+    def history_snapshot(self) -> list[dict]:
+        history = self.store.snapshot().get("history") or []
+        return list(history) if isinstance(history, list) else []
+
+    def session_played_snapshot(self) -> list[dict]:
+        return self.store.session_played_snapshot()
+
     def move_item(self, item_id: str, direction: str) -> None:
         self.store.move_item(item_id, direction)
         self.cache_manager.sync_with_playlist()
 
     def move_item_to_index(self, item_id: str, index: int) -> None:
         self.store.move_item_to_index(item_id, index)
+        self.cache_manager.sync_with_playlist()
+
+    def resort_playlist_by_cycle(self) -> None:
+        self.store.resort_playlist_by_cycle()
         self.cache_manager.sync_with_playlist()
 
     def move_to_next(self, item_id: str) -> None:
@@ -150,6 +186,9 @@ class AppContext:
 
     def set_muted(self, is_muted: bool) -> bool:
         return self.store.set_muted(is_muted)
+
+    def set_song_advance_delay_seconds(self, delay_seconds: int) -> int:
+        return self.store.set_song_advance_delay_seconds(delay_seconds)
 
     def set_audio_variant(self, item_id: str, variant_id: str) -> bool:
         return self.store.set_audio_variant(item_id, variant_id)
@@ -175,9 +214,10 @@ class AppContext:
             video_quality=video_quality,
             audio_hires=audio_hires,
         )
+        self._notify_state_changed()
 
-    def retry_cache_item(self, item_id: str) -> None:
-        self.cache_manager.retry_item(item_id)
+    def retry_cache_item(self, item_id: str, *, force: bool = False) -> None:
+        self.cache_manager.retry_item(item_id, force=force)
 
     def issue_player_control(
         self,
@@ -185,6 +225,7 @@ class AppContext:
         action: str,
         item_id: str = "",
         delta_seconds: int = 0,
+        target_seconds: float | None = None,
     ) -> dict[str, object]:
         with self._player_control_lock:
             self._player_control_seq += 1
@@ -193,13 +234,17 @@ class AppContext:
                 "action": action,
                 "item_id": item_id,
                 "delta_seconds": delta_seconds,
+                "target_seconds": target_seconds,
                 "issued_at": time.time(),
             }
-            return dict(self._player_control_command)
+            command = dict(self._player_control_command)
+        self._notify_state_changed()
+        return command
 
     def ack_player_control(self, seq: int) -> None:
         with self._player_control_lock:
             self._player_control_ack_seq = max(self._player_control_ack_seq, int(seq))
+        self._notify_state_changed()
 
     def player_control_command_snapshot(self) -> dict[str, object] | None:
         with self._player_control_lock:
@@ -215,17 +260,37 @@ class AppContext:
         item_id: str,
         is_paused: bool,
         current_time: float = 0.0,
+        duration: float | None = None,
     ) -> None:
         normalized_item_id = str(item_id or "").strip()
         if not normalized_item_id:
             return
+        normalized_duration = 0.0
+        if duration is not None:
+            try:
+                normalized_duration = max(0.0, float(duration or 0.0))
+            except (TypeError, ValueError):
+                normalized_duration = 0.0
         with self._player_status_lock:
+            previous_duration = 0.0
+            if (
+                isinstance(self._player_status, dict)
+                and str(self._player_status.get("item_id") or "").strip() == normalized_item_id
+            ):
+                try:
+                    previous_duration = max(0.0, float(self._player_status.get("duration") or 0.0))
+                except (TypeError, ValueError):
+                    previous_duration = 0.0
             self._player_status = {
                 "item_id": normalized_item_id,
                 "is_paused": bool(is_paused),
                 "current_time": max(0.0, float(current_time or 0.0)),
+                "duration": normalized_duration or previous_duration,
                 "updated_at": time.time(),
             }
+        if (not is_paused) or float(current_time or 0.0) > 0:
+            self.store.mark_item_playback_started(normalized_item_id)
+        self._notify_state_changed()
 
     def player_status_snapshot(self, current_item_payload: object) -> dict[str, object] | None:
         current_item_id = ""
@@ -262,6 +327,16 @@ class AppContext:
             self._player_control_command = None
         with self._player_status_lock:
             self._player_status = None
+        self._notify_state_changed()
+
+    def reset_player_state(self) -> None:
+        self.store.reset_player_state()
+        with self._player_control_lock:
+            self._player_control_ack_seq = self._player_control_seq
+            self._player_control_command = None
+        with self._player_status_lock:
+            self._player_status = None
+        self._notify_state_changed()
 
     def bind_server(self, server: ThreadingHTTPServer, *, shutdown_on_last_client: bool) -> None:
         with self._client_lock:
@@ -284,6 +359,23 @@ class AppContext:
     def remote_access_snapshot(self) -> dict[str, object]:
         with self._remote_access_lock:
             return dict(self._remote_access)
+
+    def wait_for_state_change(self, state_revision: int, timeout: float | None = None) -> bool:
+        deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
+        with self._state_change_condition:
+            while self._state_revision <= int(state_revision):
+                if self._closed:
+                    return False
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
+                    return False
+                self._state_change_condition.wait(timeout=remaining)
+            return True
+
+    def _notify_state_changed(self) -> None:
+        with self._state_change_condition:
+            self._state_revision += 1
+            self._state_change_condition.notify_all()
 
     def touch_client(self, client_id: str, is_host: bool = True) -> None:
         client_key = str(client_id or "").strip()
@@ -347,55 +439,11 @@ class AppContext:
             self._client_last_seen.pop(client_id, None)
             self._host_client_last_seen.pop(client_id, None)
 
-    def disconnect_client(self, client_id: str) -> None:
-        client_key = str(client_id or "").strip()
-        if not client_key:
-            return
-        now = time.monotonic()
-        with self._client_lock:
-            self._client_last_seen.pop(client_key, None)
-            self._prune_stale_clients(now)
-            if self._client_last_seen:
-                self._no_clients_since = None
-                return
-            self._no_clients_since = now
-
     def shutdown(self) -> None:
         if self._closed:
             return
         self._closed = True
         self.cache_manager.shutdown()
-
-    def _client_watchdog_loop(self) -> None:
-        while not self._closed:
-            time.sleep(1.0)
-            with self._client_lock:
-                if not self._shutdown_on_last_client or not self._client_seen_once or self._shutdown_requested:
-                    continue
-                now = time.monotonic()
-                self._prune_stale_clients(now)
-                if self._client_last_seen:
-                    self._no_clients_since = None
-                    continue
-                if self._no_clients_since is None:
-                    self._no_clients_since = now
-                    continue
-                if now - self._no_clients_since < self._client_grace_seconds:
-                    continue
-                server = self._server
-                if server is None:
-                    continue
-                self._shutdown_requested = True
-            threading.Thread(target=server.shutdown, daemon=True).start()
-
-    def _prune_stale_clients(self, now: float) -> None:
-        expired = [
-            client_id
-            for client_id, last_seen in self._client_last_seen.items()
-            if now - last_seen > self._client_stale_seconds
-        ]
-        for client_id in expired:
-            self._client_last_seen.pop(client_id, None)
 
     def _owner_enrichment_loop(self) -> None:
         for source_url in self.store.missing_owner_urls():
@@ -433,6 +481,7 @@ class AppContext:
             if host != self._host or port != self._port:
                 return
             self._remote_access = self._build_remote_access_payload(host, port, lan_urls)
+        self._notify_state_changed()
 
     @staticmethod
     def _build_remote_access_payload(
@@ -458,8 +507,10 @@ class BilikaraHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def do_GET(self) -> None:  # noqa: N802
-        route = urlparse(self.path).path
-        client_id = self.headers.get("X-Bilikara-Client", "")
+        parsed = urlparse(self.path)
+        route = parsed.path
+        query = parse_qs(parsed.query)
+        client_id = self.headers.get("X-Bilikara-Client", "") or query.get("client_id", [""])[0]
         referer = self.headers.get("Referer", "")
         
         # 默认认为是 Host 主屏幕，除非明确来自 Remote
@@ -470,8 +521,23 @@ class BilikaraHandler(BaseHTTPRequestHandler):
             is_host = False
             
         CONTEXT.touch_client(client_id, is_host=is_host)
+        if route == "/api/events":
+            self._serve_events(client_id)
+            return
         if route == "/api/state":
             self._write_json({"ok": True, "data": CONTEXT.snapshot()})
+            return
+        if route == "/api/app/update":
+            try:
+                include_preview = str(query.get("include_preview", [""])[0]).lower() in {
+                    "1",
+                    "true",
+                    "yes",
+                    "on",
+                }
+                self._write_json({"ok": True, "data": check_for_update(include_preview=include_preview)})
+            except Exception as e:
+                self._write_json({"ok": False, "error": str(e)}, status=HTTPStatus.BAD_GATEWAY)
             return
         if route == "/api/gatcha/candidate":
             try:
@@ -491,14 +557,77 @@ class BilikaraHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._write_json({"ok": False, "error": str(e)})
             return
+        if route == "/api/gatcha/browse":
+            route_query = parse_qs(urlparse(self.path).query)
+            selected_uid = route_query.get("uid", [""])[0]
+            search_query = route_query.get("q", [""])[0]
+            try:
+                self._write_json({"ok": True, "data": browse_gatcha_cache(selected_uid, search_query)})
+            except Exception as e:
+                self._write_json({"ok": False, "error": str(e)})
+            return
+        if route == "/api/gatcha/uids":
+            try:
+                self._write_json({"ok": True, "data": gatcha_uid_snapshot()})
+            except Exception as e:
+                self._write_json({"ok": False, "error": str(e)})
+            return
+        if route == "/api/history/export":
+            query = parse_qs(urlparse(self.path).query)
+            export_format = str(query.get("format", ["csv"])[0] or "csv").strip().lower()
+            export_source = str(query.get("source", ["history"])[0] or "history").strip().lower()
+            source_settings = {
+                "history": {
+                    "items": lambda: CONTEXT.history_snapshot(),
+                    "filename": "history",
+                    "title": "Bilikara 点歌历史",
+                    "time_header": "点歌时间",
+                },
+                "played": {
+                    "items": lambda: CONTEXT.session_played_snapshot(),
+                    "filename": "played",
+                    "title": "Bilikara 本场已唱",
+                    "time_header": "播放时间",
+                },
+            }
+            if export_source not in source_settings:
+                self._write_json({"ok": False, "error": "source must be history or played"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            settings = source_settings[export_source]
+            timestamp = time.strftime("%Y%m%d-%H%M%S")
+            try:
+                history = settings["items"]()
+                if export_format == "csv":
+                    self._write_download(
+                        history_csv_bytes(history, time_header=str(settings["time_header"])),
+                        content_type="text/csv; charset=utf-8",
+                        filename=f"bilikara-{settings['filename']}-{timestamp}.csv",
+                    )
+                    return
+                if export_format == "image":
+                    payload, content_type, default_filename = history_image_export(
+                        history,
+                        logo_path=_history_export_logo_path(),
+                        title=str(settings["title"]),
+                    )
+                    suffix = Path(default_filename).suffix or ".png"
+                    filename = f"bilikara-{settings['filename']}-{timestamp}{suffix}"
+                    self._write_download(payload, content_type=content_type, filename=filename)
+                    return
+                raise ValueError("format must be csv or image")
+            except Exception as e:
+                self._write_json({"ok": False, "error": str(e)}, status=HTTPStatus.BAD_REQUEST)
+            return
         if route.startswith("/media/"):
             self._serve_media(route)
             return
         self._serve_static(route)
 
     def do_POST(self) -> None:  # noqa: N802
-        route = urlparse(self.path).path
-        client_id = self.headers.get("X-Bilikara-Client", "")
+        parsed = urlparse(self.path)
+        route = parsed.path
+        query = parse_qs(parsed.query)
+        client_id = self.headers.get("X-Bilikara-Client", "") or query.get("client_id", [""])[0]
         referer = self.headers.get("Referer", "")
         
         is_host = True
@@ -525,6 +654,10 @@ class BilikaraHandler(BaseHTTPRequestHandler):
                 return
             if route == "/api/playlist/clear":
                 CONTEXT.clear_playlist()
+                self._write_json({"ok": True, "data": CONTEXT.snapshot()})
+                return
+            if route == "/api/history/clear":
+                CONTEXT.clear_history()
                 self._write_json({"ok": True, "data": CONTEXT.snapshot()})
                 return
             if route == "/api/session-users/add":
@@ -565,6 +698,10 @@ class BilikaraHandler(BaseHTTPRequestHandler):
                 CONTEXT.move_item_to_index(body["item_id"], index)
                 self._write_json({"ok": True, "data": CONTEXT.snapshot()})
                 return
+            if route == "/api/playlist/resort":
+                CONTEXT.resort_playlist_by_cycle()
+                self._write_json({"ok": True, "data": CONTEXT.snapshot()})
+                return
             if route == "/api/playlist/move-next":
                 self._require_id(body)
                 CONTEXT.move_to_next(body["item_id"])
@@ -589,6 +726,13 @@ class BilikaraHandler(BaseHTTPRequestHandler):
                 CONTEXT.set_av_offset_ms(offset_ms)
                 self._write_json({"ok": True, "data": CONTEXT.snapshot()})
                 return
+            if route == "/api/player/advance-delay":
+                delay_seconds = body.get("delay_seconds")
+                if not isinstance(delay_seconds, int):
+                    raise ValueError("delay_seconds must be an integer")
+                CONTEXT.set_song_advance_delay_seconds(delay_seconds)
+                self._write_json({"ok": True, "data": CONTEXT.snapshot()})
+                return
             if route == "/api/player/volume":
                 volume_percent = body.get("volume_percent")
                 is_muted = body.get("is_muted")
@@ -606,8 +750,22 @@ class BilikaraHandler(BaseHTTPRequestHandler):
                 return
             if route == "/api/cache/retry":
                 self._require_id(body)
-                CONTEXT.retry_cache_item(body["item_id"])
+                CONTEXT.retry_cache_item(body["item_id"], force=bool(body.get("force")))
                 self._write_json({"ok": True, "data": CONTEXT.snapshot()})
+                return
+            if route == "/api/gatcha/uids/add":
+                result = add_gatcha_uid(body.get("uid"))
+                self._write_json({"ok": True, "data": result})
+                return
+            if route == "/api/gatcha/uids/preview":
+                result = preview_gatcha_uid(body.get("uid"))
+                self._write_json({"ok": True, "data": result})
+                return
+            if route == "/api/gatcha/refresh":
+                if not effective_bilibili_cookie():
+                    raise ValueError(MISSING_BILIBILI_COOKIE_MESSAGE)
+                started = refresh_gatcha_cache_in_background()
+                self._write_json({"ok": True, "data": {"started": started}})
                 return
             if route == "/api/player/audio-variant":
                 self._require_id(body)
@@ -621,17 +779,23 @@ class BilikaraHandler(BaseHTTPRequestHandler):
             if route == "/api/player/control":
                 action = str(body.get("action") or "").strip()
                 item_id = str(body.get("item_id") or "").strip()
-                if action not in {"toggle-play", "seek-relative"}:
+                if action not in {"toggle-play", "seek-relative", "seek-absolute"}:
                     raise ValueError("invalid player control action")
                 delta_seconds = int(body.get("delta_seconds") or 0)
+                target_seconds = None
                 if action == "seek-relative" and delta_seconds == 0:
                     raise ValueError("missing delta_seconds")
                 if action == "seek-relative" and abs(delta_seconds) > 300:
                     raise ValueError("delta_seconds too large")
+                if action == "seek-absolute":
+                    target_seconds = float(body.get("target_seconds") or 0.0)
+                    if target_seconds < 0:
+                        raise ValueError("target_seconds must be non-negative")
                 CONTEXT.issue_player_control(
                     action=action,
                     item_id=item_id,
                     delta_seconds=delta_seconds,
+                    target_seconds=target_seconds,
                 )
                 self._write_json({"ok": True, "data": CONTEXT.snapshot()})
                 return
@@ -650,10 +814,14 @@ class BilikaraHandler(BaseHTTPRequestHandler):
                 if not isinstance(is_paused, bool):
                     raise ValueError("is_paused must be boolean")
                 current_time = float(body.get("current_time") or 0.0)
+                duration = None
+                if "duration" in body:
+                    duration = float(body.get("duration") or 0.0)
                 CONTEXT.update_player_status(
                     item_id=item_id,
                     is_paused=is_paused,
                     current_time=current_time,
+                    duration=duration,
                 )
                 self._write_json({"ok": True})
                 return
@@ -683,6 +851,10 @@ class BilikaraHandler(BaseHTTPRequestHandler):
                 return
             if route == "/api/backup/discard":
                 CONTEXT.discard_backup()
+                self._write_json({"ok": True, "data": CONTEXT.snapshot()})
+                return
+            if route == "/api/player/reset":
+                CONTEXT.reset_player_state()
                 self._write_json({"ok": True, "data": CONTEXT.snapshot()})
                 return
             if route == "/api/data/reset":
@@ -834,6 +1006,57 @@ class BilikaraHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(encoded)))
         self.end_headers()
         self.wfile.write(encoded)
+        self.wfile.flush()
+
+    def _write_download(self, payload: bytes, *, content_type: str, filename: str) -> None:
+        safe_filename = re.sub(r"[^A-Za-z0-9_.-]+", "-", filename).strip("-") or "download.bin"
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Content-Disposition", f'attachment; filename="{safe_filename}"')
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Last-Modified", formatdate(timeval=None, localtime=False, usegmt=True))
+        self.end_headers()
+        self.wfile.write(payload)
+        self.wfile.flush()
+
+    def _serve_events(self, client_id: str) -> None:
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+        last_revision = -1
+        try:
+            snapshot = CONTEXT.snapshot()
+            last_revision = int(snapshot.get("state_revision") or 0)
+            self._write_sse_event("state", snapshot)
+            while not CONTEXT._closed:
+                if not CONTEXT.wait_for_state_change(last_revision, timeout=20.0):
+                    if CONTEXT._closed:
+                        return
+                    CONTEXT.touch_client(client_id, is_host=False)
+                    self.wfile.write(b": keepalive\n\n")
+                    self.wfile.flush()
+                    continue
+                snapshot = CONTEXT.snapshot()
+                next_revision = int(snapshot.get("state_revision") or 0)
+                if next_revision <= last_revision:
+                    continue
+                last_revision = next_revision
+                CONTEXT.touch_client(client_id, is_host=False)
+                self._write_sse_event("state", snapshot)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return
+
+    def _write_sse_event(self, event: str, payload: dict) -> None:
+        encoded = json.dumps(payload, ensure_ascii=False)
+        self.wfile.write(f"event: {event}\n".encode("utf-8"))
+        for line in encoded.splitlines() or ["{}"]:
+            self.wfile.write(f"data: {line}\n".encode("utf-8"))
+        self.wfile.write(b"\n")
+        self.wfile.flush()
 
     def _stream_file(
         self,
@@ -898,6 +1121,8 @@ def _serve(
     actual_port = _find_available_port(host, port) if auto_select_port else port
     server = ThreadingHTTPServer((host, actual_port), BilikaraHandler)
     CONTEXT.bind_server(server, shutdown_on_last_client=shutdown_on_last_client)
+    if CONTEXT.cache_manager.bbdown_login_status().get("logged_in"):
+        refresh_gatcha_cache_in_background()
     browser_host = "127.0.0.1" if host == "0.0.0.0" else host
     url = f"http://{browser_host}:{actual_port}"
     print(f"{status_label} running on {url}")
@@ -949,14 +1174,33 @@ def run_webui(
     )
 
 
+def _history_export_logo_path() -> Path | None:
+    for filename in ("bili.png", "bili.jpg", "bili.jpeg"):
+        candidate = STATIC_DIR / "pic" / filename
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _port_probe_hosts(host: str) -> tuple[str, ...]:
+    if host == "0.0.0.0":
+        return (host, "127.0.0.1")
+    return (host,)
+
+
+def _can_bind_port(host: str, port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind((host, port))
+        except OSError:
+            return False
+    return True
+
+
 def _find_available_port(host: str, preferred_port: int) -> int:
     for candidate in range(preferred_port, preferred_port + 30):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            try:
-                sock.bind((host, candidate))
-            except OSError:
-                continue
+        if all(_can_bind_port(probe_host, candidate) for probe_host in _port_probe_hosts(host)):
             return candidate
     raise OSError(f"无法为 bilikara 找到可用端口，起始端口: {preferred_port}")
 
