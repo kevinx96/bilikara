@@ -75,7 +75,7 @@ select {
 }
 
 .panel {
-  padding: 18px;
+  padding: 20px;
 }
 
 .eyebrow,
@@ -1014,13 +1014,23 @@ select:disabled {
 }
 
 .search-form {
+  display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
+  gap: 10px;
+  align-items: stretch;
 }
 
 .search-form .primary-button {
   min-height: 48px;
   white-space: nowrap;
+}
+
+.search-message {
+  min-height: 18px;
+  margin-top: 10px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--muted);
 }
 
 .primary-button,
@@ -1159,7 +1169,6 @@ select:disabled {
   overflow-y: auto;
   overscroll-behavior: contain;
   padding-right: 4px;
-  scrollbar-gutter: stable;
 }
 
 .queue-panel .list::-webkit-scrollbar {
@@ -1188,24 +1197,27 @@ select:disabled {
   overflow-y: auto;
   overscroll-behavior: contain;
   padding-right: 4px;
-  scrollbar-gutter: stable;
 }
 
-.search-results::-webkit-scrollbar {
+.search-results::-webkit-scrollbar,
+.follow-up-grid::-webkit-scrollbar {
   width: 8px;
 }
 
-.search-results::-webkit-scrollbar-track {
+.search-results::-webkit-scrollbar-track,
+.follow-up-grid::-webkit-scrollbar-track {
   background: rgba(67, 53, 41, 0.05);
   border-radius: 999px;
 }
 
-.search-results::-webkit-scrollbar-thumb {
+.search-results::-webkit-scrollbar-thumb,
+.follow-up-grid::-webkit-scrollbar-thumb {
   background: rgba(143, 49, 29, 0.24);
   border-radius: 999px;
 }
 
-.search-results::-webkit-scrollbar-thumb:hover {
+.search-results::-webkit-scrollbar-thumb:hover,
+.follow-up-grid::-webkit-scrollbar-thumb:hover {
   background: rgba(143, 49, 29, 0.36);
 }
 
@@ -1253,6 +1265,9 @@ select:disabled {
   display: grid;
   gap: 12px;
   text-align: center;
+  height: 154px;
+  align-content: start;
+  overflow: hidden;
 }
 
 .gatcha-actions {
@@ -1280,10 +1295,20 @@ select:disabled {
   display: none;
 }
 
+#follow-up-list-view,
+#follow-up-items-view {
+  display: grid;
+  gap: 12px;
+}
+
 .follow-up-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
   gap: 10px;
+  max-height: 240px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 4px 4px 4px 0;
 }
 
 .follow-up-button {
@@ -1292,12 +1317,18 @@ select:disabled {
   gap: 6px;
   align-content: center;
   padding: 10px;
-  border: 1px solid rgba(67, 53, 41, 0.1);
+  border: 1px solid rgba(67, 53, 41, 0.08);
   border-radius: 16px;
   background: rgba(255, 255, 255, 0.76);
   color: var(--text);
   text-align: left;
-  box-shadow: 0 10px 22px rgba(67, 53, 41, 0.06);
+  cursor: pointer;
+  transition: border-color 0.18s ease, background 0.18s ease;
+}
+
+.follow-up-button:hover {
+  border-color: rgba(202, 91, 60, 0.24);
+  background: rgba(255, 255, 255, 0.94);
 }
 
 .follow-up-button:active {
@@ -1346,7 +1377,9 @@ select:disabled {
 
 .follow-search-form {
   display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 10px;
+  align-items: stretch;
 }
 
 .follow-search-form .primary-button {
@@ -1376,6 +1409,10 @@ select:disabled {
 #gatcha-candidate-title {
   font-size: 16px;
   line-height: 1.4;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .gatcha-uid-view {
@@ -1384,7 +1421,9 @@ select:disabled {
 
 .gatcha-uid-form {
   display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 10px;
+  align-items: stretch;
 }
 
 .gatcha-uid-form .primary-button {
@@ -1476,7 +1515,7 @@ select:disabled {
   .hero-card,
   .panel {
     border-radius: 20px;
-    padding: 16px;
+    padding: 18px;
   }
 
   .action-row {
@@ -1509,6 +1548,7 @@ select:disabled {
   }
 
   .search-form,
+  .follow-search-form,
   .search-result-item {
     grid-template-columns: minmax(0, 1fr) auto;
   }

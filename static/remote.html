@@ -195,7 +195,7 @@
           <input
             id="search-query"
             type="text"
-            placeholder="搜索本地歌曲目录"
+            placeholder="在本地歌曲目录中搜索"
             autocomplete="off"
           />
           <button type="submit" id="search-button" class="primary-button">搜索</button>
@@ -218,7 +218,7 @@
               <input
                 type="text"
                 id="follow-search-query"
-                placeholder="搜索该 UP 的缓存稿件"
+                placeholder="在这个 UP 的缓存稿件里搜索"
                 autocomplete="off"
               />
               <button type="submit" id="follow-search-button" class="primary-button">搜索</button>
@@ -232,8 +232,8 @@
       <section class="panel gatcha-panel">
         <div class="panel-head">
           <div>
-            <p class="panel-tag">Gatcha Draw</p>
-            <h2 class="panel-title">试试运气</h2>
+            <p class="panel-tag" id="gatcha-tag">Gatcha Draw</p>
+            <h2 class="panel-title" id="gatcha-title">试试运气</h2>
           </div>
           <button type="button" id="gatcha-uid-toggle" class="secondary-button gatcha-uid-toggle" aria-pressed="false">
             添加 UID
@@ -264,12 +264,14 @@
             />
             <button type="submit" id="add-gatcha-uid-button" class="primary-button">添加</button>
           </form>
-          <button type="button" id="refresh-gatcha-cache-button" class="secondary-button gatcha-refresh-button">
-            手动更新
-          </button>
-          <button type="button" id="pull-gatcha-favlist-button" class="secondary-button gatcha-refresh-button">
-            拉取收藏
-          </button>
+          <div class="action-row gatcha-actions">
+            <button type="button" id="refresh-gatcha-cache-button" class="secondary-button gatcha-refresh-button">
+              手动更新
+            </button>
+            <button type="button" id="pull-gatcha-favlist-button" class="secondary-button gatcha-refresh-button">
+              拉取收藏
+            </button>
+          </div>
           <p class="gatcha-message" id="gatcha-uid-message" role="status"></p>
         </div>
       </section>
