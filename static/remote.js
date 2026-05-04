@@ -111,6 +111,8 @@ const elements = {
   searchButton: document.getElementById("search-button"),
   searchMessage: document.getElementById("search-message"),
   searchResults: document.getElementById("search-results"),
+  searchTag: document.querySelector(".search-panel .panel-tag"),
+  searchTitle: document.querySelector(".search-panel .panel-title"),
   followBrowseToggle: document.getElementById("follow-browse-toggle"),
   followBrowseView: document.getElementById("follow-browse-view"),
   followUpListView: document.getElementById("follow-up-list-view"),
@@ -156,6 +158,8 @@ const elements = {
   historyList: document.getElementById("history-list"),
   queueItemTemplate: document.getElementById("queue-item-template"),
   historyItemTemplate: document.getElementById("history-item-template"),
+  gatchaTag: document.getElementById("gatcha-tag"),
+  gatchaTitle: document.getElementById("gatcha-title"),
 };
 
 function createClientId() {
@@ -815,6 +819,7 @@ function setFollowBrowseMessage(message, isError = false) {
   }
   elements.followBrowseMessage.textContent = message || "";
   elements.followBrowseMessage.classList.toggle("is-error", Boolean(isError));
+  elements.followBrowseMessage.classList.toggle("hidden", !message);
 }
 
 function selectedFollowOwner() {
@@ -900,11 +905,18 @@ function renderFollowBrowse() {
   }
 
   elements.searchForm?.classList.toggle("hidden", state.followBrowseVisible);
+  elements.searchMessage?.classList.toggle("hidden", state.followBrowseVisible || !elements.searchMessage.textContent);
   elements.searchResults?.classList.toggle("hidden", state.followBrowseVisible || !elements.searchResults.children.length);
   elements.followBrowseView.classList.toggle("hidden", !state.followBrowseVisible);
   if (elements.followBrowseToggle) {
     elements.followBrowseToggle.textContent = state.followBrowseVisible ? "返回搜索" : "关注浏览";
     elements.followBrowseToggle.setAttribute("aria-pressed", String(state.followBrowseVisible));
+  }
+  if (elements.searchTag) {
+    elements.searchTag.textContent = state.followBrowseVisible ? "Follow Browse" : "Local Search";
+  }
+  if (elements.searchTitle) {
+    elements.searchTitle.textContent = state.followBrowseVisible ? "关注列表" : "搜索";
   }
   if (!state.followBrowseVisible) {
     return;
@@ -1019,6 +1031,7 @@ function setGatchaMessage(message, isError = false) {
   }
   elements.gatchaMessage.textContent = message || "";
   elements.gatchaMessage.classList.toggle("is-error", Boolean(isError));
+  elements.gatchaMessage.classList.toggle("hidden", !message);
 }
 
 function setGatchaUidMessage(message, isError = false) {
@@ -1027,6 +1040,7 @@ function setGatchaUidMessage(message, isError = false) {
   }
   elements.gatchaUidMessage.textContent = message || "";
   elements.gatchaUidMessage.classList.toggle("is-error", Boolean(isError));
+  elements.gatchaUidMessage.classList.toggle("hidden", !message);
 }
 
 function renderGatchaUidView() {
@@ -1042,6 +1056,12 @@ function renderGatchaUidView() {
   if (elements.gatchaUidToggle) {
     elements.gatchaUidToggle.textContent = showUid ? "返回抽卡" : "添加 UID";
     elements.gatchaUidToggle.setAttribute("aria-pressed", String(showUid));
+  }
+  if (elements.gatchaTag) {
+    elements.gatchaTag.textContent = showUid ? "Follow UID" : "Gatcha Draw";
+  }
+  if (elements.gatchaTitle) {
+    elements.gatchaTitle.textContent = showUid ? "关注 UID" : "试试运气";
   }
   if (elements.gatchaButton) {
     elements.gatchaButton.disabled = false;
@@ -1373,21 +1393,23 @@ function renderAudioVariantBar(currentItem, playbackMode) {
   toggleButton.innerHTML = '<span aria-hidden="true">▾</span>';
 
   elements.audioVariantBar.append(list, toggleButton);
-
-  const firstButton = list.querySelector(".audio-variant-button");
-  const firstRowHeight = firstButton
-    ? Math.ceil(firstButton.getBoundingClientRect().height) + 6
-    : 44;
-  const isWrapped = list.scrollHeight > firstRowHeight + 2;
-  elements.audioVariantBar.classList.toggle("is-collapsed", isWrapped && !state.audioVariantBarExpanded);
-  toggleButton.classList.toggle("hidden", !isWrapped);
-  if (isWrapped) {
-    list.style.setProperty("--audio-variant-collapsed-height", `${firstRowHeight}px`);
-    toggleButton.classList.toggle("is-expanded", state.audioVariantBarExpanded);
-  } else {
-    state.audioVariantBarExpanded = false;
-  }
   elements.audioVariantBar.classList.remove("hidden");
+
+  requestAnimationFrame(() => {
+    const firstButton = list.querySelector(".audio-variant-button");
+    const firstRowHeight = firstButton
+      ? Math.ceil(firstButton.getBoundingClientRect().height) + 6
+      : 44;
+    const isWrapped = list.scrollHeight > firstRowHeight + 2;
+    elements.audioVariantBar.classList.toggle("is-collapsed", isWrapped && !state.audioVariantBarExpanded);
+    toggleButton.classList.toggle("hidden", !isWrapped);
+    if (isWrapped) {
+      list.style.setProperty("--audio-variant-collapsed-height", `${firstRowHeight}px`);
+      toggleButton.classList.toggle("is-expanded", state.audioVariantBarExpanded);
+    } else {
+      state.audioVariantBarExpanded = false;
+    }
+  });
 }
 
 function boundedRemoteAvOffsetMs(offsetMs) {
