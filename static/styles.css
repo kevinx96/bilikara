@@ -3313,6 +3313,11 @@ select:disabled {
   max-width: 100%;
 }
 
+.follow-up-items-view {
+  grid-template-rows: auto auto minmax(0, 1fr);
+  max-height: 240px;
+}
+
 .follow-up-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
@@ -3413,7 +3418,8 @@ select:disabled {
 }
 
 #follow-song-results {
-  max-height: 300px;
+  min-height: 0;
+  max-height: none;
   overflow-y: auto;
   overscroll-behavior: contain;
   padding-right: 4px;
@@ -3474,6 +3480,8 @@ select:disabled {
 
 .search-face-front {
   pointer-events: auto;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  max-height: 240px;
 }
 
 .search-face-back {
@@ -3744,8 +3752,8 @@ select:disabled {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 12px;
-  align-items: start;
-  padding: 12px 14px;
+  align-items: center;
+  padding: 8px 14px;
   border-radius: 16px;
   background: rgba(255, 255, 255, 0.58);
   border: 1px solid rgba(208, 90, 63, 0.1);
@@ -3753,7 +3761,6 @@ select:disabled {
 
 .search-result-meta {
   min-width: 0;
-  padding-top: 5px;
 }
 
 .search-result-title {
