@@ -1113,6 +1113,13 @@ async function loadFollowBrowse({ uid = state.followBrowseSelectedUid, query = "
   }
 }
 
+async function refreshFollowBrowseAfterGatchaUidAdd(uid = "") {
+  state.followBrowseRenderSignature = "";
+  const currentUid = String(state.followBrowseSelectedUid || "").trim();
+  const nextUid = currentUid || String(uid || "").trim();
+  await loadFollowBrowse({ uid: nextUid, query: "", keepQuery: false });
+}
+
 async function handleGatchaDraw() {
   state.gatchaUidVisible = false;
   renderGatchaUidView();
@@ -1247,6 +1254,7 @@ async function handleGatchaUidSubmit(event) {
     if (elements.gatchaUidInput) {
       elements.gatchaUidInput.value = "";
     }
+    await refreshFollowBrowseAfterGatchaUidAdd(result?.uid || normalizedUid);
   } catch (error) {
     setGatchaUidMessage(error.message, true);
   } finally {

@@ -996,6 +996,7 @@ async function confirmGatchaUidAdd(intent) {
     if (elements.gatchaUidInput) {
       elements.gatchaUidInput.value = "";
     }
+    await refreshFollowBrowseAfterGatchaUidAdd(result?.uid || intent.uid);
   } catch (error) {
     setGatchaUidMessage(error.message, true);
   } finally {
@@ -1178,6 +1179,13 @@ async function loadFollowBrowse({ uid = state.followBrowseSelectedUid, query = "
     state.followBrowseLoading = false;
     renderFollowBrowse();
   }
+}
+
+async function refreshFollowBrowseAfterGatchaUidAdd(uid = "") {
+  state.followBrowseRenderSignature = "";
+  const currentUid = String(state.followBrowseSelectedUid || "").trim();
+  const nextUid = currentUid || String(uid || "").trim();
+  await loadFollowBrowse({ uid: nextUid, query: "", keepQuery: false });
 }
 
 async function handleGatchaDraw() {
