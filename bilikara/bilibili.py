@@ -1073,12 +1073,26 @@ def refresh_gatcha_cache_in_background(
     on_start: callable | None = None,
     on_done: callable | None = None,
     use_global_lock: bool = True,
+    upload_default_uids_to_lark: bool = True,
 ) -> bool:
     if use_global_lock:
         if not _GATCHA_REFRESH_LOCK.acquire(blocking=False):
             return False
         if on_start is not None:
             on_start()
+
+    cached_default_uids_before_refresh: set[str] = set()
+    if not upload_default_uids_to_lark:
+        default_uids = set(_default_gatcha_uids())
+        with _GATCHA_CACHE_LOCK:
+            previous_cache_payload = _load_gatcha_cache(reset_legacy=False)
+        previous_uid_entries = previous_cache_payload.get("uids") if isinstance(previous_cache_payload, dict) else {}
+        if isinstance(previous_uid_entries, dict):
+            cached_default_uids_before_refresh = {
+                uid
+                for uid in default_uids
+                if isinstance(previous_uid_entries.get(uid), list) and previous_uid_entries.get(uid)
+            }
 
     def _worker() -> None:
         cache_payload: dict | None = None
@@ -1092,7 +1106,10 @@ def refresh_gatcha_cache_in_background(
                 if on_done is not None:
                     on_done()
         if cache_payload is not None:
-            _append_lark_pool_entries_async(_gatcha_cache_payload_entries(cache_payload))
+            excluded_uids = set()
+            if not upload_default_uids_to_lark:
+                excluded_uids = set(_default_gatcha_uids()) - cached_default_uids_before_refresh
+            _append_lark_pool_entries_async(_gatcha_cache_payload_entries(cache_payload, exclude_uids=excluded_uids))
 
     threading.Thread(target=_worker, daemon=True, name="gatcha-cache-refresh").start()
     return True
@@ -1208,15 +1225,18 @@ def _local_gatcha_candidates_by_uid() -> dict[str, list[dict]]:
     return grouped_candidates
 
 
-def _gatcha_cache_payload_entries(cache_payload: dict) -> list[dict]:
+def _gatcha_cache_payload_entries(cache_payload: dict, *, exclude_uids: set[str] | None = None) -> list[dict]:
     uid_entries = cache_payload.get("uids") if isinstance(cache_payload, dict) else {}
     if not isinstance(uid_entries, dict):
         return []
     profiles = cache_payload.get("profiles") if isinstance(cache_payload, dict) else {}
     if not isinstance(profiles, dict):
         profiles = {}
+    excluded = {str(uid).strip() for uid in (exclude_uids or set()) if str(uid).strip()}
     entries: list[dict] = []
     for mid, raw_entries in uid_entries.items():
+        if str(mid).strip() in excluded:
+            continue
         if not isinstance(raw_entries, list):
             continue
         profile = profiles.get(str(mid)) if isinstance(profiles.get(str(mid)), dict) else {}

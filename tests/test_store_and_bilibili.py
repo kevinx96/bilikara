@@ -1403,6 +1403,76 @@ class BilibiliParserTest(unittest.TestCase):
         finally:
             refresh_lock.release()
 
+    def test_startup_gatcha_refresh_skips_uncached_default_uids_for_lark_upload(self):
+        class FakeThread:
+            def __init__(self, *, target, daemon=None, name=None):
+                self.target = target
+
+            def start(self):
+                self.target()
+
+        cache_payload = {
+            "uids": {
+                "1": [{"bvid": "BVDEFAULT", "title": "default", "url": "https://www.bilibili.com/video/BVDEFAULT"}],
+                "2": [{"bvid": "BVUSER", "title": "user", "url": "https://www.bilibili.com/video/BVUSER"}],
+            },
+            "profiles": {},
+        }
+
+        with (
+            patch.object(bilibili_module, "refresh_gatcha_cache", return_value=cache_payload),
+            patch.object(bilibili_module, "_default_gatcha_uids", return_value=["1"]),
+            patch.object(bilibili_module, "_load_gatcha_cache", return_value={"uids": {}}),
+            patch.object(bilibili_module, "_append_lark_pool_entries_async") as append_lark,
+            patch.object(bilibili_module.threading, "Thread", FakeThread),
+        ):
+            self.assertTrue(
+                bilibili_module.refresh_gatcha_cache_in_background(
+                    use_global_lock=False,
+                    upload_default_uids_to_lark=False,
+                )
+            )
+
+        uploaded_entries = append_lark.call_args.args[0]
+        self.assertEqual([entry["bvid"] for entry in uploaded_entries], ["BVUSER"])
+
+    def test_startup_gatcha_refresh_uploads_cached_default_uids_to_lark(self):
+        class FakeThread:
+            def __init__(self, *, target, daemon=None, name=None):
+                self.target = target
+
+            def start(self):
+                self.target()
+
+        cache_payload = {
+            "uids": {
+                "1": [{"bvid": "BVDEFAULT", "title": "default", "url": "https://www.bilibili.com/video/BVDEFAULT"}],
+                "2": [{"bvid": "BVUSER", "title": "user", "url": "https://www.bilibili.com/video/BVUSER"}],
+            },
+            "profiles": {},
+        }
+
+        with (
+            patch.object(bilibili_module, "refresh_gatcha_cache", return_value=cache_payload),
+            patch.object(bilibili_module, "_default_gatcha_uids", return_value=["1"]),
+            patch.object(
+                bilibili_module,
+                "_load_gatcha_cache",
+                return_value={"uids": {"1": [{"bvid": "BVCACHED"}]}},
+            ),
+            patch.object(bilibili_module, "_append_lark_pool_entries_async") as append_lark,
+            patch.object(bilibili_module.threading, "Thread", FakeThread),
+        ):
+            self.assertTrue(
+                bilibili_module.refresh_gatcha_cache_in_background(
+                    use_global_lock=False,
+                    upload_default_uids_to_lark=False,
+                )
+            )
+
+        uploaded_entries = append_lark.call_args.args[0]
+        self.assertEqual([entry["bvid"] for entry in uploaded_entries], ["BVDEFAULT", "BVUSER"])
+
     @patch("bilikara.bilibili.request_json")
     def test_fetch_video_item(self, mock_request_json):
         mock_request_json.return_value = {

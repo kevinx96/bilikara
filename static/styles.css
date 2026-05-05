@@ -3041,8 +3041,6 @@ select:disabled {
 }
 
 .gatcha-head > div {
-  display: grid;
-  gap: 4px;
   min-height: 0;
 }
 
@@ -3451,6 +3449,7 @@ select:disabled {
 .search-stage {
   min-width: 0;
   max-width: 100%;
+  height: 240px;
   perspective: 1800px;
 }
 
@@ -3463,11 +3462,11 @@ select:disabled {
 }
 
 .search-stage.is-cookie-view .search-stage-inner {
-  transform: rotateY(180deg);
+  transform: rotateY(-120deg);
 }
 
 .search-stage.is-lark-view .search-stage-inner {
-  transform: none;
+  transform: rotateY(120deg);
 }
 
 .search-face {
@@ -3475,7 +3474,8 @@ select:disabled {
   display: grid;
   gap: 14px;
   align-content: start;
-  min-height: 148px;
+  min-height: 240px;
+  height: 240px;
   min-width: 0;
   max-width: 100%;
   backface-visibility: hidden;
@@ -3485,17 +3485,16 @@ select:disabled {
 .search-face-front {
   pointer-events: auto;
   grid-template-rows: auto auto minmax(0, 1fr);
-  max-height: 240px;
 }
 
 .search-face-back {
-  transform: rotateY(180deg);
+  transform: rotateY(120deg);
 }
 
 .search-face-lark {
   pointer-events: none;
   grid-template-rows: auto auto minmax(0, 1fr);
-  max-height: 240px;
+  transform: rotateY(240deg);
 }
 
 .search-stage.is-cookie-view .search-face-front {
@@ -3744,7 +3743,8 @@ select:disabled {
 .search-results {
   display: grid;
   gap: 10px;
-  max-height: clamp(180px, 30vh, 360px);
+  min-height: 0;
+  max-height: 100%;
   overflow-y: auto;
   overscroll-behavior: contain;
   padding-right: 4px;

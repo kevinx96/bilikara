@@ -143,7 +143,7 @@ class AppContext:
             if not self._startup_gatcha_refresh_bypass_available:
                 return self.refresh_gatcha_cache_in_background()
             self._startup_gatcha_refresh_bypass_available = False
-        return refresh_gatcha_cache_in_background(use_global_lock=False)
+        return refresh_gatcha_cache_in_background(use_global_lock=False, upload_default_uids_to_lark=False)
 
     def add_item(self, item, *, position: str, requester_name: str) -> None:
         self.store.add_item(item, position=position, requester_name=requester_name)

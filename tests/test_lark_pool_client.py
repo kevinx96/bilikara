@@ -139,6 +139,39 @@ class LarkPoolClientTest(unittest.TestCase):
             payload = json.loads(sync_file.read_text(encoding="utf-8"))
             self.assertIn("BVNEW", payload["bvids"])
 
+    def test_append_lark_pool_entries_skips_invalid_video_titles(self):
+        with TemporaryDirectory() as temp_dir:
+            sync_file = Path(temp_dir) / "lark_pool_sync.json"
+            posted_records = []
+
+            def fake_post(url, payload, *, token=None, timeout=12.0):
+                posted_records.extend(payload["records"])
+                return {"code": 0, "data": {}}
+
+            with (
+                patch.object(lark_pool, "_SYNC_FILE", sync_file),
+                patch.object(lark_pool.cfg, "DATA_DIR", Path(temp_dir)),
+                patch.object(lark_pool, "_tenant_access_token", return_value="token"),
+                patch.object(
+                    lark_pool,
+                    "_active_tables",
+                    return_value=[{"index": 1, "app_token": "app", "table_id": "table", "count": 1}],
+                ),
+                patch.object(lark_pool, "_post_json", side_effect=fake_post),
+            ):
+                result = lark_pool.append_lark_pool_entries(
+                    [
+                        {"bvid": "BVDEAD", "title": "已失效视频", "url": "https://www.bilibili.com/video/BVDEAD"},
+                        {"bvid": "BVALIVE", "title": "alive", "url": "https://www.bilibili.com/video/BVALIVE"},
+                    ]
+                )
+
+            self.assertEqual(result["attempted"], 1)
+            self.assertEqual(result["added"], 1)
+            self.assertEqual([record["fields"]["bvid"] for record in posted_records], ["BVALIVE"])
+            payload = json.loads(sync_file.read_text(encoding="utf-8"))
+            self.assertNotIn("BVDEAD", payload["bvids"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -36,6 +36,7 @@ _SYNC_LOCK = threading.RLock()
 _REQUIRED_FIELD_NAMES = {"mid", "bvid", "title", "url", "owner_name", "owner_url"}
 _REQUIRED_SEARCH_FIELDS = {"bvid", "title", "url"}
 _DEBUG_LOGS = False
+_INVALID_VIDEO_TITLES = {"已失效视频"}
 
 
 class LarkPoolError(RuntimeError):
@@ -293,6 +294,8 @@ def normalize_pool_entry(entry: dict) -> dict | None:
     bvid = str(entry.get("bvid") or "").strip()
     title = str(entry.get("title") or "").strip()
     url = str(entry.get("url") or "").strip()
+    if title in _INVALID_VIDEO_TITLES:
+        return None
     if not url and bvid:
         url = f"https://www.bilibili.com/video/{bvid}"
     if not bvid or not title or not url:

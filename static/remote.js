@@ -47,6 +47,7 @@ const state = {
   followBrowseVisible: false,
   larkSearchVisible: false,
   larkSearchLoading: false,
+  remoteSearchFlipTimer: null,
   followBrowseData: null,
   followBrowseSelectedUid: "",
   followBrowseLoading: false,
@@ -113,6 +114,7 @@ const elements = {
   searchButton: document.getElementById("search-button"),
   searchMessage: document.getElementById("search-message"),
   searchResults: document.getElementById("search-results"),
+  remoteSearchStage: document.getElementById("remote-search-stage"),
   searchTag: document.querySelector(".search-panel .panel-tag"),
   searchTitle: document.querySelector(".search-panel .panel-title"),
   larkSearchToggle: document.getElementById("lark-search-toggle"),
@@ -452,6 +454,25 @@ function setMessageForSource(source, message, isError = false) {
     return;
   }
   setFormMessage(message, isError);
+}
+
+function setRemoteSearchStageView(showLark) {
+  if (!elements.remoteSearchStage) {
+    return;
+  }
+  const next = Boolean(showLark);
+  const previous = elements.remoteSearchStage.classList.contains("is-lark-view");
+  if (previous !== next) {
+    elements.remoteSearchStage.classList.add("is-flipping");
+    if (state.remoteSearchFlipTimer) {
+      window.clearTimeout(state.remoteSearchFlipTimer);
+    }
+    state.remoteSearchFlipTimer = window.setTimeout(() => {
+      elements.remoteSearchStage?.classList.remove("is-flipping");
+      state.remoteSearchFlipTimer = null;
+    }, 380);
+  }
+  elements.remoteSearchStage.classList.toggle("is-lark-view", next);
 }
 
 function duplicateConfirmMessage(duplicateItem, sessionEntry, activeItem) {
@@ -988,24 +1009,22 @@ function renderFollowBrowse() {
 
   const showFollow = Boolean(state.followBrowseVisible);
   const showLark = Boolean(state.larkSearchVisible);
-  elements.searchForm?.classList.toggle("hidden", showFollow || showLark);
-  elements.searchMessage?.classList.toggle("hidden", showFollow || showLark || !elements.searchMessage.textContent);
-  elements.searchResults?.classList.toggle("hidden", showFollow || showLark || !elements.searchResults.children.length);
+  elements.remoteSearchStage?.classList.toggle("hidden", showFollow);
+  setRemoteSearchStageView(showLark && !showFollow);
   elements.followBrowseView.classList.toggle("hidden", !showFollow);
-  elements.larkSearchView?.classList.toggle("hidden", !showLark);
   if (elements.followBrowseToggle) {
     elements.followBrowseToggle.textContent = showFollow ? "返回搜索" : "关注浏览";
     elements.followBrowseToggle.setAttribute("aria-pressed", String(showFollow));
   }
   if (elements.larkSearchToggle) {
-    elements.larkSearchToggle.textContent = showLark ? "返回搜索" : "bilikara搜索";
+    elements.larkSearchToggle.textContent = showLark ? "返回搜索" : "bilikara 搜索";
     elements.larkSearchToggle.setAttribute("aria-pressed", String(showLark));
   }
   if (elements.searchTag) {
     elements.searchTag.textContent = showLark ? "bilikara Search" : showFollow ? "Follow Browse" : "Local Search";
   }
   if (elements.searchTitle) {
-    elements.searchTitle.textContent = showLark ? "bilikara搜索" : showFollow ? "关注列表" : "搜索";
+    elements.searchTitle.textContent = showLark ? "bilikara 搜索" : showFollow ? "关注列表" : "搜索";
   }
   if (!state.followBrowseVisible) {
     return;

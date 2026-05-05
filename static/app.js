@@ -121,6 +121,7 @@ const state = {
   searchLarkVisible: false,
   larkSearchLoading: false,
   searchStageView: "",
+  searchStageAngle: 0,
   searchFlipTimer: null,
   searchFlipFrame: null,
   followBrowseData: null,
@@ -258,6 +259,7 @@ const elements = {
   searchCookieToggle: document.getElementById("search-cookie-toggle"),
   searchLarkToggle: document.getElementById("search-lark-toggle"),
   searchStage: document.getElementById("search-stage"),
+  searchStageInner: document.getElementById("search-stage-inner"),
   searchMainView: document.getElementById("search-main-view"),
   searchCookieView: document.getElementById("search-cookie-view"),
   searchLarkView: document.getElementById("search-lark-view"),
@@ -918,7 +920,7 @@ async function searchLarkPool(query) {
   });
   const payload = await response.json();
   if (!response.ok || !payload.ok) {
-    throw new Error(payload.error || "bilikara搜索失败");
+    throw new Error(payload.error || "bilikara 搜索失败");
   }
   return Array.isArray(payload.data?.items) ? payload.data.items : [];
 }
@@ -1241,6 +1243,7 @@ function gatchaTaskBusyMessage() {
 
 function syncSearchStageView(view) {
   const nextView = view || "search";
+  const previousView = state.searchStageView || "search";
   const isInitialRender = !state.searchStageView;
   if (state.searchStageView === nextView) {
     return;
@@ -1257,22 +1260,45 @@ function syncSearchStageView(view) {
   }
 
   if (isInitialRender) {
+    const initialAngles = { search: 0, browse: -120, lark: 120 };
+    state.searchStageAngle = initialAngles[nextView] ?? 0;
+    if (elements.searchStageInner) {
+      elements.searchStageInner.style.transform = `rotateY(${state.searchStageAngle}deg)`;
+    }
     setClassToggle(elements.searchStage, "is-cookie-view", nextView === "browse");
     setClassToggle(elements.searchStage, "is-lark-view", nextView === "lark");
     elements.searchStage?.classList.remove("is-flipping");
+    elements.searchStage?.classList.remove("is-flip-involving-cookie", "is-flip-involving-lark");
     return;
+  }
+
+  const applySearchStageClass = (activeView) => {
+    setClassToggle(elements.searchStage, "is-cookie-view", activeView === "browse");
+    setClassToggle(elements.searchStage, "is-lark-view", activeView === "lark");
+  };
+  const clearFlip = () => {
+    elements.searchStage?.classList.remove("is-flipping");
+    state.searchFlipTimer = null;
+  };
+  const searchViewOrder = ["search", "browse", "lark"];
+  const previousIndex = searchViewOrder.indexOf(previousView);
+  const nextIndex = searchViewOrder.indexOf(nextView);
+  const forwardSteps = (nextIndex - previousIndex + searchViewOrder.length) % searchViewOrder.length;
+  if (forwardSteps === 1) {
+    state.searchStageAngle -= 120;
+  } else if (forwardSteps === 2) {
+    state.searchStageAngle += 120;
   }
 
   elements.searchStage?.classList.add("is-flipping");
   state.searchFlipFrame = window.requestAnimationFrame(() => {
     state.searchFlipFrame = null;
-    setClassToggle(elements.searchStage, "is-cookie-view", nextView === "browse");
-    setClassToggle(elements.searchStage, "is-lark-view", nextView === "lark");
+    if (elements.searchStageInner) {
+      elements.searchStageInner.style.transform = `rotateY(${state.searchStageAngle}deg)`;
+    }
+    applySearchStageClass(nextView);
   });
-  state.searchFlipTimer = window.setTimeout(() => {
-    elements.searchStage?.classList.remove("is-flipping");
-    state.searchFlipTimer = null;
-  }, 440);
+  state.searchFlipTimer = window.setTimeout(clearFlip, 440);
 }
 
 function renderSearchCookieFace() {
@@ -1298,9 +1324,9 @@ function renderSearchCookieFace() {
   setTextContent(elements.searchCookieToggle, showCookie ? "返回搜索" : "关注浏览");
   if (showLark) {
     setTextContent(elements.searchTag, "Bilikara Search");
-    setTextContent(elements.searchTitle, "bilikara搜索");
+    setTextContent(elements.searchTitle, "bilikara 搜索");
   }
-  setTextContent(elements.searchLarkToggle, showLark ? "返回搜索" : "bilikara搜索");
+  setTextContent(elements.searchLarkToggle, showLark ? "返回搜索" : "bilikara 搜索");
   if (elements.searchCookieToggle?.getAttribute("aria-pressed") !== String(showCookie)) {
     elements.searchCookieToggle.setAttribute("aria-pressed", String(showCookie));
   }
