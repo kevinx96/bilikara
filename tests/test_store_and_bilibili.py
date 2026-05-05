@@ -957,6 +957,84 @@ class BilibiliParserTest(unittest.TestCase):
             self.assertEqual([entry["bvid"] for entry in cache_payload["uids"]["1"]], ["BVNEW", "BVOLD"])
             self.assertEqual([entry["bvid"] for entry in cache_payload["uids"]["2"]], ["BV2A", "BV2B"])
 
+    def test_gatcha_uid_refresh_preserves_concurrent_uid_entries(self):
+        with TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            cache_file = data_dir / "gatcha_cache.json"
+            stale_payload = {
+                "schema_version": 2,
+                "uids": {
+                    "1": [
+                        {
+                            "mid": "1",
+                            "bvid": "BVOLD",
+                            "title": "old karaoke",
+                            "url": "https://www.bilibili.com/video/BVOLD",
+                        }
+                    ]
+                },
+                "profiles": {
+                    "1": {
+                        "uid": "1",
+                        "name": "stale-up-1",
+                        "space_url": "https://space.bilibili.com/1",
+                    }
+                },
+                "updated_at": 1,
+            }
+            cache_file.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 2,
+                        "uids": {
+                            "1": stale_payload["uids"]["1"],
+                            "42": [
+                                {
+                                    "mid": "42",
+                                    "bvid": "BVADDED42",
+                                    "title": "added karaoke",
+                                    "url": "https://www.bilibili.com/video/BVADDED42",
+                                }
+                            ],
+                        },
+                        "profiles": {
+                            "42": {
+                                "uid": "42",
+                                "name": "added-up",
+                                "space_url": "https://space.bilibili.com/42",
+                            }
+                        },
+                        "updated_at": 2,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            def fake_fetch(mid, *, on_progress=None, max_pages=None):
+                return [
+                    {
+                        "mid": mid,
+                        "bvid": "BVNEW",
+                        "title": "new karaoke",
+                        "url": "https://www.bilibili.com/video/BVNEW",
+                    },
+                    stale_payload["uids"]["1"][0],
+                ]
+
+            with (
+                patch.object(bilibili_module.cfg, "DATA_DIR", data_dir),
+                patch.object(bilibili_module, "_GATCHA_CACHE_FILE", cache_file),
+                patch.object(bilibili_module, "_GATCHA_CACHE_LOCK", threading.Lock()),
+                patch.object(bilibili_module, "_fetch_gatcha_videos_for_uid", side_effect=fake_fetch),
+            ):
+                result = bilibili_module._refresh_gatcha_uid_cache(stale_payload, "1")
+
+            self.assertEqual(result["mode"], "incremental")
+            cache_payload = json.loads(cache_file.read_text(encoding="utf-8"))
+            self.assertEqual([entry["bvid"] for entry in cache_payload["uids"]["1"]], ["BVNEW", "BVOLD"])
+            self.assertEqual(cache_payload["uids"]["42"][0]["bvid"], "BVADDED42")
+            self.assertEqual(cache_payload["profiles"]["42"]["name"], "added-up")
+
     def test_refresh_gatcha_cache_clears_legacy_cache_without_profiles(self):
         with TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir)
