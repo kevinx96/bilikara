@@ -3447,6 +3447,7 @@ select:disabled {
 }
 
 .search-stage {
+  position: relative;
   min-width: 0;
   max-width: 100%;
   height: 240px;
@@ -3516,6 +3517,31 @@ select:disabled {
 .search-stage.is-lark-view:not(.is-flipping) .search-face-back {
   display: none;
   content-visibility: hidden;
+}
+
+.lark-search-hitbox {
+  position: absolute;
+  inset: 0 0 auto 0;
+  z-index: 5;
+  pointer-events: none;
+  visibility: hidden;
+}
+
+.search-stage.is-lark-view:not(.is-flipping) .lark-search-hitbox {
+  pointer-events: auto;
+  visibility: visible;
+}
+
+.lark-search-hitbox .input-group input,
+.lark-search-hitbox .next-button {
+  background: transparent !important;
+  border-color: transparent !important;
+  color: transparent !important;
+  box-shadow: none !important;
+}
+
+.lark-search-hitbox .input-group input {
+  caret-color: var(--ink);
 }
 
 .search-sub-card/* ,

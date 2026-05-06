@@ -32,7 +32,7 @@ from .bilibili import (
     refresh_gatcha_favlist,
     search_gatcha_cache,
 )
-from .lark_pool_client import search_lark_pool
+from .lark_pool_client import search_lark_pool, search_lark_pool_table
 from .cache import CacheManager
 from .config import (
     APP_RELEASES_URL,
@@ -580,9 +580,14 @@ class BilikaraHandler(BaseHTTPRequestHandler):
                 self._write_json({"ok": False, "error": str(e)})
             return
         if route == "/api/lark/search":
-            query = parse_qs(urlparse(self.path).query).get("q", [""])[0]
+            route_query = parse_qs(urlparse(self.path).query)
+            query = route_query.get("q", [""])[0]
+            table_index = route_query.get("table", [""])[0]
             try:
-                results = search_lark_pool(query)
+                if table_index:
+                    results = search_lark_pool_table(query, int(table_index))
+                else:
+                    results = search_lark_pool(query)
                 self._write_json({"ok": True, "data": {"items": results}})
             except Exception as e:
                 self._write_json({"ok": False, "error": str(e)})

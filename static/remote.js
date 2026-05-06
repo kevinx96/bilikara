@@ -4,6 +4,7 @@ const remoteVolumeCommitDebounceMs = 160;
 const viewportScaleResetDelaysMs = [0, 120, 360];
 const eventStreamInitialRetryMs = 1000;
 const eventStreamMaxRetryMs = 15000;
+const larkSearchTableCount = 5;
 const storageKeys = {
   layoutMode: "bilikara.remote.layout.mode",
 };
@@ -47,6 +48,7 @@ const state = {
   followBrowseVisible: false,
   larkSearchVisible: false,
   larkSearchLoading: false,
+  larkSearchSeq: 0,
   remoteSearchFlipTimer: null,
   followBrowseData: null,
   followBrowseSelectedUid: "",
@@ -762,6 +764,22 @@ async function searchLarkPool(query) {
   return Array.isArray(payload.data?.items) ? payload.data.items : [];
 }
 
+async function searchLarkPoolTable(query, tableIndex) {
+  const normalizedQuery = String(query || "").trim();
+  const params = new URLSearchParams();
+  params.set("q", normalizedQuery);
+  params.set("table", String(tableIndex));
+  const response = await fetch(`/api/lark/search?${params.toString()}`, {
+    cache: "no-store",
+    headers: clientHeaders(),
+  });
+  const payload = await response.json();
+  if (!response.ok || !payload.ok) {
+    throw new Error(payload.error || "bilikara 搜索失败");
+  }
+  return Array.isArray(payload.data?.items) ? payload.data.items : [];
+}
+
 async function fetchGatchaBrowse(uid = "", query = "") {
   const params = new URLSearchParams();
   const normalizedUid = String(uid || "").trim();
@@ -891,6 +909,40 @@ function renderLarkSearchResults(items) {
     return;
   }
 
+  items.forEach((item) => {
+    const row = document.createElement("div");
+    row.className = "search-result-item";
+
+    const meta = document.createElement("div");
+    const title = document.createElement("div");
+    title.className = "search-result-title";
+    title.textContent = String(item.title || "");
+
+    const url = document.createElement("div");
+    url.className = "search-result-url";
+    url.textContent = String(item.bvid || item.url || "");
+
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "primary-button";
+    button.dataset.url = String(item.url || "");
+    button.textContent = "点歌";
+
+    meta.append(title, url);
+    row.append(meta, button);
+    elements.larkSearchResults.appendChild(row);
+  });
+}
+
+function appendLarkSearchResults(items) {
+  if (!elements.larkSearchResults || !items.length) {
+    return;
+  }
+  const existingEmpty = elements.larkSearchResults.querySelector(".search-empty");
+  if (existingEmpty) {
+    existingEmpty.remove();
+  }
+  elements.larkSearchResults.classList.remove("hidden");
   items.forEach((item) => {
     const row = document.createElement("div");
     row.className = "search-result-item";
@@ -2502,18 +2554,64 @@ elements.larkSearchForm?.addEventListener("submit", async (event) => {
   if (elements.larkSearchButton) {
     elements.larkSearchButton.disabled = true;
   }
-  setLarkSearchMessage("正在搜索 bilikara 共享数据库...(第一次搜索需要3-15s启动)");
+  const searchSeq = state.larkSearchSeq + 1;
+  state.larkSearchSeq = searchSeq;
+  const seenBvids = new Set();
+  const collectedItems = [];
+  let partialFailure = false;
+  if (elements.larkSearchResults) {
+    elements.larkSearchResults.innerHTML = "";
+    elements.larkSearchResults.classList.remove("hidden");
+  }
+  setLarkSearchMessage("正在搜索 bilikara 数据库...(联网搜索需要3-15s不等)");
   try {
-    const items = await searchLarkPool(query);
-    renderLarkSearchResults(items);
-    setLarkSearchMessage(items.length ? `找到 ${items.length} 条共享结果。` : "bilikara 数据库里没有匹配结果。");
+    for (let tableIndex = 1; tableIndex <= larkSearchTableCount; tableIndex += 1) {
+      let tableItems = [];
+      try {
+        tableItems = await searchLarkPoolTable(query, tableIndex);
+      } catch (error) {
+        partialFailure = true;
+        continue;
+      }
+      if (state.larkSearchSeq !== searchSeq) {
+        return;
+      }
+      const freshItems = tableItems.filter((item) => {
+        const bvid = String(item?.bvid || "").trim();
+        if (!bvid || seenBvids.has(bvid)) {
+          return false;
+        }
+        seenBvids.add(bvid);
+        return true;
+      });
+      if (freshItems.length) {
+        collectedItems.push(...freshItems);
+        appendLarkSearchResults(freshItems);
+      }
+    }
+    if (state.larkSearchSeq !== searchSeq) {
+      return;
+    }
+    if (!collectedItems.length) {
+      renderLarkSearchResults([]);
+    }
+    setLarkSearchMessage(
+      collectedItems.length
+        ? `找到 ${collectedItems.length} 条共享结果${partialFailure ? "，部分表搜索失败" : ""}。`
+        : partialFailure
+          ? "部分表搜索失败，bilikara 数据库里暂时没有匹配结果。"
+          : "bilikara 数据库里没有匹配结果。",
+      partialFailure && !collectedItems.length,
+    );
   } catch (error) {
     hideLarkSearchResults();
     setLarkSearchMessage(error.message, true);
   } finally {
-    state.larkSearchLoading = false;
-    if (elements.larkSearchButton) {
-      elements.larkSearchButton.disabled = false;
+    if (state.larkSearchSeq === searchSeq) {
+      state.larkSearchLoading = false;
+      if (elements.larkSearchButton) {
+        elements.larkSearchButton.disabled = false;
+      }
     }
   }
 });
