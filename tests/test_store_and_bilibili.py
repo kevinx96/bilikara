@@ -1481,6 +1481,58 @@ class BilibiliParserTest(unittest.TestCase):
         finally:
             refresh_lock.release()
 
+    def test_background_gatcha_refresh_records_failure_status(self):
+        class FakeThread:
+            def __init__(self, *, target, daemon=None, name=None):
+                self.target = target
+
+            def start(self):
+                self.target()
+
+        task_status = {
+            "status": "idle",
+            "message": "",
+            "error": "",
+            "updated_at": 0.0,
+            "result": None,
+        }
+        with (
+            patch.object(bilibili_module, "_GATCHA_REFRESH_LOCK", threading.Lock()),
+            patch.object(bilibili_module, "_GATCHA_TASK_STATUS_LOCK", threading.Lock()),
+            patch.object(bilibili_module, "_GATCHA_TASK_STATUS", task_status),
+            patch.object(bilibili_module, "refresh_gatcha_cache", side_effect=RuntimeError("boom")),
+            patch.object(bilibili_module.threading, "Thread", FakeThread),
+        ):
+            self.assertTrue(bilibili_module.refresh_gatcha_cache_in_background())
+            snapshot = bilibili_module.gatcha_task_snapshot()
+
+        self.assertFalse(snapshot["busy"])
+        self.assertEqual(snapshot["last_status"], "failed")
+        self.assertEqual(snapshot["last_error"], "boom")
+
+    def test_refresh_gatcha_cache_reports_partial_uid_failures(self):
+        cache_payload = {"uids": {}, "profiles": {}}
+
+        def fake_refresh_uid(payload, mid):
+            if mid == "1":
+                raise RuntimeError("uid failed")
+            payload["uids"][mid] = [{"bvid": "BVUSER", "title": "user"}]
+            return {"uid": mid, "mode": "full", "added_count": 1, "total_count": 1}
+
+        with (
+            patch.object(bilibili_module, "effective_bilibili_cookie", return_value="cookie"),
+            patch.object(bilibili_module, "_load_gatcha_uid_payload", return_value={"uids": ["1", "2"], "profiles": {}}),
+            patch.object(bilibili_module, "_load_gatcha_cache", return_value=cache_payload),
+            patch.object(bilibili_module, "_resolve_gatcha_uid_profile", return_value=None),
+            patch.object(bilibili_module, "_refresh_gatcha_uid_cache", side_effect=fake_refresh_uid),
+            patch.object(bilibili_module, "_refresh_existing_gatcha_favlist_cache", return_value=None),
+        ):
+            result = bilibili_module.refresh_gatcha_cache()
+
+        summary = result["refresh_summary"]
+        self.assertEqual([item["uid"] for item in summary["uids"]], ["2"])
+        self.assertEqual(summary["errors"], [{"uid": "1", "error": "uid failed"}])
+
     def test_startup_gatcha_refresh_skips_uncached_default_uids_for_lark_upload(self):
         class FakeThread:
             def __init__(self, *, target, daemon=None, name=None):
