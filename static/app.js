@@ -5311,7 +5311,7 @@ async function handleLarkSearchSubmit(event) {
         ? `搜索到 ${collectedItems.length} 条共享结果${partialFailure ? "，部分表搜索失败" : ""}。`
         : partialFailure
           ? "部分表搜索失败，bilikara 数据库里暂时没有匹配结果。"
-          : "bilikara 数据库里没有匹配结果。",
+          : "bilikara 数据库里没有匹配结果。快使用添加 UID 功能/拉取收藏添加你喜爱的up主/稿件吧",
       partialFailure && !collectedItems.length,
     );
   } catch (error) {
