@@ -103,6 +103,8 @@ const state = {
   gatchaCooldownTimer: null,
   gatchaCookieVisible: false,
   bbdownLoginRequesting: false,
+  mediaCapabilitiesReported: false,
+  mediaCapabilitiesSignature: "",
   appToastTimer: null,
   layoutMode: "full",
 };
@@ -656,6 +658,45 @@ async function apiPost(url, payload = {}) {
     throw error;
   }
   return data.data;
+}
+
+const hevcCanPlayTypes = [
+  'video/mp4; codecs="hvc1.1.6.L93.B0"',
+  'video/mp4; codecs="hev1.1.6.L93.B0"',
+  'video/mp4; codecs="hvc1"',
+  'video/mp4; codecs="hev1"',
+];
+
+function detectMediaCapabilities() {
+  const video = document.createElement("video");
+  const canPlayType = {};
+  let hevcSupported = false;
+  for (const mimeType of hevcCanPlayTypes) {
+    const result = typeof video.canPlayType === "function"
+      ? video.canPlayType(mimeType)
+      : "";
+    canPlayType[mimeType] = result;
+    if (result === "probably" || result === "maybe") {
+      hevcSupported = true;
+    }
+  }
+  return {
+    hevc_supported: hevcSupported,
+    can_play_type: canPlayType,
+    user_agent: window.navigator?.userAgent || "",
+    platform: window.navigator?.platform || "",
+  };
+}
+
+async function reportMediaCapabilities() {
+  const capabilities = detectMediaCapabilities();
+  const signature = JSON.stringify(capabilities);
+  if (state.mediaCapabilitiesReported && state.mediaCapabilitiesSignature === signature) {
+    return;
+  }
+  await apiPost("/api/client/media-capabilities", capabilities);
+  state.mediaCapabilitiesReported = true;
+  state.mediaCapabilitiesSignature = signature;
 }
 
 async function fetchState() {
@@ -4753,6 +4794,11 @@ elements.saveCookieButton.addEventListener("click", async () => {
 async function startPolling() {
   hydrateLocalPreferences();
   renderLayoutMode();
+  try {
+    await reportMediaCapabilities();
+  } catch {
+    // Playback capability reporting should not block the host UI from loading.
+  }
   try {
     await fetchState();
   } catch (error) {

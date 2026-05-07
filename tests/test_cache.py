@@ -144,6 +144,64 @@ class CacheManagerPolicyTest(unittest.TestCase):
             finally:
                 manager.shutdown()
 
+    def test_bbdown_stream_preference_args_force_avc_when_hevc_unsupported(self):
+        with patch("bilikara.cache.CACHE_DIR", self.cache_dir):
+            manager = CacheManager(self.store, max_cache_items=3)
+            try:
+                snapshot = manager.set_client_media_capabilities(
+                    {
+                        "hevc_supported": False,
+                        "can_play_type": {'video/mp4; codecs="hvc1"': ""},
+                        "user_agent": "Firefox on Windows 7",
+                        "platform": "Win32",
+                    }
+                )
+                self.assertTrue(snapshot["force_avc"])
+                self.assertEqual(
+                    manager._bbdown_stream_preference_args("video")[-2:],
+                    ["-e", "avc"],
+                )
+                self.assertEqual(manager._bbdown_stream_preference_args("audio"), [])
+            finally:
+                manager.shutdown()
+
+    def test_hevc_unsupported_requeues_desired_ready_items_for_avc(self):
+        item_dir = self.cache_dir / "song-a"
+        video_file = item_dir / "video-p1" / "video.mp4"
+        video_file.parent.mkdir(parents=True, exist_ok=True)
+        video_file.write_bytes(b"media")
+
+        with patch("bilikara.cache.CACHE_DIR", self.cache_dir):
+            manager = CacheManager(self.store, max_cache_items=3)
+            try:
+                item = self.make_item("song-a")
+                self.store.add_item(item, requester_name="cache-test-user")
+                self.store.update_item(
+                    "song-a",
+                    cache_status="ready",
+                    cache_progress=100.0,
+                    cache_message="ready",
+                    video_relative_path="song-a/video-p1/video.mp4",
+                    video_media_url="/media/song-a/video-p1/video.mp4",
+                    audio_variants=[{"id": "p1", "audio_url": "/media/song-a/audio-p1/audio.m4a"}],
+                    selected_audio_variant_id="p1",
+                    persist_backup=False,
+                )
+                with manager.lock:
+                    manager.desired_ids = {"song-a"}
+                with patch.object(manager, "enqueue") as enqueue_mock:
+                    manager.set_client_media_capabilities({"hevc_supported": False})
+
+                refreshed = self.store.get_item("song-a")
+                self.assertIsNotNone(refreshed)
+                self.assertEqual(refreshed.cache_status, "pending")
+                self.assertEqual(refreshed.video_media_url, "")
+                self.assertEqual(refreshed.audio_variants, [])
+                self.assertFalse(item_dir.exists())
+                enqueue_mock.assert_called_once_with("song-a")
+            finally:
+                manager.shutdown()
+
     def test_hidden_process_kwargs_hides_windows_console(self):
         with patch("bilikara.cache.os.name", "nt"):
             kwargs = CacheManager._hidden_process_kwargs()

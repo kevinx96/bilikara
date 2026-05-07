@@ -166,6 +166,30 @@ class PlayerResetRouteTest(unittest.TestCase):
         self.assertEqual(writes[1], {"ok": True, "data": {"playback_mode": "local"}})
 
 
+class ClientMediaCapabilitiesRouteTest(unittest.TestCase):
+    def test_client_media_capabilities_route_returns_cache_manager_result(self):
+        handler = BilikaraHandler.__new__(BilikaraHandler)
+        writes: list[dict] = []
+        payload = {"hevc_supported": False}
+        context = SimpleNamespace(
+            touch_client=lambda client_id, is_host=True: None,
+            set_client_media_capabilities=lambda body: {
+                "hevc_supported": body["hevc_supported"],
+                "force_avc": not body["hevc_supported"],
+            },
+        )
+
+        handler.path = "/api/client/media-capabilities"
+        handler.headers = {}
+        handler._read_json_body = lambda: payload
+        handler._write_json = lambda response, status=None: writes.append(response)
+
+        with patch("bilikara.server.CONTEXT", context):
+            handler.do_POST()
+
+        self.assertEqual(writes, [{"ok": True, "data": {"hevc_supported": False, "force_avc": True}}])
+
+
 class PlaylistResortRouteTest(unittest.TestCase):
     def test_playlist_resort_route_returns_fresh_snapshot(self):
         handler = BilikaraHandler.__new__(BilikaraHandler)
