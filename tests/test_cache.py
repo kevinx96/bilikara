@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import queue
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -220,6 +221,80 @@ class CacheManagerPolicyTest(unittest.TestCase):
         self.assertEqual(enriched["current_item"]["cache_activity_at"], 123.0)
         self.assertEqual(enriched["playlist"][0]["cache_activity_at"], 123.0)
 
+    def test_item_cache_ready_requires_video_and_audio_files(self):
+        with patch("bilikara.cache.CACHE_DIR", self.cache_dir), patch.object(
+            CacheManager,
+            "_worker_loop",
+            lambda self: None,
+        ):
+            manager = CacheManager(self.store, max_cache_items=3)
+            try:
+                item = self.make_item("song-a")
+                item.cache_status = "ready"
+                item.video_relative_path = "song-a/video.mp4"
+                item.video_media_url = "/media/song-a/video.mp4"
+                item.audio_variants = [
+                    {"id": "p1", "label": "P1", "audio_url": "/media/song-a/audio.m4a"}
+                ]
+                item_dir = self.cache_dir / "song-a"
+                item_dir.mkdir(parents=True, exist_ok=True)
+                (item_dir / "video.mp4").write_bytes(b"video")
+
+                self.assertFalse(manager._item_cache_ready(item))
+
+                (item_dir / "audio.m4a").write_bytes(b"audio")
+                self.assertTrue(manager._item_cache_ready(item))
+            finally:
+                manager.shutdown()
+
+    def test_reconcile_cache_state_requeues_ready_item_when_files_are_missing(self):
+        with patch("bilikara.cache.CACHE_DIR", self.cache_dir), patch.object(
+            CacheManager,
+            "_worker_loop",
+            lambda self: None,
+        ):
+            manager = CacheManager(self.store, max_cache_items=3)
+            try:
+                self.store.add_item(self.make_item("song-a"), requester_name="cache-test-user")
+                self.store.add_item(self.make_item("song-b"), requester_name="cache-test-user")
+                self.store.add_item(self.make_item("song-c"), requester_name="cache-test-user")
+                self.store.update_item(
+                    "song-a",
+                    cache_status="ready",
+                    cache_progress=100.0,
+                    cache_message="缓存已完成",
+                    video_relative_path="song-a/video.mp4",
+                    video_media_url="/media/song-a/video.mp4",
+                    audio_variants=[
+                        {"id": "p1", "label": "P1", "audio_url": "/media/song-a/audio.m4a"}
+                    ],
+                    selected_audio_variant_id="p1",
+                    persist_backup=False,
+                )
+                with manager.lock:
+                    manager.pending_ids = {"song-b", "song-c"}
+                    for item_id in ["song-b", "song-c"]:
+                        manager.tasks.put(item_id)
+
+                manager.reconcile_cache_state()
+
+                song_a = self.store.get_item("song-a")
+                self.assertIsNotNone(song_a)
+                self.assertEqual(song_a.cache_status, "pending")
+                self.assertEqual(song_a.video_relative_path, "")
+                self.assertEqual(song_a.video_media_url, "")
+                self.assertEqual(song_a.audio_variants, [])
+
+                queued_ids = []
+                while True:
+                    try:
+                        queued_ids.append(manager.tasks.get_nowait())
+                    except queue.Empty:
+                        break
+                self.assertEqual(queued_ids, ["song-a", "song-b", "song-c"])
+            finally:
+                manager.shutdown()
+
     def test_retry_item_requeues_failed_cache_item(self):
         with patch("bilikara.cache.CACHE_DIR", self.cache_dir):
             manager = CacheManager(self.store, max_cache_items=3)
@@ -332,6 +407,83 @@ class CacheManagerPolicyTest(unittest.TestCase):
                     self.assertEqual(manager.cache_interrupted_messages["song-b"], "等待当前歌曲重新下载")
                     enqueue_front_mock.assert_called_once_with("song-a", requeue_after="song-b")
                     terminate_mock.assert_called_once_with(fake_process)
+            finally:
+                manager.shutdown()
+
+    def test_prioritize_cache_window_reorders_pending_queue_by_play_order(self):
+        with patch("bilikara.cache.CACHE_DIR", self.cache_dir), patch.object(
+            CacheManager,
+            "_worker_loop",
+            lambda self: None,
+        ):
+            manager = CacheManager(self.store, max_cache_items=3)
+            try:
+                self.store.add_item(self.make_item("song-a"), requester_name="cache-test-user")
+                self.store.add_item(self.make_item("song-b"), requester_name="cache-test-user")
+                self.store.add_item(self.make_item("song-c"), requester_name="cache-test-user")
+                with manager.lock:
+                    manager.desired_ids = {"song-a", "song-b", "song-c"}
+                    manager.pending_ids = {"song-a", "song-b", "song-c"}
+                    for item_id in ["song-c", "song-b", "song-a"]:
+                        manager.tasks.put(item_id)
+
+                manager._prioritize_cache_window(
+                    self.store.list_items(),
+                    {"song-a", "song-b", "song-c"},
+                )
+
+                queued_ids = []
+                while True:
+                    try:
+                        queued_ids.append(manager.tasks.get_nowait())
+                    except queue.Empty:
+                        break
+                self.assertEqual(queued_ids, ["song-a", "song-b", "song-c"])
+            finally:
+                manager.shutdown()
+
+    def test_prioritize_cache_window_preempts_lower_priority_active_item(self):
+        with patch("bilikara.cache.CACHE_DIR", self.cache_dir), patch.object(
+            CacheManager,
+            "_worker_loop",
+            lambda self: None,
+        ):
+            manager = CacheManager(self.store, max_cache_items=3)
+            try:
+                self.store.add_item(self.make_item("song-a"), requester_name="cache-test-user")
+                self.store.add_item(self.make_item("song-b"), requester_name="cache-test-user")
+                self.store.add_item(self.make_item("song-c"), requester_name="cache-test-user")
+                fake_process = SimpleNamespace(
+                    poll=lambda: None,
+                    terminate=lambda: None,
+                    wait=lambda timeout=None: None,
+                    kill=lambda: None,
+                )
+                with manager.lock:
+                    manager.desired_ids = {"song-a", "song-b", "song-c"}
+                    manager.pending_ids = {"song-a", "song-b", "song-c"}
+                    manager.active_item_id = "song-b"
+                    manager.active_process = fake_process
+
+                with patch.object(manager, "_terminate_process") as terminate_mock:
+                    manager._prioritize_cache_window(
+                        self.store.list_items(),
+                        {"song-a", "song-b", "song-c"},
+                    )
+
+                self.assertEqual(
+                    manager.cache_interrupted_messages["song-b"],
+                    "等待优先缓存: title-song-a - P1",
+                )
+                terminate_mock.assert_called_once_with(fake_process)
+                self.assertIn("song-b", manager.requeued_active_ids)
+                queued_ids = []
+                while True:
+                    try:
+                        queued_ids.append(manager.tasks.get_nowait())
+                    except queue.Empty:
+                        break
+                self.assertEqual(queued_ids, ["song-a", "song-b", "song-c"])
             finally:
                 manager.shutdown()
 

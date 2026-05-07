@@ -1199,10 +1199,7 @@ h2 {
 }
 
 .app-shell.layout-mode-basic .bottom-grid,
-.app-shell.layout-mode-basic .search-sub-card,
-/* .app-shell.layout-mode-basic .cookie-sub-card, */
-.app-shell.layout-mode-basic .av-sync-panel,
-.app-shell.layout-mode-basic .volume-panel {
+.app-shell.layout-mode-basic .search-sub-card {
   display: none;
 }
 
@@ -1316,6 +1313,7 @@ h2 {
   display: flex;
   align-items: center;
   justify-content: center;
+  transform: translateZ(0); /* 强制开启硬件加速以修复圆角剪裁 bug */
 }
 
 .player-panel:fullscreen .player-frame,
@@ -1377,7 +1375,7 @@ h2 {
   color: var(--ink);
   font-size: clamp(15px, 1.5vw, 22px);
   font-weight: 800;
-  line-height: 1.25;
+  line-height: 1.55;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1452,6 +1450,7 @@ h2 {
   opacity: 0;
   transition: opacity 500ms ease;
   pointer-events: none;
+  border-radius: inherit; /* 确保继承父级的 22px 圆角 */
 }
 
 .player-delay-overlay.hidden {
@@ -1460,6 +1459,54 @@ h2 {
 
 .player-delay-overlay.is-visible {
   opacity: 1;
+}
+
+.player-delay-overlay.is-entering,
+.player-delay-overlay.is-leaving {
+  transition: none;
+}
+
+.player-delay-overlay.is-entering {
+  animation: player-delay-overlay-in 500ms ease both;
+}
+
+.player-delay-overlay.is-leaving {
+  animation: player-delay-overlay-out 500ms ease both;
+}
+
+.player-delay-overlay.is-compact {
+  background: rgba(248, 239, 226, 0.88);
+  backdrop-filter: blur(12px);
+}
+
+.player-delay-overlay.is-compact .player-delay-card {
+  justify-content: center;
+  align-items: center;
+  padding: 16px;
+  transform: scale(0.92);
+}
+
+.player-delay-overlay.is-compact.is-visible .player-delay-card {
+  transform: scale(1);
+}
+
+.player-delay-overlay.is-compact .player-delay-head {
+  justify-content: center;
+  margin-bottom: 0;
+}
+
+.player-delay-overlay.is-compact .player-delay-heading,
+.player-delay-overlay.is-compact .player-delay-now-row,
+.player-delay-overlay.is-compact .player-delay-section-title,
+.player-delay-overlay.is-compact .player-delay-list,
+.player-delay-overlay.is-compact .player-delay-total {
+  display: none;
+}
+
+.player-delay-overlay.is-compact .player-delay-countdown {
+  width: 96px;
+  height: 96px;
+  font-size: 32px;
 }
 
 .player-delay-card {
@@ -1482,6 +1529,81 @@ h2 {
 
 .player-delay-overlay.is-visible .player-delay-card {
   transform: translateY(0);
+}
+
+.player-delay-overlay.is-entering .player-delay-card,
+.player-delay-overlay.is-leaving .player-delay-card {
+  transition: none;
+}
+
+.player-delay-overlay.is-entering .player-delay-card {
+  animation: player-delay-card-in 500ms ease both;
+}
+
+.player-delay-overlay.is-leaving .player-delay-card {
+  animation: player-delay-card-out 500ms ease both;
+}
+
+.player-delay-overlay.is-compact.is-entering .player-delay-card {
+  animation-name: player-delay-card-compact-in;
+}
+
+.player-delay-overlay.is-compact.is-leaving .player-delay-card {
+  animation-name: player-delay-card-compact-out;
+}
+
+@keyframes player-delay-overlay-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes player-delay-overlay-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes player-delay-card-in {
+  from {
+    transform: translateY(20px);
+  }
+  to {
+    transform: translateY(0);
+  }
+}
+
+@keyframes player-delay-card-out {
+  from {
+    transform: translateY(0);
+  }
+  to {
+    transform: translateY(20px);
+  }
+}
+
+@keyframes player-delay-card-compact-in {
+  from {
+    transform: scale(0.92);
+  }
+  to {
+    transform: scale(1);
+  }
+}
+
+@keyframes player-delay-card-compact-out {
+  from {
+    transform: scale(1);
+  }
+  to {
+    transform: scale(0.92);
+  }
 }
 
 .player-delay-head {
@@ -1596,7 +1718,7 @@ h2 {
   overflow: hidden;
   font-size: clamp(22px, 2.8vw, 36px);
   font-weight: 800;
-  line-height: 1.25;
+  line-height: 1.55;
   display: -webkit-box;
   -webkit-line-clamp: 2;
   line-clamp: 2;
@@ -2366,11 +2488,18 @@ select:disabled {
   box-shadow: 0 4px 20px rgba(88, 56, 30, 0.04);
   align-items: center;
   min-height: 96px;
+  transform: translateZ(0);
+  will-change: transform;
 }
 
 .queue-current.hidden,
 .hidden {
   display: none !important;
+}
+
+.player-delay-overlay.hidden {
+  display: flex !important;
+  visibility: hidden;
 }
 
 .song-progress-badge,
@@ -2386,6 +2515,7 @@ select:disabled {
   justify-content: center;
   isolation: isolate;
   overflow: visible;
+  contain: layout style;
 }
 
 .song-progress-badge::before,
@@ -2406,7 +2536,7 @@ select:disabled {
 .song-progress-badge.active::before,
 .queue-current-progress-badge.idle::before,
 .queue-current-progress-badge.active::before {
-  border-color: rgba(109, 98, 88, 0.4);
+  border-color: rgba(109, 98, 88, 0.18);
 }
 
 /* 状态：缓存完成 (绿色) */
@@ -2441,17 +2571,32 @@ select:disabled {
   box-shadow: none;
 }
 
-.song-progress-badge.active::after,
-.queue-current-progress-badge.active::after {
-  content: "";
+.badge-loader {
   position: absolute;
-  inset: var(--queue-badge-ring-inset);
-  border-radius: 50%;
-  border: var(--queue-badge-ring-width) solid transparent;
-  border-top-color: rgba(109, 98, 88, 0.6); /* 缓存中改为灰色单节 */
-  animation: cache-crescent-spin 1.2s linear infinite;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  /* animation: rotate 1.5s steps(60) infinite; */
+  animation: rotate 2s steps(60) infinite;
+  display: none;
   pointer-events: none;
+  z-index: 1;
   will-change: transform;
+  contain: strict;
+}
+
+.song-progress-badge.active .badge-loader,
+.queue-current-progress-badge.active .badge-loader {
+  display: block;
+}
+
+.path-fancy {
+  stroke: #6d6258;
+  stroke-opacity: 0.6;
+  stroke-dasharray: 40, 200;
+  stroke-dashoffset: 0;
+  stroke-linecap: round;
+  animation: dash 1.5s steps(30) infinite;
 }
 
 .song-progress-badge.ready::before,
@@ -2516,9 +2661,22 @@ select:disabled {
   color: var(--red);
 }
 
-@keyframes cache-crescent-spin {
-  to {
-    transform: rotate(360deg);
+@keyframes rotate {
+  100% { transform: rotate(360deg); }
+}
+
+@keyframes dash {
+  0% {
+    stroke-dasharray: 1, 200;
+    stroke-dashoffset: 0;
+  }
+  50% {
+    stroke-dasharray: 89, 200;
+    stroke-dashoffset: -35;
+  }
+  100% {
+    stroke-dasharray: 89, 200;
+    stroke-dashoffset: -124;
   }
 }
 
@@ -2604,7 +2762,7 @@ select:disabled {
   flex-direction: column;
   justify-content: center;
   gap: 6px;
-  padding-right: 12px; /* 给右边缘留一点基本的呼吸空间 */
+  padding-right: 12px;
   margin: 0;
   padding-left: 0;
 }
@@ -2613,7 +2771,7 @@ select:disabled {
   margin-top: 0;
   font-size: 20px;
   font-weight: 700;
-  line-height: 1.15;
+  line-height: 1.35;
   color: var(--accent-deep);
   width: 100%;
 }
@@ -2809,7 +2967,7 @@ select:disabled {
 
 .song-retry-button {
   position: absolute;
-  top: calc(50% - var(--queue-badge-size) / 2 - 4px);
+  top: calc(50% - var(--queue-badge-size) / 2 - 12px);
   right: calc((var(--queue-badge-column-width) - var(--queue-badge-size)) / 2 - 6px);
   z-index: 3;
 }
@@ -2856,7 +3014,7 @@ select:disabled {
   width: 100%;
   font-size: 18px;
   font-weight: 700;
-  line-height: 1.15;
+  line-height: 1.35;
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
@@ -3717,7 +3875,7 @@ select:disabled {
   min-width: 0;
   font-size: 17px;
   font-weight: 700;
-  line-height: 1.25;
+  line-height: 1.35;
 }
 
 .search-inputs,
@@ -3776,23 +3934,27 @@ select:disabled {
   padding-right: 4px;
 }
 
+.history-list::-webkit-scrollbar,
 .search-results::-webkit-scrollbar,
 .follow-up-grid::-webkit-scrollbar {
   width: 8px;
 }
 
+.history-list::-webkit-scrollbar-track,
 .search-results::-webkit-scrollbar-track,
 .follow-up-grid::-webkit-scrollbar-track {
   background: rgba(67, 53, 41, 0.05);
   border-radius: 999px;
 }
 
+.history-list::-webkit-scrollbar-thumb,
 .search-results::-webkit-scrollbar-thumb,
 .follow-up-grid::-webkit-scrollbar-thumb {
   background: rgba(143, 49, 29, 0.24);
   border-radius: 999px;
 }
 
+.history-list::-webkit-scrollbar-thumb:hover,
 .search-results::-webkit-scrollbar-thumb:hover,
 .follow-up-grid::-webkit-scrollbar-thumb:hover {
   background: rgba(143, 49, 29, 0.36);

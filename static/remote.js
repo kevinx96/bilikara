@@ -15,6 +15,8 @@ const state = {
   data: null,
   submitting: false,
   listView: "queue",
+  openQueueMenuId: null,
+  openHistoryMenuId: null,
   playerControlPendingAction: "",
   audioVariantSwitchInFlight: false,
   audioVariantSwitchUnlockAt: 0,
@@ -231,6 +233,14 @@ function blurActiveEditableElement() {
     return;
   }
   activeElement.blur();
+}
+
+function closeOpenMenus() {
+  document.querySelectorAll(".menu-content").forEach((menu) => {
+    menu.classList.add("hidden");
+  });
+  state.openQueueMenuId = null;
+  state.openHistoryMenuId = null;
 }
 
 function isAppleTabletClient() {
@@ -3024,13 +3034,11 @@ elements.historyList.addEventListener("click", async (event) => {
     const content = wrap?.querySelector(".menu-content");
     if (content) {
       const isHidden = content.classList.contains("hidden");
-      document.querySelectorAll(".menu-content").forEach(el => el.classList.add("hidden"));
+      closeOpenMenus();
       if (isHidden) {
         content.classList.remove("hidden");
         content.classList.remove("no-animate");
         state.openHistoryMenuId = button.dataset.url;
-      } else {
-        state.openHistoryMenuId = null;
       }
     }
     return;
@@ -3040,14 +3048,13 @@ elements.historyList.addEventListener("click", async (event) => {
   if (!url) {
     return;
   }
+  closeOpenMenus();
   await handleAddByHistory(url, button.dataset.action === "history-next" ? "next" : "tail");
 });
 
 document.addEventListener("click", (event) => {
   if (!event.target.closest(".queue-actions-wrap") && !event.target.closest(".history-actions-wrap")) {
-    document.querySelectorAll(".menu-content").forEach(el => el.classList.add("hidden"));
-    state.openQueueMenuId = null;
-    state.openHistoryMenuId = null;
+    closeOpenMenus();
   }
 });
 

@@ -89,6 +89,7 @@ const state = {
   localAdvanceDelayTimer: null,
   localAdvanceCountdownTimer: null,
   localAdvanceOverlayHideTimer: null,
+  localAdvanceDelayStartAt: 0,
   localAdvanceDelayDeadline: 0,
   localAdvanceOverlayDurationMs: 0,
   localAdvanceOverlayMode: "",
@@ -467,6 +468,12 @@ function setElementTitle(element, value) {
   }
 }
 
+function closeOpenMenus() {
+  document.querySelectorAll(".menu-content").forEach((menu) => {
+    menu.classList.add("hidden");
+  });
+}
+
 function selectedRequesterName() {
   return String(elements.requesterSelect?.value || "").trim();
 }
@@ -652,6 +659,9 @@ function showMountedPlayerControls() {
 function toggleMountedLocalPlayback() {
   if (frontendPlaybackMode(state.data?.playback_mode) !== "local" || !state.data?.current_item) {
     return false;
+  }
+  if (isLocalAdvanceHoldingItem(state.data.current_item.id)) {
+    return true;
   }
   const video = activePrimaryVideoElement();
   if (!video) {
@@ -2483,7 +2493,7 @@ function clearLocalPlayerSeekState() {
 }
 
 function playerDelayOverlay() {
-  return elements.playerPanel?.querySelector(".player-delay-overlay") || null;
+  return elements.playerFrame?.querySelector(".player-delay-overlay") || null;
 }
 
 function ensurePlayerDelayOverlay() {
@@ -2495,6 +2505,7 @@ function ensurePlayerDelayOverlay() {
   overlay = document.createElement("div");
   overlay.className = "player-delay-overlay hidden";
   overlay.setAttribute("aria-live", "polite");
+  overlay.setAttribute("aria-hidden", "true");
   overlay.innerHTML = `
     <div class="player-delay-card">
       <div class="player-delay-head">
@@ -2518,8 +2529,42 @@ function ensurePlayerDelayOverlay() {
       <p class="player-delay-total" data-delay-total>\u5171 0 \u9996</p>
     </div>
   `;
-  elements.playerPanel.appendChild(overlay);
+  elements.playerFrame.appendChild(overlay);
   return overlay;
+}
+
+function resumeMountedPlayerAfterOverlay() {
+  const video = activePrimaryVideoElement();
+  if (!video || !video.paused) {
+    return;
+  }
+  state.localShouldBePlaying = true;
+  video.play().catch(() => {});
+}
+
+function isLocalAdvanceHoldingItem(itemId) {
+  const normalizedItemId = String(itemId || "");
+  return Boolean(
+    normalizedItemId
+    && state.localAdvanceDelayDeadline > 0
+    && normalizedItemId === state.localAdvanceDelayItemId,
+  );
+}
+
+function stopMountedPlayerForAdvanceDelay(itemId) {
+  if (!isLocalAdvanceHoldingItem(itemId)) {
+    return;
+  }
+  state.localShouldBePlaying = false;
+  clearLocalPlayerSeekState();
+
+  const { video, audio } = activeLocalPlayerElements();
+  if (audio && !audio.paused) {
+    audio.pause();
+  }
+  if (video && !video.paused) {
+    video.pause();
+  }
 }
 
 function setPlayerDelayOverlayVisible(overlay) {
@@ -2530,29 +2575,67 @@ function setPlayerDelayOverlayVisible(overlay) {
     window.clearTimeout(state.localAdvanceOverlayHideTimer);
     state.localAdvanceOverlayHideTimer = null;
   }
-  overlay.classList.remove("hidden");
-  window.requestAnimationFrame(() => {
-    overlay.classList.add("is-visible");
-  });
-}
-
-function hidePlayerDelayOverlay() {
-  const overlay = playerDelayOverlay();
-  if (!overlay || overlay.classList.contains("hidden")) {
+  if (
+    !overlay.classList.contains("hidden")
+    && (
+      overlay.classList.contains("is-visible")
+      || overlay.classList.contains("is-entering")
+    )
+  ) {
     return;
   }
-  overlay.classList.remove("is-visible");
-  if (state.localAdvanceOverlayHideTimer) {
-    window.clearTimeout(state.localAdvanceOverlayHideTimer);
-  }
+  overlay.classList.remove("is-visible", "is-leaving");
+  overlay.classList.remove("hidden");
+  overlay.setAttribute("aria-hidden", "false");
+  // Force the browser to commit the hidden/base style so the following class
+  // change always starts an animation.
+  overlay.getBoundingClientRect();
+  overlay.classList.add("is-entering");
   state.localAdvanceOverlayHideTimer = window.setTimeout(() => {
-    overlay.classList.add("hidden");
+    overlay.classList.remove("is-entering");
+    overlay.classList.add("is-visible");
     state.localAdvanceOverlayHideTimer = null;
   }, localAdvanceOverlayFadeMs);
 }
 
+function hidePlayerDelayOverlay({ onHidden = null } = {}) {
+  const overlay = playerDelayOverlay();
+  if (!overlay) {
+    if (typeof onHidden === "function") {
+      onHidden();
+    }
+    return;
+  }
+  if (overlay.classList.contains("hidden")) {
+    if (typeof onHidden === "function") {
+      onHidden();
+    }
+    return;
+  }
+  if (state.localAdvanceOverlayHideTimer) {
+    window.clearTimeout(state.localAdvanceOverlayHideTimer);
+  }
+  overlay.classList.remove("hidden", "is-entering", "is-leaving");
+  overlay.classList.add("is-visible");
+  overlay.setAttribute("aria-hidden", "false");
+  // Same idea as show: make sure the visible style is committed before
+  // entering the leaving animation.
+  overlay.getBoundingClientRect();
+  overlay.classList.remove("is-visible");
+  overlay.classList.add("is-leaving");
+  state.localAdvanceOverlayHideTimer = window.setTimeout(() => {
+    overlay.classList.remove("is-leaving", "is-entering", "is-visible");
+    overlay.classList.add("hidden");
+    overlay.setAttribute("aria-hidden", "true");
+    state.localAdvanceOverlayHideTimer = null;
+    if (typeof onHidden === "function") {
+      onHidden();
+    }
+  }, localAdvanceOverlayFadeMs);
+}
+
 function showSongTransitionOverlayForData(data) {
-  if (!data || !isPlayerPanelFullscreenForTransition()) {
+  if (!data) {
     return;
   }
   const playlist = Array.isArray(data.playlist) ? data.playlist : [];
@@ -2561,26 +2644,32 @@ function showSongTransitionOverlayForData(data) {
     return;
   }
   const delaySeconds = manualTransitionOverlaySeconds(data);
-  clearLocalAdvanceDelay({ resetInFlight: false, hideOverlay: false });
+  clearLocalAdvanceDelay({ resetInFlight: true, hideOverlay: false });
   const token = state.localAdvanceDelayToken;
 
   state.localAdvanceOverlayMode = "manual";
   state.localAdvanceOverlayPrimaryItem = primaryItem;
   state.localAdvanceOverlayFollowItems = data.current_item ? playlist : playlist.slice(1);
   state.localAdvanceOverlayTotalCount = (data.current_item ? 1 : 0) + playlist.length;
+  state.localAdvanceDelayItemId = String(primaryItem.id || "");
   state.localAdvanceOverlayDurationMs = delaySeconds * 1000;
-  state.localAdvanceDelayDeadline = Date.now() + state.localAdvanceOverlayDurationMs;
+  state.localAdvanceDelayStartAt = Date.now() + localAdvanceOverlayFadeMs;
+  state.localAdvanceDelayDeadline = state.localAdvanceDelayStartAt + state.localAdvanceOverlayDurationMs;
   updateLocalAdvanceDelayOverlay();
   state.localAdvanceCountdownTimer = window.setInterval(updateLocalAdvanceDelayOverlay, 250);
   state.localAdvanceDelayTimer = window.setTimeout(() => {
     if (state.localAdvanceDelayToken === token) {
-      clearLocalAdvanceDelay({ resetInFlight: false });
+      updateLocalAdvanceDelayOverlay();
+      clearLocalAdvanceDelay({
+        resetInFlight: false,
+        onOverlayHidden: resumeMountedPlayerAfterOverlay,
+      });
     }
-  }, state.localAdvanceOverlayDurationMs);
+  }, Math.max(0, state.localAdvanceDelayDeadline - Date.now()));
 }
 
 function maybeShowSongTransitionOverlay(previousData, nextData, { force = false } = {}) {
-  if (!nextData || !isPlayerPanelFullscreenForTransition()) {
+  if (!nextData) {
     return;
   }
   const previousId = currentItemIdFromData(previousData);
@@ -2588,11 +2677,18 @@ function maybeShowSongTransitionOverlay(previousData, nextData, { force = false 
   if (!nextId || (!force && previousId === nextId)) {
     return;
   }
+  if (
+    currentItemIdFromData(state.pendingSongTransitionOverlayData) === nextId
+    || isLocalAdvanceHoldingItem(nextId)
+  ) {
+    return;
+  }
   const transitionKey = `${nextId}|${Number(nextData.state_revision || 0)}`;
   if (!force && state.lastSongTransitionOverlayKey === transitionKey) {
     return;
   }
   state.lastSongTransitionOverlayKey = transitionKey;
+  state.localShouldBePlaying = false;
   state.pendingSongTransitionOverlayData = nextData;
 }
 
@@ -2678,54 +2774,36 @@ function renderLocalAdvanceDelayQueue(overlay) {
 
 function updateLocalAdvanceDelayOverlay() {
   const overlay = ensurePlayerDelayOverlay();
+  const now = Date.now();
+  const countdownStartAt = Number(state.localAdvanceDelayStartAt || 0);
+  const countdownNow = countdownStartAt > 0 ? Math.max(now, countdownStartAt) : now;
+  const totalDurationMs = Math.max(1000, Number(state.localAdvanceOverlayDurationMs || 0));
+  const remainingMs = Math.max(0, state.localAdvanceDelayDeadline - countdownNow);
   const remainingSeconds = Math.max(
     0,
-    Math.ceil((state.localAdvanceDelayDeadline - Date.now()) / 1000),
+    Math.ceil(remainingMs / 1000),
   );
   const countNode = overlay.querySelector("[data-delay-count]");
   setTextContent(countNode, String(remainingSeconds));
-  const totalDurationMs = Math.max(1000, Number(state.localAdvanceOverlayDurationMs || 0));
-  const remainingMs = Math.max(0, state.localAdvanceDelayDeadline - Date.now());
   const progress = Math.max(0, Math.min(1, remainingMs / totalDurationMs));
   overlay.style.setProperty("--delay-ring-offset", String(119.38 * (1 - progress)));
   renderLocalAdvanceDelayQueue(overlay);
-  if (state.localAdvanceDelayDeadline > 0 && isPlayerPanelFullscreenForTransition()) {
+  const isFullscreen = isPlayerPanelFullscreen();
+  overlay.classList.toggle("is-compact", !isFullscreen);
+  if (state.localAdvanceDelayDeadline > 0) {
     setPlayerDelayOverlayVisible(overlay);
   } else {
     hidePlayerDelayOverlay();
   }
 }
 
-function clearLocalAdvanceDelay({ resetInFlight = false, hideOverlay = true } = {}) {
-  if (state.localAdvanceDelayTimer) {
-    window.clearTimeout(state.localAdvanceDelayTimer);
-    state.localAdvanceDelayTimer = null;
-  }
-  if (state.localAdvanceCountdownTimer) {
-    window.clearInterval(state.localAdvanceCountdownTimer);
-    state.localAdvanceCountdownTimer = null;
-  }
-  if (hideOverlay) {
-    state.localAdvanceDelayDeadline = 0;
-    state.localAdvanceOverlayDurationMs = 0;
-    state.localAdvanceOverlayMode = "";
-    state.localAdvanceOverlayPrimaryItem = null;
-    state.localAdvanceOverlayFollowItems = null;
-    state.localAdvanceOverlayTotalCount = null;
-    state.localAdvanceDelayItemId = "";
-    hidePlayerDelayOverlay();
-
-    // 延迟结束后自动开始播放音视频
-    const video = activePrimaryVideoElement();
-    if (video && video.paused) {
-      state.localShouldBePlaying = true;
-      video.play().catch(() => {});
-    }
-  }
-  state.localAdvanceDelayToken += 1;
-  if (resetInFlight) {
-    state.localAdvanceInFlight = false;
-  }
+function hasLocalAdvanceDelayOverlay() {
+  return Boolean(
+    state.localAdvanceDelayDeadline > 0
+    || state.localAdvanceDelayStartAt > 0
+    || state.localAdvanceDelayTimer
+    || state.localAdvanceCountdownTimer,
+  );
 }
 
 function startLocalAdvanceDelay(delaySeconds) {
@@ -2740,28 +2818,79 @@ function startLocalAdvanceDelay(delaySeconds) {
   const token = state.localAdvanceDelayToken;
   state.localAdvanceOverlayMode = "auto";
   state.localAdvanceOverlayDurationMs = delaySeconds * 1000;
-  state.localAdvanceDelayDeadline = Date.now() + state.localAdvanceOverlayDurationMs;
+  state.localAdvanceDelayStartAt = Date.now() + localAdvanceOverlayFadeMs;
+  state.localAdvanceDelayDeadline = state.localAdvanceDelayStartAt + state.localAdvanceOverlayDurationMs;
+  stopMountedPlayerForAdvanceDelay(currentItemId);
   updateLocalAdvanceDelayOverlay();
   showMountedPlayerControls();
   state.localAdvanceCountdownTimer = window.setInterval(updateLocalAdvanceDelayOverlay, 250);
   state.localAdvanceDelayTimer = window.setTimeout(() => {
     finishLocalAdvanceDelay(token, currentItemId).catch(() => {});
-  }, delaySeconds * 1000);
+  }, Math.max(0, state.localAdvanceDelayDeadline - Date.now()));
+}
+
+function clearLocalAdvanceDelay({ resetInFlight = false, hideOverlay = true, onOverlayHidden = null } = {}) {
+  if (state.localAdvanceDelayTimer) {
+    window.clearTimeout(state.localAdvanceDelayTimer);
+    state.localAdvanceDelayTimer = null;
+  }
+  if (state.localAdvanceCountdownTimer) {
+    window.clearInterval(state.localAdvanceCountdownTimer);
+    state.localAdvanceCountdownTimer = null;
+  }
+  if (hideOverlay) {
+    state.localAdvanceDelayStartAt = 0;
+    state.localAdvanceDelayDeadline = 0;
+    state.localAdvanceOverlayDurationMs = 0;
+    state.localAdvanceOverlayMode = "";
+    state.localAdvanceOverlayPrimaryItem = null;
+    state.localAdvanceOverlayFollowItems = null;
+    state.localAdvanceOverlayTotalCount = null;
+    state.localAdvanceDelayItemId = "";
+    hidePlayerDelayOverlay({ onHidden: onOverlayHidden });
+  }
+  state.localAdvanceDelayToken += 1;
+  if (resetInFlight) {
+    state.localAdvanceInFlight = false;
+  }
 }
 
 async function finishLocalAdvanceDelay(token, itemId) {
   if (token !== state.localAdvanceDelayToken || itemId !== state.localAdvanceDelayItemId) {
     return;
   }
-  clearLocalAdvanceDelay({ resetInFlight: true });
-  await advanceLocalPlayerNow({ showTransition: false });
+  updateLocalAdvanceDelayOverlay();
+  clearLocalAdvanceDelay({
+    resetInFlight: true,
+    onOverlayHidden: () => {
+      advanceLocalPlayerNow({ showTransition: false }).catch(() => {});
+    },
+  });
 }
 
-function teardownMountedPlayer() {
+function setPlayerFrameContent(html) {
+  const overlay = playerDelayOverlay();
+  const template = document.createElement("template");
+  template.innerHTML = html;
+  const nextNodes = Array.from(template.content.childNodes);
+  Array.from(elements.playerFrame.childNodes).forEach((node) => {
+    if (node !== overlay) {
+      node.remove();
+    }
+  });
+  elements.playerFrame.prepend(...nextNodes);
+  if (overlay && overlay.parentElement !== elements.playerFrame) {
+    elements.playerFrame.appendChild(overlay);
+  }
+}
+
+function teardownMountedPlayer({ preserveAdvanceDelayOverlay = false } = {}) {
   clearLocalPlayerSyncTimer();
   clearLocalPlayerControlsHideTimer();
   clearLocalPlayerSeekState();
-  clearLocalAdvanceDelay({ resetInFlight: true });
+  if (!preserveAdvanceDelayOverlay) {
+    clearLocalAdvanceDelay({ resetInFlight: true });
+  }
   elements.playerFrame.querySelectorAll("video, audio").forEach((media) => {
     try {
       media.pause();
@@ -3350,7 +3479,14 @@ function renderPlayer(currentItem, playbackMode) {
   };
 
   captureLocalPlayerPreferences();
-  teardownMountedPlayer();
+  const preserveAdvanceDelayOverlay = Boolean(
+    currentItem
+    && (
+      state.pendingSongTransitionOverlayData
+      || hasLocalAdvanceDelayOverlay()
+    ),
+  );
+  teardownMountedPlayer({ preserveAdvanceDelayOverlay });
 
   if (!currentItem) {
     elements.playerFrame.innerHTML =
@@ -3464,6 +3600,313 @@ function renderPlayer(currentItem, playbackMode) {
   });
 
   video.addEventListener("play", () => {
+    if (isLocalAdvanceHoldingItem(currentItem.id)) {
+      stopMountedPlayerForAdvanceDelay(currentItem.id);
+      return;
+    }
+    if (isSplitPlayerSeekSettling(video, audio)) {
+      state.localSeekResumeAfterSettle = true;
+      state.localShouldBePlaying = true;
+      state.localSeekResumePending = true;
+      video.pause();
+      return;
+    }
+    state.localShouldBePlaying = true;
+    state.localSeekResumePending = false;
+    showMountedPlayerControls();
+    syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
+    reportCurrentVideoStatus();
+  });
+
+  video.addEventListener("pause", () => {
+    if (state.localSeekResumePending) {
+      return;
+    }
+    if (document.hidden && state.localShouldBePlaying) {
+      window.setTimeout(() => {
+        video.play().catch(() => {});
+        syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
+      }, 0);
+      return;
+    }
+    state.localShouldBePlaying = false;
+    if (!audio.paused) {
+      audio.pause();
+    }
+    showMountedPlayerControls();
+    reportCurrentVideoStatus();
+  });
+
+  video.addEventListener("seeking", () => {
+    beginSplitPlayerSeek(video, audio, {
+      resumeAfterSeek: !video.paused || state.localShouldBePlaying,
+      onSettled: reportCurrentVideoStatus,
+    });
+  });
+
+  video.addEventListener("seeked", () => {
+    showMountedPlayerControls();
+    if (!settleSplitPlayerSeek(video, audio)) {
+      reportCurrentVideoStatus();
+    }
+  });
+
+  video.addEventListener("canplay", () => {
+    settleSplitPlayerSeek(video, audio);
+  });
+
+  audio.addEventListener("seeked", () => {
+    settleSplitPlayerSeek(video, audio);
+  });
+
+  audio.addEventListener("canplay", () => {
+    settleSplitPlayerSeek(video, audio);
+  });
+
+  video.addEventListener("waiting", () => {
+    if (!audio.paused) {
+      audio.pause();
+    }
+  });
+
+  video.addEventListener("playing", () => {
+    syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
+  });
+
+  video.addEventListener("ratechange", () => {
+    showMountedPlayerControls();
+    syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
+  });
+
+  video.addEventListener("volumechange", () => {
+    showMountedPlayerControls();
+    syncSplitPlayerVolumeFromVideo(video, audio);
+  });
+
+  ["pointermove", "pointerdown", "touchstart"].forEach((eventName) => {
+    video.addEventListener(eventName, () => {
+      showMountedPlayerControls();
+    }, { passive: true });
+  });
+
+  video.addEventListener("ended", async () => {
+    state.localShouldBePlaying = false;
+    state.localSeekResumePending = false;
+    audio.pause();
+    showMountedPlayerControls();
+    reportCurrentVideoStatus();
+    await handleLocalPlaybackEnded();
+  });
+
+  audio.addEventListener("ended", () => {
+    if (isSplitPlayerSeekSettling(video, audio)) {
+      return;
+    }
+    syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
+  });
+
+  state.localPlayerSyncTimer = window.setInterval(() => {
+    if (isSplitPlayerSeekSettling(video, audio)) {
+      settleSplitPlayerSeek(video, audio);
+      reportCurrentVideoStatus();
+      return;
+    }
+    syncSplitPlayer(video, audio, currentAvOffsetSeconds(), false);
+    reportCurrentVideoStatus();
+  }, localPlayerSyncIntervalMs);
+
+  window.setTimeout(() => {
+    showMountedPlayerControls();
+    maybeRestorePlayback();
+    if (isSplitPlayerSeekSettling(video, audio)) {
+      settleSplitPlayerSeek(video, audio);
+    } else {
+      syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
+    }
+    reportCurrentVideoStatus();
+  }, 0);
+}
+
+function renderPlayer(currentItem, playbackMode) {
+  const selectedVideoUrl = currentItem ? selectedVideoUrlForItem(currentItem) : "";
+  const selectedAudioUrl = currentItem ? selectedAudioUrlForItem(currentItem) : "";
+  const hasSplitPlayback = Boolean(selectedVideoUrl && selectedAudioUrl);
+
+  const signature = [
+    currentItem ? currentItem.id : "none",
+    playbackMode,
+    selectedVideoUrl,
+    selectedAudioUrl,
+    currentItem ? currentItem.cache_status : "",
+  ].join("|");
+
+  if (signature === state.playerSignature) {
+    if (hasSplitPlayback) {
+      syncMountedLocalPlayer(false);
+    }
+    return;
+  }
+
+  const previousPlayerContext = state.playerContext;
+  if (
+    !state.pendingPlaybackRestore
+    && playbackMode === "local"
+    && currentItem
+    && hasSplitPlayback
+    && previousPlayerContext?.playbackMode === "local"
+    && previousPlayerContext.itemId === currentItem.id
+    && (
+      previousPlayerContext.videoUrl !== selectedVideoUrl
+      || previousPlayerContext.audioUrl !== selectedAudioUrl
+    )
+  ) {
+    const currentVideo = elements.playerFrame.querySelector('video[data-player-role="video"]')
+      || elements.playerFrame.querySelector("video");
+
+    if (currentVideo) {
+      captureLocalPlayerPreferences();
+      state.pendingPlaybackRestore = {
+        itemId: currentItem.id,
+        variantId: selectedAudioVariantForItem(currentItem)?.id || "",
+        currentTime: Number(currentVideo.currentTime || 0),
+        wasPlaying: !currentVideo.paused,
+      };
+    }
+  }
+
+  state.playerSignature = signature;
+  state.playerContext = {
+    itemId: currentItem ? currentItem.id : "",
+    videoUrl: selectedVideoUrl,
+    audioUrl: selectedAudioUrl,
+    playbackMode,
+  };
+
+  captureLocalPlayerPreferences();
+  const preserveAdvanceDelayOverlay = Boolean(
+    currentItem
+    && (
+      state.pendingSongTransitionOverlayData
+      || hasLocalAdvanceDelayOverlay()
+    ),
+  );
+  teardownMountedPlayer({ preserveAdvanceDelayOverlay });
+
+  if (!currentItem) {
+    setPlayerFrameContent(
+      '<div class="empty-state"><p>\u628a B \u7ad9\u89c6\u9891\u94fe\u63a5\u52a0\u5165\u70b9\u6b4c\u5217\u8868\u540e\uff0c\u8fd9\u91cc\u4f1a\u5f00\u59cb\u64ad\u653e\u3002</p></div>',
+    );
+    return;
+  }
+
+  if (playbackMode === "online") {
+    setPlayerFrameContent(`
+      <iframe
+        src="${escapeHtml(currentItem.embed_url)}"
+        allow="autoplay; fullscreen"
+        allowfullscreen="true"
+        referrerpolicy="origin"
+        sandbox="allow-same-origin allow-scripts allow-popups allow-popups-to-escape-sandbox"
+        title="${escapeHtml(currentItem.display_title)}"
+      ></iframe>
+    `);
+    return;
+  }
+
+  if (!hasSplitPlayback) {
+    setPlayerFrameContent(`
+      <div class="empty-state">
+        <p>\u5f53\u524d\u6b4c\u66f2\u6b63\u5728\u51c6\u5907\u72ec\u7acb\u97f3\u89c6\u9891\u8f68\u3002</p>
+        <p class="empty-hint">${escapeHtml(currentItem.cache_message || "\u6b63\u5728\u540e\u53f0\u7f13\u5b58")}</p>
+      </div>
+    `);
+    return;
+  }
+
+  const willShowOverlay = Boolean(state.pendingSongTransitionOverlayData);
+  const isDelaying = state.localAdvanceDelayDeadline > 0 && Date.now() < state.localAdvanceDelayDeadline;
+  const shouldAutoplay = !(willShowOverlay || isDelaying);
+  const autoplayAttr = shouldAutoplay ? "autoplay" : "";
+
+  setPlayerFrameContent(`
+    <video
+      data-player-role="video"
+      controls
+      controlsList="nofullscreen"
+      ${autoplayAttr}
+      playsinline
+      preload="metadata"
+      src="${escapeHtml(selectedVideoUrl)}"
+    ></video>
+    <audio
+      data-player-role="audio"
+      preload="auto"
+      src="${escapeHtml(selectedAudioUrl)}"
+    ></audio>
+  `);
+
+  const video = elements.playerFrame.querySelector('video[data-player-role="video"]');
+  const audio = elements.playerFrame.querySelector('audio[data-player-role="audio"]');
+
+  if (!video || !audio) {
+    return;
+  }
+
+  applyStoredVolumeToSplitPlayer(video, audio);
+  showMountedPlayerControls();
+
+  const reportCurrentVideoStatus = () => {
+    reportPlayerStatus(currentItem.id, video);
+  };
+
+  let restoreApplied = false;
+  const maybeRestorePlayback = () => {
+    const pendingRestore = state.pendingPlaybackRestore;
+    if (
+      restoreApplied
+      || !pendingRestore
+      || pendingRestore.itemId !== currentItem.id
+      || pendingRestore.variantId !== selectedAudioVariantForItem(currentItem)?.id
+      || video.readyState < 1
+      || audio.readyState < 1
+    ) {
+      return;
+    }
+
+    restoreApplied = true;
+    state.pendingPlaybackRestore = null;
+    beginSplitPlayerSeek(video, audio, {
+      resumeAfterSeek: Boolean(pendingRestore.wasPlaying),
+      targetTime: pendingRestore.currentTime,
+      onSettled: reportCurrentVideoStatus,
+    });
+  };
+
+  video.addEventListener("loadedmetadata", () => {
+    showMountedPlayerControls();
+    maybeRestorePlayback();
+    if (isSplitPlayerSeekSettling(video, audio)) {
+      settleSplitPlayerSeek(video, audio);
+    } else {
+      syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
+    }
+    reportCurrentVideoStatus();
+  });
+
+  audio.addEventListener("loadedmetadata", () => {
+    maybeRestorePlayback();
+    if (isSplitPlayerSeekSettling(video, audio)) {
+      settleSplitPlayerSeek(video, audio);
+    } else {
+      syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
+    }
+  });
+
+  video.addEventListener("play", () => {
+    if (isLocalAdvanceHoldingItem(currentItem.id)) {
+      stopMountedPlayerForAdvanceDelay(currentItem.id);
+      return;
+    }
     if (isSplitPlayerSeekSettling(video, audio)) {
       state.localSeekResumeAfterSettle = true;
       state.localShouldBePlaying = true;
@@ -4973,16 +5416,22 @@ async function advanceLocalPlayerNow({ showTransition = true } = {}) {
 }
 
 async function requestNextTrack() {
-  await advanceLocalPlayerNow();
+  await handleLocalPlaybackEnded({ manual: true });
 }
 
-async function handleLocalPlaybackEnded() {
+async function handleLocalPlaybackEnded(options = {}) {
   if (state.localAdvanceInFlight) {
     return;
   }
+  const manual = Boolean(options.manual);
   const delaySeconds = currentSongAdvanceDelaySeconds();
-  if (!isPlayerPanelFullscreenForTransition() || delaySeconds <= 0 || !queuedNextItem()) {
+  // Remove !isPlayerPanelFullscreen() check to allow countdown in normal view
+  if (delaySeconds <= 0 || !queuedNextItem()) {
     await advanceLocalPlayerNow();
+    return;
+  }
+  if (manual) {
+    await advanceLocalPlayerNow({ showTransition: true });
     return;
   }
   startLocalAdvanceDelay(delaySeconds);
@@ -5154,6 +5603,9 @@ async function handlePlaylistAction(button) {
     state.data = await apiPost(target[0], target[1]);
     if (action === "play-now") {
       maybeShowSongTransitionOverlay(previousData, state.data, { force: true });
+    }
+    if (action === "play-now" || action === "move-next") {
+      closeOpenMenus();
     }
     render();
   } catch (error) {
@@ -5807,6 +6259,7 @@ elements.historyList.addEventListener("click", async (event) => {
   }
   const point = anchorPointForEvent(event, button);
   await handleAddByUrl(url, button.dataset.action === "history-next" ? "next" : "tail", point);
+  closeOpenMenus();
 });
 
 elements.confirmCancel.addEventListener("click", () => {
@@ -5962,7 +6415,7 @@ document.addEventListener("click", (event) => {
     if (menu) {
       const isHidden = menu.classList.contains("hidden");
       // Close all other menus first
-      document.querySelectorAll(".menu-content").forEach((m) => m.classList.add("hidden"));
+      closeOpenMenus();
       if (isHidden) {
         menu.classList.remove("hidden");
       }
@@ -5973,7 +6426,7 @@ document.addEventListener("click", (event) => {
 
   // Close menus if clicking outside
   if (!event.target.closest(".menu-content")) {
-    document.querySelectorAll(".menu-content").forEach((m) => m.classList.add("hidden"));
+    closeOpenMenus();
   }
 });
 
@@ -6016,7 +6469,11 @@ document.addEventListener("visibilitychange", () => {
 function handleFullscreenChange() {
   if (!isPlayerPanelFullscreen()) {
     hideFullscreenRequestToast();
-    hidePlayerDelayOverlay();
+    if (hasLocalAdvanceDelayOverlay()) {
+      updateLocalAdvanceDelayOverlay();
+    } else {
+      hidePlayerDelayOverlay();
+    }
   }
   renderPlayerFullscreenButton();
 }

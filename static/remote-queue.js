@@ -270,18 +270,29 @@
       const content = wrap?.querySelector(".menu-content");
       if (content) {
         const isHidden = content.classList.contains("hidden");
-        // Close all other menus first
-        document.querySelectorAll(".menu-content").forEach(el => el.classList.add("hidden"));
+        if (typeof closeOpenMenus === "function") {
+          closeOpenMenus();
+        } else {
+          document.querySelectorAll(".menu-content").forEach((el) => el.classList.add("hidden"));
+          state.openQueueMenuId = null;
+        }
         if (isHidden) {
           content.classList.remove("hidden");
+          content.classList.remove("no-animate");
           state.openQueueMenuId = button.dataset.id;
-        } else {
-          state.openQueueMenuId = null;
         }
       }
       return;
     }
 
+    if (button.dataset.action === "play-now" || button.dataset.action === "move-next") {
+      if (typeof closeOpenMenus === "function") {
+        closeOpenMenus();
+      } else {
+        document.querySelectorAll(".menu-content").forEach((el) => el.classList.add("hidden"));
+        state.openQueueMenuId = null;
+      }
+    }
     await handleQueueAction(button.dataset.action, button.dataset.id);
   });
 

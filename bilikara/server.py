@@ -110,6 +110,7 @@ class AppContext:
         self._startup_gatcha_refresh_bypass_available = True
 
     def snapshot(self) -> dict:
+        self.cache_manager.reconcile_cache_state()
         with self._state_change_condition:
             state_revision = self._state_revision
         payload = self.store.snapshot()
