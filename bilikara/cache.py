@@ -86,6 +86,7 @@ class CacheManager:
         self.video_quality = DEFAULT_VIDEO_QUALITY
         self.audio_hires = DEFAULT_AUDIO_HIRES
         self.hevc_supported: bool | None = None
+        self.avc_quality_cap = ""
         self.client_media_capabilities: dict[str, Any] = {}
         self.on_bbdown_login_success = on_bbdown_login_success
         self.tasks: "queue.Queue[str]" = queue.Queue()
@@ -210,6 +211,7 @@ class CacheManager:
                 ],
                 "audio_hires": self.audio_hires,
                 "force_avc": self._should_force_avc_locked(),
+                "avc_quality_cap": self.avc_quality_cap,
                 "media_capabilities": dict(self.client_media_capabilities),
                 "clear_on_exit": True,
                 "usage_bytes": cache_metrics["total_bytes"],
@@ -228,29 +230,82 @@ class CacheManager:
         can_play_type = payload.get("can_play_type")
         if not isinstance(can_play_type, dict):
             can_play_type = {}
+        avc_levels = payload.get("avc_levels")
+        if not isinstance(avc_levels, list):
+            avc_levels = []
+        avc_supported = payload.get("avc_supported")
+        if not isinstance(avc_supported, bool):
+            avc_supported = False
+        max_avc_quality = self._quality_from_choice_index(
+            payload.get("max_avc_quality_index")
+        ) or self._optional_video_quality(payload.get("max_avc_quality"))
+        if not hevc_supported and not max_avc_quality:
+            max_avc_quality = VIDEO_QUALITY_CHOICES[-1]
 
         next_capabilities = {
             "hevc_supported": hevc_supported,
             "force_avc": not hevc_supported,
+            "avc_supported": avc_supported,
+            "max_avc_quality": max_avc_quality or "",
+            "max_avc_quality_index": (
+                VIDEO_QUALITY_CHOICES.index(max_avc_quality)
+                if max_avc_quality in VIDEO_QUALITY_CHOICES
+                else None
+            ),
             "can_play_type": {
                 str(key): str(value)
                 for key, value in can_play_type.items()
             },
+            "avc_levels": [
+                {
+                    "name": str(entry.get("name") or "")[:50],
+                    "codec": str(entry.get("codec") or "")[:120],
+                    "can_play_type": str(entry.get("can_play_type") or "")[:20],
+                    "max_avc_quality_index": entry.get("max_avc_quality_index"),
+                }
+                for entry in avc_levels[:20]
+                if isinstance(entry, dict)
+            ],
             "user_agent": str(payload.get("user_agent") or "")[:500],
             "platform": str(payload.get("platform") or "")[:100],
             "reported_at": datetime.now().timestamp(),
         }
 
         with self.lock:
-            previous_hevc_supported = self.hevc_supported
+            previous_force_avc = self._should_force_avc_locked()
+            previous_avc_quality_cap = self.avc_quality_cap
             self.hevc_supported = hevc_supported
+            self.avc_quality_cap = max_avc_quality or ""
             self.client_media_capabilities = next_capabilities
-            should_recache = previous_hevc_supported is not False and not hevc_supported
+            should_recache = (
+                self._should_force_avc_locked()
+                and (
+                    not previous_force_avc
+                    or previous_avc_quality_cap != self.avc_quality_cap
+                )
+            )
 
         if should_recache:
             self._request_desired_recaching("HEVC unsupported; switching video cache to AVC")
 
         return self.media_capabilities_snapshot()
+
+    @staticmethod
+    def _quality_from_choice_index(index: object) -> str | None:
+        try:
+            normalized_index = int(index)
+        except (TypeError, ValueError):
+            return None
+        if 0 <= normalized_index < len(VIDEO_QUALITY_CHOICES):
+            return VIDEO_QUALITY_CHOICES[normalized_index]
+        return None
+
+    @staticmethod
+    def _optional_video_quality(video_quality: object) -> str | None:
+        value = str(video_quality or "").strip()
+        if value in VIDEO_QUALITY_CHOICES:
+            return value
+        return None
 
     def enrich_snapshot(
         self,
@@ -1031,8 +1086,9 @@ class CacheManager:
             video_quality = self.video_quality
             audio_hires = self.audio_hires
             force_avc = self._should_force_avc_locked()
+            avc_quality_cap = self.avc_quality_cap if force_avc else ""
         if stream_kind == "video":
-            args = ["-q", self._video_quality_priority(video_quality)]
+            args = ["-q", self._video_quality_priority(video_quality, avc_quality_cap)]
             if force_avc:
                 args.extend(["-e", "avc"])
             return args
@@ -1077,9 +1133,12 @@ class CacheManager:
         self._terminate_process(active_process)
 
     @staticmethod
-    def _video_quality_priority(video_quality: object) -> str:
+    def _video_quality_priority(video_quality: object, quality_cap: object = "") -> str:
         normalized_quality = CacheManager._normalize_video_quality(video_quality)
         start_index = VIDEO_QUALITY_CHOICES.index(normalized_quality)
+        cap_quality = CacheManager._optional_video_quality(quality_cap)
+        if cap_quality:
+            start_index = max(start_index, VIDEO_QUALITY_CHOICES.index(cap_quality))
         return ",".join(VIDEO_QUALITY_CHOICES[start_index:])
 
     def _run_item_command(

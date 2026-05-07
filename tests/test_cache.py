@@ -7,7 +7,7 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from bilikara.cache import CacheManager, DownloadCommandError
+from bilikara.cache import CacheManager, DownloadCommandError, VIDEO_QUALITY_CHOICES
 from bilikara.models import PlaylistItem
 from bilikara.store import PlaylistStore
 
@@ -151,17 +151,52 @@ class CacheManagerPolicyTest(unittest.TestCase):
                 snapshot = manager.set_client_media_capabilities(
                     {
                         "hevc_supported": False,
+                        "avc_supported": True,
+                        "max_avc_quality_index": 4,
                         "can_play_type": {'video/mp4; codecs="hvc1"': ""},
                         "user_agent": "Firefox on Windows 7",
                         "platform": "Win32",
                     }
                 )
                 self.assertTrue(snapshot["force_avc"])
+                self.assertEqual(snapshot["max_avc_quality"], VIDEO_QUALITY_CHOICES[4])
                 self.assertEqual(
-                    manager._bbdown_stream_preference_args("video")[-2:],
-                    ["-e", "avc"],
+                    manager._bbdown_stream_preference_args("video"),
+                    ["-q", ",".join(VIDEO_QUALITY_CHOICES[4:]), "-e", "avc"],
                 )
                 self.assertEqual(manager._bbdown_stream_preference_args("audio"), [])
+            finally:
+                manager.shutdown()
+
+    def test_avc_quality_cap_does_not_raise_lower_manual_quality(self):
+        with patch("bilikara.cache.CACHE_DIR", self.cache_dir):
+            manager = CacheManager(self.store, max_cache_items=3)
+            try:
+                manager.set_cache_policy(video_quality=VIDEO_QUALITY_CHOICES[5])
+                manager.set_client_media_capabilities(
+                    {
+                        "hevc_supported": False,
+                        "avc_supported": True,
+                        "max_avc_quality_index": 4,
+                    }
+                )
+                self.assertEqual(
+                    manager._bbdown_stream_preference_args("video"),
+                    ["-q", ",".join(VIDEO_QUALITY_CHOICES[5:]), "-e", "avc"],
+                )
+            finally:
+                manager.shutdown()
+
+    def test_hevc_unsupported_without_avc_level_falls_back_to_lowest_quality(self):
+        with patch("bilikara.cache.CACHE_DIR", self.cache_dir):
+            manager = CacheManager(self.store, max_cache_items=3)
+            try:
+                snapshot = manager.set_client_media_capabilities({"hevc_supported": False})
+                self.assertEqual(snapshot["max_avc_quality"], VIDEO_QUALITY_CHOICES[-1])
+                self.assertEqual(
+                    manager._bbdown_stream_preference_args("video"),
+                    ["-q", VIDEO_QUALITY_CHOICES[-1], "-e", "avc"],
+                )
             finally:
                 manager.shutdown()
 
