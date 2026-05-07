@@ -1190,7 +1190,7 @@ def refresh_gatcha_cache_in_background(
     on_start: callable | None = None,
     on_done: callable | None = None,
     use_global_lock: bool = True,
-    upload_default_uids_to_lark: bool = False,
+    upload_default_uids_to_lark: bool = True,
 ) -> bool:
     if use_global_lock:
         if not _GATCHA_REFRESH_LOCK.acquire(blocking=False):
@@ -1228,8 +1228,7 @@ def refresh_gatcha_cache_in_background(
                 if on_done is not None:
                     on_done()
         if cache_payload is not None and task_status != "failed":
-            excluded_uids = set(_default_gatcha_uids()) if not upload_default_uids_to_lark else set()
-            entries = _gatcha_cache_payload_entries(cache_payload, exclude_uids=excluded_uids)
+            entries = _gatcha_cache_payload_entries(cache_payload)
             if entries:
                 _append_lark_pool_entries_async(entries)
 
@@ -1288,8 +1287,7 @@ def add_gatcha_uid(raw_mid: object, *, on_start: callable | None = None, on_done
             {
                 "uids": {mid: fresh_cache_payload.get("uids", {}).get(mid, [])},
                 "profiles": {mid: fresh_cache_payload.get("profiles", {}).get(mid, {})},
-            },
-            exclude_uids=set(_default_gatcha_uids()),
+            }
         )
     finally:
         _GATCHA_REFRESH_LOCK.release()

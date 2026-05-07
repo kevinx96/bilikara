@@ -1533,7 +1533,7 @@ class BilibiliParserTest(unittest.TestCase):
         self.assertEqual([item["uid"] for item in summary["uids"]], ["2"])
         self.assertEqual(summary["errors"], [{"uid": "1", "error": "uid failed"}])
 
-    def test_startup_gatcha_refresh_skips_default_uids_for_lark_upload(self):
+    def test_startup_gatcha_refresh_uploads_default_uids_to_cloudflare_append_path(self):
         class FakeThread:
             def __init__(self, *, target, daemon=None, name=None):
                 self.target = target
@@ -1563,9 +1563,9 @@ class BilibiliParserTest(unittest.TestCase):
             )
 
         uploaded_entries = append_lark.call_args.args[0]
-        self.assertEqual([entry["bvid"] for entry in uploaded_entries], ["BVUSER"])
+        self.assertEqual([entry["bvid"] for entry in uploaded_entries], ["BVDEFAULT", "BVUSER"])
 
-    def test_startup_gatcha_refresh_skips_cached_default_uids_for_lark_upload(self):
+    def test_startup_gatcha_refresh_uploads_cached_default_uids_to_cloudflare_append_path(self):
         class FakeThread:
             def __init__(self, *, target, daemon=None, name=None):
                 self.target = target
@@ -1595,9 +1595,9 @@ class BilibiliParserTest(unittest.TestCase):
             )
 
         uploaded_entries = append_lark.call_args.args[0]
-        self.assertEqual([entry["bvid"] for entry in uploaded_entries], ["BVUSER"])
+        self.assertEqual([entry["bvid"] for entry in uploaded_entries], ["BVDEFAULT", "BVUSER"])
 
-    def test_manual_gatcha_refresh_skips_default_uids_for_lark_upload_by_default(self):
+    def test_manual_gatcha_refresh_uploads_default_uids_to_cloudflare_append_path_by_default(self):
         class FakeThread:
             def __init__(self, *, target, daemon=None, name=None):
                 self.target = target
@@ -1622,7 +1622,7 @@ class BilibiliParserTest(unittest.TestCase):
             self.assertTrue(bilibili_module.refresh_gatcha_cache_in_background(use_global_lock=False))
 
         uploaded_entries = append_lark.call_args.args[0]
-        self.assertEqual([entry["bvid"] for entry in uploaded_entries], ["BVUSER"])
+        self.assertEqual([entry["bvid"] for entry in uploaded_entries], ["BVDEFAULT", "BVUSER"])
 
     @patch("bilikara.bilibili.request_json")
     def test_fetch_video_item(self, mock_request_json):

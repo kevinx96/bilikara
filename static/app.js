@@ -1218,6 +1218,20 @@ function renderFollowBrowse() {
         count.className = "follow-up-count";
         count.textContent = `${Number(owner.count || 0)} 首`;
 
+        button.addEventListener("click", async (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          const uid = String(button.dataset.uid || "").trim();
+          if (!uid) {
+            return;
+          }
+          state.followBrowseSelectedUid = uid;
+          if (elements.followSearchQuery) {
+            elements.followSearchQuery.value = "";
+          }
+          await loadFollowBrowse({ uid, query: "" });
+        });
+
         button.append(name, count);
         elements.followUpGrid.appendChild(button);
       });
@@ -6675,6 +6689,7 @@ elements.followUpGrid?.addEventListener("click", async (event) => {
   if (!uid) {
     return;
   }
+  event.preventDefault();
   state.followBrowseSelectedUid = uid;
   if (elements.followSearchQuery) {
     elements.followSearchQuery.value = "";
