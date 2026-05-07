@@ -40,6 +40,7 @@ _GATCHA_PROFILE_CACHE_LOCK = threading.Lock()
 _GATCHA_CACHE_LOCK = threading.Lock()
 _GATCHA_UIDS_LOCK = threading.Lock()
 _GATCHA_REFRESH_LOCK = threading.Lock()
+_GATCHA_TASK_STATUS_LOCK = threading.Lock()
 _GATCHA_REQUEST_LOCK = threading.Lock()
 _GATCHA_LAST_REQUEST_AT = 0.0
 _GATCHA_CACHE_FILE = cfg.DATA_DIR / "gatcha_cache.json"
@@ -56,6 +57,13 @@ GATCHA_FAVLIST_RETRY_DELAY_SECONDS = 3
 GATCHA_PROFILE_CACHE_TTL_SECONDS = 300
 GATCHA_TASK_BUSY_MESSAGE = "拉取任务执行中，请等待任务结束"
 MISSING_BILIBILI_COOKIE_MESSAGE = "请登录 Bilibili 账号或输入 Cookie"
+_GATCHA_TASK_STATUS = {
+    "status": "idle",
+    "message": "",
+    "error": "",
+    "updated_at": 0.0,
+    "result": None,
+}
 _COOKIE_REQUIRED_KEYS = {"sessdata", "bili_jct"}
 _COOKIE_PREFERRED_ORDER = (
     "SESSDATA",
@@ -203,10 +211,37 @@ def _save_gatcha_uid_payload(uid_payload: dict) -> None:
     temp_path.replace(_GATCHA_UIDS_FILE)
 
 
+def _set_gatcha_task_status(
+    status: str,
+    *,
+    message: str = "",
+    error: str = "",
+    result: dict | None = None,
+) -> None:
+    with _GATCHA_TASK_STATUS_LOCK:
+        _GATCHA_TASK_STATUS.update(
+            {
+                "status": status,
+                "message": message,
+                "error": error,
+                "updated_at": time.time(),
+                "result": result,
+            }
+        )
+
+
 def gatcha_task_snapshot() -> dict:
+    busy = _GATCHA_REFRESH_LOCK.locked()
+    with _GATCHA_TASK_STATUS_LOCK:
+        last_status = dict(_GATCHA_TASK_STATUS)
     return {
-        "busy": _GATCHA_REFRESH_LOCK.locked(),
-        "message": GATCHA_TASK_BUSY_MESSAGE if _GATCHA_REFRESH_LOCK.locked() else "",
+        "busy": busy,
+        "message": GATCHA_TASK_BUSY_MESSAGE if busy else "",
+        "last_status": last_status.get("status") or "idle",
+        "last_message": last_status.get("message") or "",
+        "last_error": last_status.get("error") or "",
+        "last_updated_at": last_status.get("updated_at") or 0.0,
+        "last_result": last_status.get("result"),
     }
 
 
@@ -1066,6 +1101,38 @@ def _refresh_gatcha_uid_cache(cache_payload: dict, mid: str, *, force_full: bool
     }
 
 
+def _gatcha_refresh_task_result(cache_payload: dict | None) -> dict:
+    if not isinstance(cache_payload, dict):
+        return {"uid_count": 0, "entry_count": 0, "errors": []}
+    uids = cache_payload.get("uids")
+    entry_count = 0
+    uid_count = 0
+    if isinstance(uids, dict):
+        uid_count = len(uids)
+        for entries in uids.values():
+            if isinstance(entries, list):
+                entry_count += len(entries)
+    summary = cache_payload.get("refresh_summary")
+    errors = []
+    uid_results = []
+    favlist_error = ""
+    if isinstance(summary, dict):
+        raw_errors = summary.get("errors")
+        if isinstance(raw_errors, list):
+            errors = [error for error in raw_errors if isinstance(error, dict)]
+        raw_results = summary.get("uids")
+        if isinstance(raw_results, list):
+            uid_results = [result for result in raw_results if isinstance(result, dict)]
+        favlist_error = str(summary.get("favlist_error") or "")
+    return {
+        "uid_count": uid_count,
+        "entry_count": entry_count,
+        "uid_results": uid_results,
+        "errors": errors,
+        "favlist_error": favlist_error,
+    }
+
+
 def refresh_gatcha_cache() -> dict:
     if not effective_bilibili_cookie():
         raise BilibiliError(MISSING_BILIBILI_COOKIE_MESSAGE)
@@ -1091,20 +1158,30 @@ def refresh_gatcha_cache() -> dict:
         cache_profiles = {}
     cache_payload["profiles"] = cache_profiles
 
+    refresh_summary = {
+        "uids": [],
+        "errors": [],
+        "favlist_error": "",
+        "updated_at": time.time(),
+    }
     cache_payload["updated_at"] = time.time()
     for raw_mid in configured_uids:
         mid = str(raw_mid).strip()
         if not mid:
             continue
-        profile = _resolve_gatcha_uid_profile(mid, known_profiles)
-        if profile is not None:
-            cache_profiles[str(profile["uid"])] = profile
-            known_profiles[str(profile["uid"])] = profile
-        _refresh_gatcha_uid_cache(cache_payload, mid)
+        try:
+            profile = _resolve_gatcha_uid_profile(mid, known_profiles)
+            if profile is not None:
+                cache_profiles[str(profile["uid"])] = profile
+                known_profiles[str(profile["uid"])] = profile
+            refresh_summary["uids"].append(_refresh_gatcha_uid_cache(cache_payload, mid))
+        except Exception as exc:
+            refresh_summary["errors"].append({"uid": mid, "error": str(exc)})
     try:
         _refresh_existing_gatcha_favlist_cache()
-    except Exception:
-        pass
+    except Exception as exc:
+        refresh_summary["favlist_error"] = str(exc)
+    cache_payload["refresh_summary"] = refresh_summary
     return cache_payload
 
 
@@ -1118,8 +1195,11 @@ def refresh_gatcha_cache_in_background(
     if use_global_lock:
         if not _GATCHA_REFRESH_LOCK.acquire(blocking=False):
             return False
+        _set_gatcha_task_status("running", message=GATCHA_TASK_BUSY_MESSAGE)
         if on_start is not None:
             on_start()
+    else:
+        _set_gatcha_task_status("running", message=GATCHA_TASK_BUSY_MESSAGE)
 
     cached_default_uids_before_refresh: set[str] = set()
     if not upload_default_uids_to_lark:
@@ -1136,16 +1216,31 @@ def refresh_gatcha_cache_in_background(
 
     def _worker() -> None:
         cache_payload: dict | None = None
+        task_status = "failed"
         try:
             cache_payload = refresh_gatcha_cache()
-        except Exception:
+            result = _gatcha_refresh_task_result(cache_payload)
+            has_errors = bool(result.get("errors") or result.get("favlist_error"))
+            has_uid_success = bool(result.get("uid_results"))
+            if has_errors and not has_uid_success:
+                task_status = "failed"
+                message = "抽卡缓存更新失败，未成功拉取任何 UID。"
+            elif has_errors:
+                task_status = "partial"
+                message = "抽卡缓存已部分更新，但有 UID 或收藏夹拉取失败。"
+            else:
+                task_status = "success"
+                message = "抽卡缓存更新完成。"
+            _set_gatcha_task_status(task_status, message=message, result=result)
+        except Exception as exc:
+            _set_gatcha_task_status("failed", message="抽卡缓存更新失败。", error=str(exc))
             return
         finally:
             if use_global_lock:
                 _GATCHA_REFRESH_LOCK.release()
                 if on_done is not None:
                     on_done()
-        if cache_payload is not None:
+        if cache_payload is not None and task_status != "failed":
             excluded_uids = set()
             if not upload_default_uids_to_lark:
                 excluded_uids = set(_default_gatcha_uids()) - cached_default_uids_before_refresh

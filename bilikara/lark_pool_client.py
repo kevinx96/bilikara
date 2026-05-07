@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -24,6 +25,8 @@ BITABLE_TABLES = (
 )
 
 _BASE_URL = "https://open.feishu.cn/open-apis"
+_CLOUDFLARE_API_URL = (os.environ.get("BILIKARA_CF_API_URL") or "https://api.kevinx96.icu").rstrip("/")
+_CLOUDFLARE_SEARCH_TIMEOUT = float(os.environ.get("BILIKARA_CF_SEARCH_TIMEOUT") or "2.0")
 _TABLE_LIMIT = 20_000
 _APPEND_CHUNK_SIZE = 400
 _SYNC_FILE = cfg.DATA_DIR / "lark_pool_sync.json"
@@ -34,11 +37,15 @@ _TABLES_LOCK = threading.RLock()
 _TABLES_READY = False
 _ACTIVE_TABLES: list[dict[str, Any]] = []
 _TABLE_PROBED: set[int] = set()
+_FIELD_TYPES_BY_TABLE: dict[tuple[str, str], dict[str, Any]] = {}
 _SYNC_LOCK = threading.RLock()
 _REQUIRED_FIELD_NAMES = {"mid", "bvid", "title", "url", "owner_name", "owner_url"}
+_OPTIONAL_FIELD_NAMES = {"tag_1", "tag_2", "tag_3", "tag_4", "tag_5", "tag_status"}
+_WRITE_FIELD_NAMES = _REQUIRED_FIELD_NAMES | _OPTIONAL_FIELD_NAMES
 _REQUIRED_SEARCH_FIELDS = {"bvid", "title", "url"}
-_DEBUG_LOGS = False
+_DEBUG_LOGS = str(os.environ.get("BILIKARA_LARK_DEBUG") or "").strip().lower() in {"1", "true", "yes", "on"}
 _INVALID_VIDEO_TITLES = {"已失效视频"}
+_VALID_BVID_RE = re.compile(r"^BV[0-9A-Za-z]{10}$")
 
 
 class LarkPoolError(RuntimeError):
@@ -69,6 +76,55 @@ def _get_json(url: str, *, token: str, timeout: float = 12.0) -> dict:
             return json.loads(response.read().decode("utf-8"))
     except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
         raise LarkPoolError(f"Lark request failed: {exc}") from exc
+
+
+def _cloudflare_json(method: str, path: str, payload: dict[str, Any] | None = None, *, timeout: float = 12.0) -> Any:
+    url = f"{_CLOUDFLARE_API_URL}{path}"
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": f"bilikara/{getattr(cfg, 'APP_VERSION', 'dev')} (+https://github.com/VZRXS/bilikara)",
+    }
+    data = None
+    if payload is not None:
+        headers["Content-Type"] = "application/json; charset=utf-8"
+        data = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(url, data=data, headers=headers, method=method.upper())
+    _log_lark_debug(
+        "cloudflare request",
+        {"method": method.upper(), "url": url, "timeout": timeout, "payload_keys": sorted((payload or {}).keys())},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw_body = response.read().decode("utf-8")
+            parsed = json.loads(raw_body)
+            _log_lark_debug(
+                "cloudflare response",
+                {
+                    "status": getattr(response, "status", None),
+                    "url": url,
+                    "shape": type(parsed).__name__,
+                    "preview": raw_body[:500],
+                },
+            )
+            return parsed
+    except urllib.error.HTTPError as exc:
+        try:
+            error_body = exc.read().decode("utf-8", errors="replace")
+        except Exception:
+            error_body = ""
+        _log_lark_debug(
+            "cloudflare request failed",
+            {
+                "url": url,
+                "status": exc.code,
+                "error": str(exc),
+                "body": error_body[:1000],
+            },
+        )
+        raise LarkPoolError(f"Cloudflare request failed: {exc}") from exc
+    except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
+        _log_lark_debug("cloudflare request failed", {"url": url, "error": str(exc)})
+        raise LarkPoolError(f"Cloudflare request failed: {exc}") from exc
 
 
 def _require_success(payload: dict, label: str) -> dict:
@@ -106,6 +162,8 @@ def _log_lark_debug(label: str, payload: dict[str, Any]) -> None:
 
 def _tenant_access_token() -> str:
     global _TOKEN_VALUE, _TOKEN_EXPIRES_AT
+    if not APP_SECRET:
+        raise LarkPoolError("BILIKARA_LARK_APP_SECRET is required for direct Feishu access")
     now = time.time()
     with _TOKEN_LOCK:
         if _TOKEN_VALUE and now < _TOKEN_EXPIRES_AT - 60:
@@ -144,12 +202,19 @@ def _table_field_names(token: str, app_token: str, table_id: str) -> set[str]:
         "table field probe failed",
     )
     names: set[str] = set()
+    field_types: dict[str, Any] = {}
     for item in data.get("items") or []:
         if not isinstance(item, dict):
             continue
         field_name = str(item.get("field_name") or item.get("name") or "").strip()
         if field_name:
             names.add(field_name)
+            field_type = item.get("type")
+            if field_type is None:
+                field_type = item.get("field_type")
+            if field_type is not None:
+                field_types[field_name] = field_type
+    _FIELD_TYPES_BY_TABLE[(app_token, table_id)] = field_types
     return names
 
 
@@ -172,6 +237,7 @@ def _table_payload(index: int, app_token: str, table_id: str, field_names: set[s
         "table_id": table_id,
         "count": count,
         "field_names": sorted(field_names),
+        "field_types": dict(_FIELD_TYPES_BY_TABLE.get((app_token, table_id), {})),
         "search_enabled": index == 1 or count > 0,
     }
 
@@ -300,7 +366,8 @@ def _bump_table_count(index: int, delta: int) -> None:
                     "app_token": app_token,
                     "table_id": table_id,
                     "count": int(delta),
-                    "field_names": sorted(_REQUIRED_FIELD_NAMES),
+                    "field_names": sorted(_WRITE_FIELD_NAMES),
+                    "field_types": {},
                     "search_enabled": True,
                 }
             )
@@ -388,13 +455,19 @@ def _search_lark_pool_table(
     return results
 
 
-def search_lark_pool_table(query: str, table_index: int, *, limit: int = 30) -> list[dict]:
+def search_lark_pool_table(query: str, table_index: int, *, limit: int = 80) -> list[dict]:
     normalized_query = str(query or "").strip()
     if not normalized_query:
         return []
     try:
         normalized_index = int(table_index)
     except (TypeError, ValueError):
+        return []
+    if not APP_SECRET:
+        _log_lark_debug(
+            "table search skipped without feishu secret",
+            {"table": normalized_index, "query": normalized_query},
+        )
         return []
     table = _active_table(normalized_index)
     if table is None:
@@ -403,7 +476,84 @@ def search_lark_pool_table(query: str, table_index: int, *, limit: int = 30) -> 
     return _search_lark_pool_table(normalized_query, table, token=token, limit=limit)
 
 
-def search_lark_pool(query: str, *, limit: int = 30) -> list[dict]:
+def _cloudflare_search_item(raw_item: Any) -> dict | None:
+    if not isinstance(raw_item, dict):
+        return None
+    bvid = _field_text(raw_item.get("bvid")).strip()
+    title = _field_text(raw_item.get("title")).strip()
+    url = _field_text(raw_item.get("url")).strip()
+    if not url and bvid:
+        url = f"https://www.bilibili.com/video/{bvid}"
+    if not bvid or not title or not url:
+        return None
+    return {
+        "mid": _field_text(raw_item.get("mid")).strip(),
+        "bvid": bvid,
+        "title": title,
+        "url": url,
+        "owner_name": _field_text(raw_item.get("owner_name")).strip(),
+        "owner_url": _field_text(raw_item.get("owner_url")).strip(),
+        "source": "cloudflare",
+    }
+
+
+def _cloudflare_search_items(payload: Any) -> list[Any]:
+    if isinstance(payload, list):
+        return payload
+    if not isinstance(payload, dict):
+        return []
+    for key in ("items", "results"):
+        items = payload.get(key)
+        if isinstance(items, list):
+            return items
+    data = payload.get("data")
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for key in ("items", "results"):
+            items = data.get(key)
+            if isinstance(items, list):
+                return items
+    return []
+
+
+def _search_cloudflare_pool(query: str, *, limit: int = 80) -> list[dict] | None:
+    normalized_query = str(query or "").strip()
+    if not normalized_query:
+        return []
+    query_string = urllib.parse.urlencode({"keyword": normalized_query, "limit": max(1, int(limit))})
+    try:
+        payload = _cloudflare_json(
+            "GET",
+            f"/search?{query_string}",
+            timeout=_CLOUDFLARE_SEARCH_TIMEOUT,
+        )
+    except LarkPoolError:
+        return None
+    results: list[dict] = []
+    seen_bvids: set[str] = set()
+    raw_items = _cloudflare_search_items(payload)
+    for raw_item in raw_items:
+        item = _cloudflare_search_item(raw_item)
+        if not item or item["bvid"] in seen_bvids:
+            continue
+        seen_bvids.add(item["bvid"])
+        results.append(item)
+        if len(results) >= max(1, int(limit)):
+            break
+    _log_lark_debug(
+        "cloudflare search parsed",
+        {
+            "query": normalized_query,
+            "raw_count": len(raw_items),
+            "result_count": len(results),
+            "sample_bvids": [item.get("bvid") for item in results[:5]],
+        },
+    )
+    return results
+
+
+def _search_lark_pool_legacy(query: str, *, limit: int = 80) -> list[dict]:
     normalized_query = str(query or "").strip()
     if not normalized_query:
         return []
@@ -420,6 +570,22 @@ def search_lark_pool(query: str, *, limit: int = 30) -> list[dict]:
     return results
 
 
+def search_lark_pool(query: str, *, limit: int = 80) -> list[dict]:
+    normalized_query = str(query or "").strip()
+    if not normalized_query:
+        return []
+    if _CLOUDFLARE_API_URL:
+        cloudflare_results = _search_cloudflare_pool(normalized_query, limit=limit)
+        if cloudflare_results is not None:
+            _log_lark_debug(
+                "search served by cloudflare",
+                {"query": normalized_query, "count": len(cloudflare_results)},
+            )
+            return cloudflare_results
+        _log_lark_debug("search falling back to feishu tables", {"query": normalized_query})
+    return _search_lark_pool_legacy(normalized_query, limit=limit)
+
+
 def _load_synced_bvids() -> set[str]:
     try:
         payload = json.loads(_SYNC_FILE.read_text(encoding="utf-8"))
@@ -434,7 +600,14 @@ def _save_synced_bvids(bvids: set[str]) -> None:
     payload = {"schema_version": 1, "bvids": sorted(bvids), "updated_at": time.time()}
     temp_path = Path(str(_SYNC_FILE) + ".tmp")
     temp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    temp_path.replace(_SYNC_FILE)
+    try:
+        temp_path.replace(_SYNC_FILE)
+    except PermissionError:
+        _SYNC_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def normalize_pool_entry(entry: dict) -> dict | None:
@@ -445,11 +618,13 @@ def normalize_pool_entry(entry: dict) -> dict | None:
     url = str(entry.get("url") or "").strip()
     if title in _INVALID_VIDEO_TITLES:
         return None
+    if not _VALID_BVID_RE.match(bvid):
+        return None
     if not url and bvid:
         url = f"https://www.bilibili.com/video/{bvid}"
     if not bvid or not title or not url:
         return None
-    return {
+    normalized = {
         "mid": str(entry.get("mid") or entry.get("owner_mid") or "").strip(),
         "bvid": bvid,
         "title": title,
@@ -457,9 +632,16 @@ def normalize_pool_entry(entry: dict) -> dict | None:
         "owner_name": str(entry.get("owner_name") or entry.get("author") or "").strip(),
         "owner_url": str(entry.get("owner_url") or "").strip(),
     }
+    for key in ("tag_1", "tag_2", "tag_3", "tag_4", "tag_5"):
+        value = entry.get(key)
+        if value is not None:
+            normalized[key] = str(value).strip()
+    if entry.get("tag_status") is not None:
+        normalized["tag_status"] = str(entry.get("tag_status")).strip()
+    return normalized
 
 
-def append_lark_pool_entries(entries: list[dict]) -> dict:
+def _normalize_pool_entries(entries: list[dict]) -> list[dict]:
     normalized: list[dict] = []
     seen_batch: set[str] = set()
     for entry in entries:
@@ -468,11 +650,71 @@ def append_lark_pool_entries(entries: list[dict]) -> dict:
             continue
         seen_batch.add(normalized_entry["bvid"])
         normalized.append(normalized_entry)
+    return normalized
+
+
+def append_cloudflare_pool_entries(entries: list[dict]) -> dict:
+    normalized = _normalize_pool_entries(entries)
+    if not normalized:
+        return {"attempted": 0, "added": 0}
+    try:
+        payload = _cloudflare_json("POST", "/batch-add", {"records": normalized}, timeout=20)
+    except LarkPoolError as exc:
+        return {"attempted": len(normalized), "added": 0, "error": str(exc)}
+    if not isinstance(payload, dict):
+        return {"attempted": len(normalized), "added": 0, "error": "Cloudflare returned an invalid payload"}
+    return {
+        "attempted": int(payload.get("attempted") or len(normalized)),
+        "added": int(payload.get("added") or 0),
+        "skipped_existing": int(payload.get("skipped_existing") or 0),
+        "feishu_queued": int(payload.get("feishu_queued") or 0),
+    }
+
+
+def _is_number_field_type(field_type: Any) -> bool:
+    return str(field_type).strip().lower() in {"2", "number"}
+
+
+def _coerce_feishu_field_value(field_name: str, value: Any, field_type: Any = None) -> Any:
+    if value is None:
+        return None
+    text = str(value).strip() if not isinstance(value, (int, float)) else value
+    if text == "":
+        return None
+    if _is_number_field_type(field_type):
+        try:
+            number = float(text)
+        except (TypeError, ValueError):
+            return None
+        return int(number) if number.is_integer() else number
+    return value
+
+
+def _feishu_record_fields(entry: dict[str, Any], field_names: set[str], field_types: dict[str, Any]) -> dict[str, Any]:
+    fields: dict[str, Any] = {}
+    for key, value in entry.items():
+        if key not in field_names:
+            continue
+        coerced = _coerce_feishu_field_value(key, value, field_types.get(key))
+        if coerced is None:
+            continue
+        fields[key] = coerced
+    return fields
+
+
+def append_lark_pool_entries_to_lark(
+    entries: list[dict],
+    *,
+    start_table_index: int = 1,
+    only_table_index: int | None = None,
+    use_sync_cache: bool = True,
+) -> dict:
+    normalized = _normalize_pool_entries(entries)
     if not normalized:
         return {"attempted": 0, "added": 0}
 
     with _SYNC_LOCK:
-        synced_bvids = _load_synced_bvids()
+        synced_bvids = _load_synced_bvids() if use_sync_cache else set()
         pending = [entry for entry in normalized if entry["bvid"] not in synced_bvids]
         if not pending:
             return {"attempted": len(normalized), "added": 0}
@@ -480,14 +722,20 @@ def append_lark_pool_entries(entries: list[dict]) -> dict:
         added = 0
         cursor = 0
         for table in _active_tables():
+            table_index = int(table.get("index") or 0)
+            if only_table_index is not None and table_index != int(only_table_index):
+                continue
+            if only_table_index is None and table_index < int(start_table_index):
+                continue
             capacity = max(0, _TABLE_LIMIT - int(table.get("count") or 0))
             if capacity <= 0:
                 continue
-            field_names = set(table.get("field_names") or _REQUIRED_FIELD_NAMES)
+            field_names = set(table.get("field_names") or _WRITE_FIELD_NAMES)
+            field_types = table.get("field_types") if isinstance(table.get("field_types"), dict) else {}
             while cursor < len(pending) and capacity > 0:
                 chunk = pending[cursor : cursor + min(_APPEND_CHUNK_SIZE, capacity)]
                 records = [
-                    {"fields": {key: value for key, value in entry.items() if key in field_names}}
+                    {"fields": _feishu_record_fields(entry, field_names, field_types)}
                     for entry in chunk
                 ]
                 _log_lark_request("bilikara pool append", {"records": records})
@@ -505,10 +753,15 @@ def append_lark_pool_entries(entries: list[dict]) -> dict:
                 added += len(chunk)
                 synced_bvids.update(entry["bvid"] for entry in chunk)
                 _bump_table_count(int(table["index"]), len(chunk))
-                _save_synced_bvids(synced_bvids)
+                if use_sync_cache:
+                    _save_synced_bvids(synced_bvids)
             if cursor >= len(pending):
                 break
         return {"attempted": len(normalized), "added": added}
+
+
+def append_lark_pool_entries(entries: list[dict]) -> dict:
+    return append_cloudflare_pool_entries(entries)
 
 
 def append_lark_pool_entries_in_background(entries: list[dict]) -> None:
