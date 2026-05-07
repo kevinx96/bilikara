@@ -1190,7 +1190,7 @@ def refresh_gatcha_cache_in_background(
     on_start: callable | None = None,
     on_done: callable | None = None,
     use_global_lock: bool = True,
-    upload_default_uids_to_lark: bool = True,
+    upload_default_uids_to_lark: bool = False,
 ) -> bool:
     if use_global_lock:
         if not _GATCHA_REFRESH_LOCK.acquire(blocking=False):
@@ -1200,19 +1200,6 @@ def refresh_gatcha_cache_in_background(
             on_start()
     else:
         _set_gatcha_task_status("running", message=GATCHA_TASK_BUSY_MESSAGE)
-
-    cached_default_uids_before_refresh: set[str] = set()
-    if not upload_default_uids_to_lark:
-        default_uids = set(_default_gatcha_uids())
-        with _GATCHA_CACHE_LOCK:
-            previous_cache_payload = _load_gatcha_cache(reset_legacy=False)
-        previous_uid_entries = previous_cache_payload.get("uids") if isinstance(previous_cache_payload, dict) else {}
-        if isinstance(previous_uid_entries, dict):
-            cached_default_uids_before_refresh = {
-                uid
-                for uid in default_uids
-                if isinstance(previous_uid_entries.get(uid), list) and previous_uid_entries.get(uid)
-            }
 
     def _worker() -> None:
         cache_payload: dict | None = None
@@ -1241,10 +1228,10 @@ def refresh_gatcha_cache_in_background(
                 if on_done is not None:
                     on_done()
         if cache_payload is not None and task_status != "failed":
-            excluded_uids = set()
-            if not upload_default_uids_to_lark:
-                excluded_uids = set(_default_gatcha_uids()) - cached_default_uids_before_refresh
-            _append_lark_pool_entries_async(_gatcha_cache_payload_entries(cache_payload, exclude_uids=excluded_uids))
+            excluded_uids = set(_default_gatcha_uids()) if not upload_default_uids_to_lark else set()
+            entries = _gatcha_cache_payload_entries(cache_payload, exclude_uids=excluded_uids)
+            if entries:
+                _append_lark_pool_entries_async(entries)
 
     threading.Thread(target=_worker, daemon=True, name="gatcha-cache-refresh").start()
     return True
@@ -1301,7 +1288,8 @@ def add_gatcha_uid(raw_mid: object, *, on_start: callable | None = None, on_done
             {
                 "uids": {mid: fresh_cache_payload.get("uids", {}).get(mid, [])},
                 "profiles": {mid: fresh_cache_payload.get("profiles", {}).get(mid, {})},
-            }
+            },
+            exclude_uids=set(_default_gatcha_uids()),
         )
     finally:
         _GATCHA_REFRESH_LOCK.release()
