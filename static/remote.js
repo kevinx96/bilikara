@@ -755,7 +755,10 @@ async function searchGatchaCache(query) {
 
 async function searchLarkPool(query) {
   const normalizedQuery = String(query || "").trim();
-  const response = await fetch(`/api/lark/search?q=${encodeURIComponent(normalizedQuery)}`, {
+  const params = new URLSearchParams();
+  params.set("q", normalizedQuery);
+  params.set("limit", "80");
+  const response = await fetch(`/api/lark/search?${params.toString()}`, {
     cache: "no-store",
     headers: clientHeaders(),
   });
@@ -771,6 +774,7 @@ async function searchLarkPoolTable(query, tableIndex) {
   const params = new URLSearchParams();
   params.set("q", normalizedQuery);
   params.set("table", String(tableIndex));
+  params.set("limit", "80");
   const response = await fetch(`/api/lark/search?${params.toString()}`, {
     cache: "no-store",
     headers: clientHeaders(),

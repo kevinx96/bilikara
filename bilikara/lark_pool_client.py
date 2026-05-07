@@ -36,6 +36,7 @@ _TABLES_LOCK = threading.RLock()
 _TABLES_READY = False
 _ACTIVE_TABLES: list[dict[str, Any]] = []
 _TABLE_PROBED: set[int] = set()
+_FIELD_TYPES_BY_TABLE: dict[tuple[str, str], dict[str, Any]] = {}
 _SYNC_LOCK = threading.RLock()
 _REQUIRED_FIELD_NAMES = {"mid", "bvid", "title", "url", "owner_name", "owner_url"}
 _OPTIONAL_FIELD_NAMES = {"tag_1", "tag_2", "tag_3", "tag_4", "tag_5", "tag_status"}
@@ -199,12 +200,19 @@ def _table_field_names(token: str, app_token: str, table_id: str) -> set[str]:
         "table field probe failed",
     )
     names: set[str] = set()
+    field_types: dict[str, Any] = {}
     for item in data.get("items") or []:
         if not isinstance(item, dict):
             continue
         field_name = str(item.get("field_name") or item.get("name") or "").strip()
         if field_name:
             names.add(field_name)
+            field_type = item.get("type")
+            if field_type is None:
+                field_type = item.get("field_type")
+            if field_type is not None:
+                field_types[field_name] = field_type
+    _FIELD_TYPES_BY_TABLE[(app_token, table_id)] = field_types
     return names
 
 
@@ -227,6 +235,7 @@ def _table_payload(index: int, app_token: str, table_id: str, field_names: set[s
         "table_id": table_id,
         "count": count,
         "field_names": sorted(field_names),
+        "field_types": dict(_FIELD_TYPES_BY_TABLE.get((app_token, table_id), {})),
         "search_enabled": index == 1 or count > 0,
     }
 
@@ -356,6 +365,7 @@ def _bump_table_count(index: int, delta: int) -> None:
                     "table_id": table_id,
                     "count": int(delta),
                     "field_names": sorted(_WRITE_FIELD_NAMES),
+                    "field_types": {},
                     "search_enabled": True,
                 }
             )
@@ -443,7 +453,7 @@ def _search_lark_pool_table(
     return results
 
 
-def search_lark_pool_table(query: str, table_index: int, *, limit: int = 30) -> list[dict]:
+def search_lark_pool_table(query: str, table_index: int, *, limit: int = 80) -> list[dict]:
     normalized_query = str(query or "").strip()
     if not normalized_query:
         return []
@@ -505,7 +515,7 @@ def _cloudflare_search_items(payload: Any) -> list[Any]:
     return []
 
 
-def _search_cloudflare_pool(query: str, *, limit: int = 30) -> list[dict] | None:
+def _search_cloudflare_pool(query: str, *, limit: int = 80) -> list[dict] | None:
     normalized_query = str(query or "").strip()
     if not normalized_query:
         return []
@@ -541,7 +551,7 @@ def _search_cloudflare_pool(query: str, *, limit: int = 30) -> list[dict] | None
     return results
 
 
-def _search_lark_pool_legacy(query: str, *, limit: int = 30) -> list[dict]:
+def _search_lark_pool_legacy(query: str, *, limit: int = 80) -> list[dict]:
     normalized_query = str(query or "").strip()
     if not normalized_query:
         return []
@@ -558,7 +568,7 @@ def _search_lark_pool_legacy(query: str, *, limit: int = 30) -> list[dict]:
     return results
 
 
-def search_lark_pool(query: str, *, limit: int = 30) -> list[dict]:
+def search_lark_pool(query: str, *, limit: int = 80) -> list[dict]:
     normalized_query = str(query or "").strip()
     if not normalized_query:
         return []
@@ -657,6 +667,37 @@ def append_cloudflare_pool_entries(entries: list[dict]) -> dict:
     }
 
 
+def _is_number_field_type(field_type: Any) -> bool:
+    return str(field_type).strip().lower() in {"2", "number"}
+
+
+def _coerce_feishu_field_value(field_name: str, value: Any, field_type: Any = None) -> Any:
+    if value is None:
+        return None
+    text = str(value).strip() if not isinstance(value, (int, float)) else value
+    if text == "":
+        return None
+    if _is_number_field_type(field_type):
+        try:
+            number = float(text)
+        except (TypeError, ValueError):
+            return None
+        return int(number) if number.is_integer() else number
+    return value
+
+
+def _feishu_record_fields(entry: dict[str, Any], field_names: set[str], field_types: dict[str, Any]) -> dict[str, Any]:
+    fields: dict[str, Any] = {}
+    for key, value in entry.items():
+        if key not in field_names:
+            continue
+        coerced = _coerce_feishu_field_value(key, value, field_types.get(key))
+        if coerced is None:
+            continue
+        fields[key] = coerced
+    return fields
+
+
 def append_lark_pool_entries_to_lark(
     entries: list[dict],
     *,
@@ -686,10 +727,11 @@ def append_lark_pool_entries_to_lark(
             if capacity <= 0:
                 continue
             field_names = set(table.get("field_names") or _WRITE_FIELD_NAMES)
+            field_types = table.get("field_types") if isinstance(table.get("field_types"), dict) else {}
             while cursor < len(pending) and capacity > 0:
                 chunk = pending[cursor : cursor + min(_APPEND_CHUNK_SIZE, capacity)]
                 records = [
-                    {"fields": {key: value for key, value in entry.items() if key in field_names}}
+                    {"fields": _feishu_record_fields(entry, field_names, field_types)}
                     for entry in chunk
                 ]
                 _log_lark_request("bilikara pool append", {"records": records})

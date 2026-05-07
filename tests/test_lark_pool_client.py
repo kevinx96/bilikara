@@ -331,6 +331,7 @@ class LarkPoolClientTest(unittest.TestCase):
                         "table_id": "table2",
                         "count": 0,
                         "field_names": sorted(lark_pool._WRITE_FIELD_NAMES),
+                        "field_types": {"tag_status": 2, "mid": 2},
                     },
                 ],
             ),
@@ -344,6 +345,7 @@ class LarkPoolClientTest(unittest.TestCase):
                         "url": "https://www.bilibili.com/video/BVTAGGED",
                         "tag_1": "work",
                         "tag_4": "music",
+                        "tag_status": "1",
                     }
                 ],
                 only_table_index=2,
@@ -354,6 +356,8 @@ class LarkPoolClientTest(unittest.TestCase):
         self.assertIn("table2", posted_urls[0])
         self.assertEqual(posted_records[0]["fields"]["tag_1"], "work")
         self.assertEqual(posted_records[0]["fields"]["tag_4"], "music")
+        self.assertEqual(posted_records[0]["fields"]["tag_status"], 1)
+        self.assertNotIn("mid", posted_records[0]["fields"])
 
 
 if __name__ == "__main__":
