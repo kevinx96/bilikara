@@ -1314,13 +1314,54 @@ select:disabled {
   white-space: nowrap;
 }
 
-.lark-search-view {
-  display: grid;
-  gap: 12px;
+.remote-search-stage {
+  min-width: 0;
+  perspective: 1400px;
 }
 
-.lark-search-view.hidden {
+.remote-search-stage.hidden {
   display: none;
+}
+
+.remote-search-stage-inner {
+  display: grid;
+  min-width: 0;
+  transform-style: preserve-3d;
+  transition: transform 360ms ease;
+}
+
+.remote-search-stage.is-lark-view .remote-search-stage-inner {
+  transform: rotateY(-180deg);
+}
+
+.remote-search-face {
+  grid-area: 1 / 1;
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  backface-visibility: hidden;
+  pointer-events: none;
+}
+
+.remote-search-face-front {
+  pointer-events: auto;
+}
+
+.remote-search-face-lark {
+  transform: rotateY(-180deg);
+}
+
+.remote-search-stage.is-lark-view .remote-search-face-front {
+  pointer-events: none;
+}
+
+.remote-search-stage.is-lark-view .remote-search-face-lark {
+  pointer-events: auto;
+}
+
+.remote-search-stage:not(.is-lark-view):not(.is-flipping) .remote-search-face-lark,
+.remote-search-stage.is-lark-view:not(.is-flipping) .remote-search-face-front {
+  content-visibility: hidden;
 }
 
 .follow-browser {

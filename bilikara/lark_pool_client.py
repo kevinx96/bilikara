@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import threading
 import time
@@ -12,14 +13,14 @@ from typing import Any
 
 import bilikara.config as cfg
 
-APP_ID = "cli_a97321a5a7b89bde"
-APP_SECRET = "tTUE3SUe57v1YTvjLQGNAd8Hm4RHyJlf"
+APP_ID = os.environ.get("BILIKARA_LARK_APP_ID") or "cli_a97321a5a7b89bde"
+APP_SECRET = os.environ.get("BILIKARA_LARK_APP_SECRET") or "tTUE3SUe57v1YTvjLQGNAd8Hm4RHyJlf"
 BITABLE_TABLES = (
     ("FWDRbyK5daxV7Wsr04lc0nxhnuc", "tblsQ7K5sUo1BGLz"),
-    ("NxoQblT9TamM77sOcU5cAtMznnc", "tblxBaiTH7h1EoX0"),
-    ("Khdqb1bcDau0EqsryUNcbgNUnVc", "tblDVME8pevjWBJD"),
-    ("ONWQbyZZRaArhusSFEccF9F0n1g", "tblaGCllQB0QLWa0"),
-    ("VBUJbUzJBaI9LOs43sJcnbwDnU5", "tbl3Z8VKPhOTr7Ka"),
+    ("FWDRbyK5daxV7Wsr04lc0nxhnuc", "tbleRSQtkN6fc4CQ"),
+    ("FWDRbyK5daxV7Wsr04lc0nxhnuc", "tblyEUAEOtzDsr0U"),
+    ("FWDRbyK5daxV7Wsr04lc0nxhnuc", "tblrb1xohWsmJYOX"),
+    ("FWDRbyK5daxV7Wsr04lc0nxhnuc", "tblpv4h9rmd1dxbQ"),
 )
 
 _BASE_URL = "https://open.feishu.cn/open-apis"
@@ -32,10 +33,12 @@ _TOKEN_EXPIRES_AT = 0.0
 _TABLES_LOCK = threading.RLock()
 _TABLES_READY = False
 _ACTIVE_TABLES: list[dict[str, Any]] = []
+_TABLE_PROBED: set[int] = set()
 _SYNC_LOCK = threading.RLock()
 _REQUIRED_FIELD_NAMES = {"mid", "bvid", "title", "url", "owner_name", "owner_url"}
 _REQUIRED_SEARCH_FIELDS = {"bvid", "title", "url"}
 _DEBUG_LOGS = False
+_INVALID_VIDEO_TITLES = {"已失效视频"}
 
 
 class LarkPoolError(RuntimeError):
@@ -86,6 +89,16 @@ def _log_lark_request(label: str, payload: dict[str, Any]) -> None:
         return
     print(
         f"[bilikara:lark] {label} request: {json.dumps(payload, ensure_ascii=False)}",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def _log_lark_debug(label: str, payload: dict[str, Any]) -> None:
+    if not _DEBUG_LOGS:
+        return
+    print(
+        f"[bilikara:lark] {label}: {json.dumps(payload, ensure_ascii=False)}",
         file=sys.stderr,
         flush=True,
     )
@@ -152,8 +165,84 @@ def _table_record_count(token: str, app_token: str, table_id: str) -> int:
         return 0
 
 
+def _table_payload(index: int, app_token: str, table_id: str, field_names: set[str], count: int) -> dict[str, Any]:
+    return {
+        "index": index,
+        "app_token": app_token,
+        "table_id": table_id,
+        "count": count,
+        "field_names": sorted(field_names),
+        "search_enabled": index == 1 or count > 0,
+    }
+
+
+def _cache_active_table(table: dict[str, Any]) -> dict[str, Any]:
+    global _ACTIVE_TABLES
+    table_index = int(table.get("index") or 0)
+    _ACTIVE_TABLES = [cached for cached in _ACTIVE_TABLES if int(cached.get("index") or 0) != table_index]
+    _ACTIVE_TABLES.append(dict(table))
+    _ACTIVE_TABLES.sort(key=lambda cached: int(cached.get("index") or 0))
+    return dict(table)
+
+
+def _cached_active_table(table_index: int) -> dict[str, Any] | None:
+    for table in _ACTIVE_TABLES:
+        if int(table.get("index") or 0) == table_index:
+            return dict(table)
+    return None
+
+
+def _active_table(table_index: int) -> dict[str, Any] | None:
+    global _TABLE_PROBED
+    normalized_index = int(table_index)
+    with _TABLES_LOCK:
+        if _TABLES_READY or normalized_index in _TABLE_PROBED:
+            return _cached_active_table(normalized_index)
+        if normalized_index < 1 or normalized_index > len(BITABLE_TABLES):
+            return None
+
+        token = _tenant_access_token()
+        app_token, table_id = BITABLE_TABLES[normalized_index - 1]
+        try:
+            field_names = _table_field_names(token, app_token, table_id)
+            _log_lark_debug(
+                "bilikara table probe fields",
+                {
+                    "index": normalized_index,
+                    "table_id": table_id,
+                    "fields": sorted(field_names),
+                    "search_fields_ready": _REQUIRED_SEARCH_FIELDS.issubset(field_names),
+                },
+            )
+            if not _REQUIRED_SEARCH_FIELDS.issubset(field_names):
+                _TABLE_PROBED.add(normalized_index)
+                return None
+            count = _table_record_count(token, app_token, table_id)
+            _log_lark_debug(
+                "bilikara table probe count",
+                {
+                    "index": normalized_index,
+                    "table_id": table_id,
+                    "count": count,
+                    "search_enabled": normalized_index == 1 or count > 0,
+                },
+            )
+        except LarkPoolError:
+            if normalized_index == 1:
+                raise
+            _log_lark_debug(
+                "bilikara table probe failed",
+                {"index": normalized_index, "table_id": table_id},
+            )
+            _TABLE_PROBED.add(normalized_index)
+            return None
+
+        _TABLE_PROBED.add(normalized_index)
+        return _cache_active_table(_table_payload(normalized_index, app_token, table_id, field_names, count))
+
+
 def _active_tables() -> list[dict[str, Any]]:
-    global _TABLES_READY, _ACTIVE_TABLES
+    global _TABLES_READY, _ACTIVE_TABLES, _TABLE_PROBED
     with _TABLES_LOCK:
         if _TABLES_READY:
             return [dict(table) for table in _ACTIVE_TABLES]
@@ -162,24 +251,35 @@ def _active_tables() -> list[dict[str, Any]]:
         for index, (app_token, table_id) in enumerate(BITABLE_TABLES, start=1):
             try:
                 field_names = _table_field_names(token, app_token, table_id)
+                _log_lark_debug(
+                    "bilikara table probe fields",
+                    {
+                        "index": index,
+                        "table_id": table_id,
+                        "fields": sorted(field_names),
+                        "search_fields_ready": _REQUIRED_SEARCH_FIELDS.issubset(field_names),
+                    },
+                )
                 if not _REQUIRED_SEARCH_FIELDS.issubset(field_names):
                     continue
                 count = _table_record_count(token, app_token, table_id)
+                _log_lark_debug(
+                    "bilikara table probe count",
+                    {
+                        "index": index,
+                        "table_id": table_id,
+                        "count": count,
+                        "search_enabled": index == 1 or count > 0,
+                    },
+                )
             except LarkPoolError:
                 if index == 1:
                     raise
+                _log_lark_debug("bilikara table probe failed", {"index": index, "table_id": table_id})
                 continue
-            active.append(
-                {
-                    "index": index,
-                    "app_token": app_token,
-                    "table_id": table_id,
-                    "count": count,
-                    "field_names": sorted(field_names),
-                    "search_enabled": index == 1 or count > 1,
-                }
-            )
+            active.append(_table_payload(index, app_token, table_id, field_names, count))
         _ACTIVE_TABLES = active
+        _TABLE_PROBED = set(range(1, len(BITABLE_TABLES) + 1))
         _TABLES_READY = True
         return [dict(table) for table in _ACTIVE_TABLES]
 
@@ -190,8 +290,21 @@ def _bump_table_count(index: int, delta: int) -> None:
             if table.get("index") == index:
                 updated_count = int(table.get("count") or 0) + int(delta)
                 table["count"] = updated_count
-                table["search_enabled"] = int(table.get("index") or 0) == 1 or updated_count > 1
-                break
+                table["search_enabled"] = int(table.get("index") or 0) == 1 or updated_count > 0
+                return
+        if 1 <= int(index) <= len(BITABLE_TABLES):
+            app_token, table_id = BITABLE_TABLES[int(index) - 1]
+            _ACTIVE_TABLES.append(
+                {
+                    "index": int(index),
+                    "app_token": app_token,
+                    "table_id": table_id,
+                    "count": int(delta),
+                    "field_names": sorted(_REQUIRED_FIELD_NAMES),
+                    "search_enabled": True,
+                }
+            )
+            _TABLE_PROBED.add(int(index))
 
 
 def _field_text(value: Any) -> str:
@@ -236,6 +349,60 @@ def _record_to_item(record: dict) -> dict | None:
     }
 
 
+def _search_lark_pool_table(
+    query: str,
+    table: dict[str, Any],
+    *,
+    token: str,
+    limit: int,
+    seen_bvids: set[str] | None = None,
+) -> list[dict]:
+    normalized_query = str(query or "").strip()
+    if not normalized_query:
+        return []
+    if table.get("search_enabled", True) is False:
+        return []
+    results: list[dict] = []
+    seen = seen_bvids if seen_bvids is not None else set()
+    payload = {
+        "filter": {
+            "conjunction": "and",
+            "conditions": [
+                {"field_name": "title", "operator": "contains", "value": [normalized_query]},
+            ],
+        },
+    }
+    _log_lark_request(f"bilikara search table {table.get('index')}", payload)
+    data = _require_success(
+        _post_json(_records_url(table["app_token"], table["table_id"], "/search"), payload, token=token),
+        "bilikara search failed",
+    )
+    for record in data.get("items") or []:
+        item = _record_to_item(record)
+        if not item or item["bvid"] in seen:
+            continue
+        seen.add(item["bvid"])
+        results.append(item)
+        if len(results) >= max(1, int(limit)):
+            return results
+    return results
+
+
+def search_lark_pool_table(query: str, table_index: int, *, limit: int = 30) -> list[dict]:
+    normalized_query = str(query or "").strip()
+    if not normalized_query:
+        return []
+    try:
+        normalized_index = int(table_index)
+    except (TypeError, ValueError):
+        return []
+    table = _active_table(normalized_index)
+    if table is None:
+        return []
+    token = _tenant_access_token()
+    return _search_lark_pool_table(normalized_query, table, token=token, limit=limit)
+
+
 def search_lark_pool(query: str, *, limit: int = 30) -> list[dict]:
     normalized_query = str(query or "").strip()
     if not normalized_query:
@@ -244,29 +411,12 @@ def search_lark_pool(query: str, *, limit: int = 30) -> list[dict]:
     results: list[dict] = []
     seen_bvids: set[str] = set()
     for table in _active_tables():
-        if table.get("search_enabled", True) is False:
-            continue
-        payload = {
-            "filter": {
-                "conjunction": "and",
-                "conditions": [
-                    {"field_name": "title", "operator": "contains", "value": [normalized_query]},
-                ],
-            },
-        }
-        _log_lark_request(f"bilikara search table {table.get('index')}", payload)
-        data = _require_success(
-            _post_json(_records_url(table["app_token"], table["table_id"], "/search"), payload, token=token),
-            "bilikara search failed",
+        remaining = max(1, int(limit)) - len(results)
+        if remaining <= 0:
+            break
+        results.extend(
+            _search_lark_pool_table(normalized_query, table, token=token, limit=remaining, seen_bvids=seen_bvids)
         )
-        for record in data.get("items") or []:
-            item = _record_to_item(record)
-            if not item or item["bvid"] in seen_bvids:
-                continue
-            seen_bvids.add(item["bvid"])
-            results.append(item)
-            if len(results) >= max(1, int(limit)):
-                return results
     return results
 
 
@@ -293,6 +443,8 @@ def normalize_pool_entry(entry: dict) -> dict | None:
     bvid = str(entry.get("bvid") or "").strip()
     title = str(entry.get("title") or "").strip()
     url = str(entry.get("url") or "").strip()
+    if title in _INVALID_VIDEO_TITLES:
+        return None
     if not url and bvid:
         url = f"https://www.bilibili.com/video/{bvid}"
     if not bvid or not title or not url:

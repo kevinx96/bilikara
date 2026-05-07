@@ -18,6 +18,9 @@ const fullscreenRequestToastMs = 4200;
 const fullscreenRequestToastFadeMs = 500;
 const localAdvanceOverlayFadeMs = 500;
 const localAdvanceOverlayMaxRows = 5;
+const larkSearchTableCount = 5;
+const smokeTestBypassPlayerFullscreen = new URLSearchParams(window.location.search)
+  .has("bilikara_smoke_bypass_fullscreen");
 const storageKeys = {
   playerVolume: "bilikara.player.volume",
   playerMuted: "bilikara.player.muted",
@@ -120,7 +123,9 @@ const state = {
   searchCookieVisible: false,
   searchLarkVisible: false,
   larkSearchLoading: false,
+  larkSearchSeq: 0,
   searchStageView: "",
+  searchStageAngle: 0,
   searchFlipTimer: null,
   searchFlipFrame: null,
   followBrowseData: null,
@@ -258,6 +263,7 @@ const elements = {
   searchCookieToggle: document.getElementById("search-cookie-toggle"),
   searchLarkToggle: document.getElementById("search-lark-toggle"),
   searchStage: document.getElementById("search-stage"),
+  searchStageInner: document.getElementById("search-stage-inner"),
   searchMainView: document.getElementById("search-main-view"),
   searchCookieView: document.getElementById("search-cookie-view"),
   searchLarkView: document.getElementById("search-lark-view"),
@@ -294,6 +300,9 @@ const elements = {
   larkSearchForm: document.getElementById("lark-search-form"),
   larkSearchQuery: document.getElementById("lark-search-query"),
   larkSearchButton: document.getElementById("lark-search-button"),
+  larkSearchHitboxForm: document.getElementById("lark-search-hitbox-form"),
+  larkSearchHitboxQuery: document.getElementById("lark-search-hitbox-query"),
+  larkSearchHitboxButton: document.getElementById("lark-search-hitbox-button"),
   larkSearchMessage: document.getElementById("lark-search-message"),
   larkSearchResults: document.getElementById("lark-search-results"),
   gatchaUidForm: document.getElementById("gatcha-uid-form"),
@@ -492,6 +501,10 @@ function fullscreenElement() {
 
 function isPlayerPanelFullscreen() {
   return fullscreenElement() === elements.playerPanel;
+}
+
+function isPlayerPanelFullscreenForTransition() {
+  return isPlayerPanelFullscreen() || smokeTestBypassPlayerFullscreen;
 }
 
 function supportsPlayerFullscreen() {
@@ -918,7 +931,23 @@ async function searchLarkPool(query) {
   });
   const payload = await response.json();
   if (!response.ok || !payload.ok) {
-    throw new Error(payload.error || "bilikara搜索失败");
+    throw new Error(payload.error || "bilikara 搜索失败");
+  }
+  return Array.isArray(payload.data?.items) ? payload.data.items : [];
+}
+
+async function searchLarkPoolTable(query, tableIndex) {
+  const normalizedQuery = String(query || "").trim();
+  const params = new URLSearchParams();
+  params.set("q", normalizedQuery);
+  params.set("table", String(tableIndex));
+  const response = await fetch(`/api/lark/search?${params.toString()}`, {
+    cache: "no-store",
+    headers: clientHeaders(),
+  });
+  const payload = await response.json();
+  if (!response.ok || !payload.ok) {
+    throw new Error(payload.error || "bilikara 搜索失败");
   }
   return Array.isArray(payload.data?.items) ? payload.data.items : [];
 }
@@ -994,6 +1023,7 @@ async function confirmGatchaUidAdd(intent) {
     if (elements.gatchaUidInput) {
       elements.gatchaUidInput.value = "";
     }
+    await refreshFollowBrowseAfterGatchaUidAdd(result?.uid || intent.uid);
   } catch (error) {
     setGatchaUidMessage(error.message, true);
   } finally {
@@ -1021,6 +1051,43 @@ function renderSearchResultItems(container, items, emptyText = "No cached matche
     container.appendChild(empty);
     return;
   }
+
+  items.forEach((item) => {
+    const row = document.createElement("div");
+    row.className = "search-result-item";
+
+    const meta = document.createElement("div");
+    meta.className = "search-result-meta";
+
+    const title = document.createElement("div");
+    title.className = "search-result-title";
+    title.textContent = String(item.title || "");
+
+    const url = document.createElement("div");
+    url.className = "search-result-url";
+    url.textContent = String(item.bvid || "");
+
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "next-button";
+    button.dataset.url = String(item.url || "");
+    button.textContent = "点歌";
+
+    meta.append(title, url);
+    row.append(meta, button);
+    container.appendChild(row);
+  });
+}
+
+function appendSearchResultItems(container, items) {
+  if (!container || !items.length) {
+    return;
+  }
+  const existingEmpty = container.querySelector(".search-empty");
+  if (existingEmpty) {
+    existingEmpty.remove();
+  }
+  container.classList.remove("hidden");
 
   items.forEach((item) => {
     const row = document.createElement("div");
@@ -1178,6 +1245,13 @@ async function loadFollowBrowse({ uid = state.followBrowseSelectedUid, query = "
   }
 }
 
+async function refreshFollowBrowseAfterGatchaUidAdd(uid = "") {
+  state.followBrowseRenderSignature = "";
+  const currentUid = String(state.followBrowseSelectedUid || "").trim();
+  const nextUid = currentUid || String(uid || "").trim();
+  await loadFollowBrowse({ uid: nextUid, query: "", keepQuery: false });
+}
+
 async function handleGatchaDraw() {
   setGatchaMessage("正在连接 B 站寻找幸运投稿...");
   try {
@@ -1223,6 +1297,20 @@ function setLarkSearchMessage(message, isError = false) {
   elements.larkSearchMessage.classList.toggle("is-error", Boolean(isError));
 }
 
+function syncLarkSearchInputs(value, source = "") {
+  const nextValue = String(value || "");
+  if (source !== "main" && elements.larkSearchQuery && elements.larkSearchQuery.value !== nextValue) {
+    elements.larkSearchQuery.value = nextValue;
+  }
+  if (
+    source !== "hitbox" &&
+    elements.larkSearchHitboxQuery &&
+    elements.larkSearchHitboxQuery.value !== nextValue
+  ) {
+    elements.larkSearchHitboxQuery.value = nextValue;
+  }
+}
+
 function setGatchaUidMessage(message, isError = false) {
   if (!elements.gatchaUidMessage) {
     return;
@@ -1241,6 +1329,7 @@ function gatchaTaskBusyMessage() {
 
 function syncSearchStageView(view) {
   const nextView = view || "search";
+  const previousView = state.searchStageView || "search";
   const isInitialRender = !state.searchStageView;
   if (state.searchStageView === nextView) {
     return;
@@ -1257,22 +1346,45 @@ function syncSearchStageView(view) {
   }
 
   if (isInitialRender) {
+    const initialAngles = { search: 0, browse: -120, lark: 120 };
+    state.searchStageAngle = initialAngles[nextView] ?? 0;
+    if (elements.searchStageInner) {
+      elements.searchStageInner.style.transform = `rotateY(${state.searchStageAngle}deg)`;
+    }
     setClassToggle(elements.searchStage, "is-cookie-view", nextView === "browse");
     setClassToggle(elements.searchStage, "is-lark-view", nextView === "lark");
     elements.searchStage?.classList.remove("is-flipping");
+    elements.searchStage?.classList.remove("is-flip-involving-cookie", "is-flip-involving-lark");
     return;
+  }
+
+  const applySearchStageClass = (activeView) => {
+    setClassToggle(elements.searchStage, "is-cookie-view", activeView === "browse");
+    setClassToggle(elements.searchStage, "is-lark-view", activeView === "lark");
+  };
+  const clearFlip = () => {
+    elements.searchStage?.classList.remove("is-flipping");
+    state.searchFlipTimer = null;
+  };
+  const searchViewOrder = ["search", "browse", "lark"];
+  const previousIndex = searchViewOrder.indexOf(previousView);
+  const nextIndex = searchViewOrder.indexOf(nextView);
+  const forwardSteps = (nextIndex - previousIndex + searchViewOrder.length) % searchViewOrder.length;
+  if (forwardSteps === 1) {
+    state.searchStageAngle -= 120;
+  } else if (forwardSteps === 2) {
+    state.searchStageAngle += 120;
   }
 
   elements.searchStage?.classList.add("is-flipping");
   state.searchFlipFrame = window.requestAnimationFrame(() => {
     state.searchFlipFrame = null;
-    setClassToggle(elements.searchStage, "is-cookie-view", nextView === "browse");
-    setClassToggle(elements.searchStage, "is-lark-view", nextView === "lark");
+    if (elements.searchStageInner) {
+      elements.searchStageInner.style.transform = `rotateY(${state.searchStageAngle}deg)`;
+    }
+    applySearchStageClass(nextView);
   });
-  state.searchFlipTimer = window.setTimeout(() => {
-    elements.searchStage?.classList.remove("is-flipping");
-    state.searchFlipTimer = null;
-  }, 440);
+  state.searchFlipTimer = window.setTimeout(clearFlip, 440);
 }
 
 function renderSearchCookieFace() {
@@ -1298,9 +1410,9 @@ function renderSearchCookieFace() {
   setTextContent(elements.searchCookieToggle, showCookie ? "返回搜索" : "关注浏览");
   if (showLark) {
     setTextContent(elements.searchTag, "Bilikara Search");
-    setTextContent(elements.searchTitle, "bilikara搜索");
+    setTextContent(elements.searchTitle, "bilikara 搜索");
   }
-  setTextContent(elements.searchLarkToggle, showLark ? "返回搜索" : "bilikara搜索");
+  setTextContent(elements.searchLarkToggle, showLark ? "返回搜索" : "bilikara 搜索");
   if (elements.searchCookieToggle?.getAttribute("aria-pressed") !== String(showCookie)) {
     elements.searchCookieToggle.setAttribute("aria-pressed", String(showCookie));
   }
@@ -2440,7 +2552,7 @@ function hidePlayerDelayOverlay() {
 }
 
 function showSongTransitionOverlayForData(data) {
-  if (!data || !isPlayerPanelFullscreen()) {
+  if (!data || !isPlayerPanelFullscreenForTransition()) {
     return;
   }
   const playlist = Array.isArray(data.playlist) ? data.playlist : [];
@@ -2468,7 +2580,7 @@ function showSongTransitionOverlayForData(data) {
 }
 
 function maybeShowSongTransitionOverlay(previousData, nextData, { force = false } = {}) {
-  if (!nextData || !isPlayerPanelFullscreen()) {
+  if (!nextData || !isPlayerPanelFullscreenForTransition()) {
     return;
   }
   const previousId = currentItemIdFromData(previousData);
@@ -2577,7 +2689,7 @@ function updateLocalAdvanceDelayOverlay() {
   const progress = Math.max(0, Math.min(1, remainingMs / totalDurationMs));
   overlay.style.setProperty("--delay-ring-offset", String(119.38 * (1 - progress)));
   renderLocalAdvanceDelayQueue(overlay);
-  if (state.localAdvanceDelayDeadline > 0 && isPlayerPanelFullscreen()) {
+  if (state.localAdvanceDelayDeadline > 0 && isPlayerPanelFullscreenForTransition()) {
     setPlayerDelayOverlayVisible(overlay);
   } else {
     hidePlayerDelayOverlay();
@@ -4869,7 +4981,7 @@ async function handleLocalPlaybackEnded() {
     return;
   }
   const delaySeconds = currentSongAdvanceDelaySeconds();
-  if (!isPlayerPanelFullscreen() || delaySeconds <= 0 || !queuedNextItem()) {
+  if (!isPlayerPanelFullscreenForTransition() || delaySeconds <= 0 || !queuedNextItem()) {
     await advanceLocalPlayerNow();
     return;
   }
@@ -5100,9 +5212,12 @@ elements.searchResults.addEventListener("click", async (event) => {
   }
 });
 
-elements.larkSearchForm?.addEventListener("submit", async (event) => {
+async function handleLarkSearchSubmit(event) {
   event.preventDefault();
-  const query = String(elements.larkSearchQuery?.value || "").trim();
+  const usingHitbox = event.currentTarget === elements.larkSearchHitboxForm;
+  const querySource = usingHitbox ? elements.larkSearchHitboxQuery : elements.larkSearchQuery;
+  const query = String(querySource?.value || "").trim();
+  syncLarkSearchInputs(query, usingHitbox ? "hitbox" : "main");
   if (!query) {
     renderSearchResultItems(elements.larkSearchResults, []);
     setLarkSearchMessage("请输入搜索关键词。", true);
@@ -5113,21 +5228,82 @@ elements.larkSearchForm?.addEventListener("submit", async (event) => {
   if (elements.larkSearchButton) {
     elements.larkSearchButton.disabled = true;
   }
-  setLarkSearchMessage("正在搜索 bilikara 数据库...(第一次搜索需要3-15s启动)");
+  if (elements.larkSearchHitboxButton) {
+    elements.larkSearchHitboxButton.disabled = true;
+  }
+  const searchSeq = state.larkSearchSeq + 1;
+  state.larkSearchSeq = searchSeq;
+  const seenBvids = new Set();
+  const collectedItems = [];
+  let partialFailure = false;
+  if (elements.larkSearchResults) {
+    elements.larkSearchResults.innerHTML = "";
+    elements.larkSearchResults.classList.remove("hidden");
+  }
+  setLarkSearchMessage("正在搜索 bilikara 数据库...(联网搜索需要3-15s不等)");
   try {
-    const items = await searchLarkPool(query);
-    renderSearchResultItems(elements.larkSearchResults, items, "bilikara 数据库里没有匹配结果。");
-    setLarkSearchMessage(items.length ? `搜索到 ${items.length} 条共享结果。` : "bilikara 数据库里没有匹配结果。");
+    for (let tableIndex = 1; tableIndex <= larkSearchTableCount; tableIndex += 1) {
+      let tableItems = [];
+      try {
+        tableItems = await searchLarkPoolTable(query, tableIndex);
+      } catch (error) {
+        partialFailure = true;
+        continue;
+      }
+      if (state.larkSearchSeq !== searchSeq) {
+        return;
+      }
+      const freshItems = tableItems.filter((item) => {
+        const bvid = String(item?.bvid || "").trim();
+        if (!bvid || seenBvids.has(bvid)) {
+          return false;
+        }
+        seenBvids.add(bvid);
+        return true;
+      });
+      if (freshItems.length) {
+        collectedItems.push(...freshItems);
+        appendSearchResultItems(elements.larkSearchResults, freshItems);
+      }
+    }
+    if (state.larkSearchSeq !== searchSeq) {
+      return;
+    }
+    if (!collectedItems.length) {
+      renderSearchResultItems(elements.larkSearchResults, [], "bilikara 数据库里没有匹配结果。");
+    }
+    setLarkSearchMessage(
+      collectedItems.length
+        ? `搜索到 ${collectedItems.length} 条共享结果${partialFailure ? "，部分表搜索失败" : ""}。`
+        : partialFailure
+          ? "部分表搜索失败，bilikara 数据库里暂时没有匹配结果。"
+          : "bilikara 数据库里没有匹配结果。",
+      partialFailure && !collectedItems.length,
+    );
   } catch (error) {
     renderSearchResultItems(elements.larkSearchResults, []);
     setLarkSearchMessage(error.message, true);
   } finally {
-    state.larkSearchLoading = false;
-    if (elements.larkSearchButton) {
-      elements.larkSearchButton.disabled = false;
+    if (state.larkSearchSeq === searchSeq) {
+      state.larkSearchLoading = false;
+      if (elements.larkSearchButton) {
+        elements.larkSearchButton.disabled = false;
+      }
+      if (elements.larkSearchHitboxButton) {
+        elements.larkSearchHitboxButton.disabled = false;
+      }
+      renderSearchCookieFace();
     }
-    renderSearchCookieFace();
   }
+}
+
+elements.larkSearchForm?.addEventListener("submit", handleLarkSearchSubmit);
+elements.larkSearchHitboxForm?.addEventListener("submit", handleLarkSearchSubmit);
+elements.larkSearchQuery?.addEventListener("input", () => {
+  syncLarkSearchInputs(elements.larkSearchQuery.value, "main");
+});
+elements.larkSearchHitboxQuery?.addEventListener("input", () => {
+  syncLarkSearchInputs(elements.larkSearchHitboxQuery.value, "hitbox");
 });
 
 elements.larkSearchResults?.addEventListener("click", async (event) => {

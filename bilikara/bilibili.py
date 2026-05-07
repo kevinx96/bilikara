@@ -380,6 +380,46 @@ def _save_gatcha_cache(cache_payload: dict) -> None:
     temp_path.replace(_GATCHA_CACHE_FILE)
 
 
+def _save_gatcha_cache_uid(cache_payload: dict, mid: str) -> None:
+    current_payload = _load_gatcha_cache(reset_legacy=False)
+    current_uids = current_payload.get("uids") if isinstance(current_payload, dict) else {}
+    if not isinstance(current_uids, dict):
+        current_uids = {}
+    payload_uids = cache_payload.get("uids") if isinstance(cache_payload, dict) else {}
+    if not isinstance(payload_uids, dict):
+        payload_uids = {}
+
+    current_profiles = current_payload.get("profiles") if isinstance(current_payload, dict) else {}
+    if not isinstance(current_profiles, dict):
+        current_profiles = {}
+    payload_profiles = cache_payload.get("profiles") if isinstance(cache_payload, dict) else {}
+    if not isinstance(payload_profiles, dict):
+        payload_profiles = {}
+
+    merged_uids = dict(current_uids)
+    normalized_mid = str(mid)
+    merged_uids[normalized_mid] = _dedupe_gatcha_entries(payload_uids.get(normalized_mid, []))
+
+    merged_profiles = {str(uid): dict(profile) for uid, profile in current_profiles.items() if isinstance(profile, dict)}
+    for uid, profile in payload_profiles.items():
+        uid_key = str(uid)
+        if uid_key == normalized_mid or uid_key not in merged_profiles:
+            merged_profiles[uid_key] = dict(profile) if isinstance(profile, dict) else profile
+
+    try:
+        updated_at = max(float(current_payload.get("updated_at") or 0), float(cache_payload.get("updated_at") or 0))
+    except (TypeError, ValueError):
+        updated_at = time.time()
+    _save_gatcha_cache(
+        {
+            "schema_version": _GATCHA_CACHE_SCHEMA_VERSION,
+            "uids": merged_uids,
+            "profiles": merged_profiles,
+            "updated_at": updated_at,
+        }
+    )
+
+
 def _empty_gatcha_favlist_payload() -> dict:
     return {"schema_version": _GATCHA_FAVLIST_SCHEMA_VERSION, "uid": "", "folders": [], "items": [], "updated_at": 0}
 
@@ -994,7 +1034,7 @@ def _refresh_gatcha_uid_cache(cache_payload: dict, mid: str, *, force_full: bool
         cache_payload["uids"][mid] = merged_entries
         cache_payload["updated_at"] = time.time()
         with _GATCHA_CACHE_LOCK:
-            _save_gatcha_cache(cache_payload)
+            _save_gatcha_cache_uid(cache_payload, mid)
         return {
             "uid": mid,
             "mode": "incremental",
@@ -1005,19 +1045,19 @@ def _refresh_gatcha_uid_cache(cache_payload: dict, mid: str, *, force_full: bool
     cache_payload["uids"][mid] = []
     cache_payload["updated_at"] = time.time()
     with _GATCHA_CACHE_LOCK:
-        _save_gatcha_cache(cache_payload)
+        _save_gatcha_cache_uid(cache_payload, mid)
 
     def _save_mid_progress(entries: list[dict]) -> None:
         cache_payload["uids"][mid] = _dedupe_gatcha_entries(entries)
         cache_payload["updated_at"] = time.time()
         with _GATCHA_CACHE_LOCK:
-            _save_gatcha_cache(cache_payload)
+            _save_gatcha_cache_uid(cache_payload, mid)
 
     fetched_entries = _fetch_gatcha_videos_for_uid(mid, on_progress=_save_mid_progress)
     cache_payload["uids"][mid] = _dedupe_gatcha_entries(fetched_entries)
     cache_payload["updated_at"] = time.time()
     with _GATCHA_CACHE_LOCK:
-        _save_gatcha_cache(cache_payload)
+        _save_gatcha_cache_uid(cache_payload, mid)
     return {
         "uid": mid,
         "mode": "full",
@@ -1073,12 +1113,26 @@ def refresh_gatcha_cache_in_background(
     on_start: callable | None = None,
     on_done: callable | None = None,
     use_global_lock: bool = True,
+    upload_default_uids_to_lark: bool = True,
 ) -> bool:
     if use_global_lock:
         if not _GATCHA_REFRESH_LOCK.acquire(blocking=False):
             return False
         if on_start is not None:
             on_start()
+
+    cached_default_uids_before_refresh: set[str] = set()
+    if not upload_default_uids_to_lark:
+        default_uids = set(_default_gatcha_uids())
+        with _GATCHA_CACHE_LOCK:
+            previous_cache_payload = _load_gatcha_cache(reset_legacy=False)
+        previous_uid_entries = previous_cache_payload.get("uids") if isinstance(previous_cache_payload, dict) else {}
+        if isinstance(previous_uid_entries, dict):
+            cached_default_uids_before_refresh = {
+                uid
+                for uid in default_uids
+                if isinstance(previous_uid_entries.get(uid), list) and previous_uid_entries.get(uid)
+            }
 
     def _worker() -> None:
         cache_payload: dict | None = None
@@ -1092,7 +1146,10 @@ def refresh_gatcha_cache_in_background(
                 if on_done is not None:
                     on_done()
         if cache_payload is not None:
-            _append_lark_pool_entries_async(_gatcha_cache_payload_entries(cache_payload))
+            excluded_uids = set()
+            if not upload_default_uids_to_lark:
+                excluded_uids = set(_default_gatcha_uids()) - cached_default_uids_before_refresh
+            _append_lark_pool_entries_async(_gatcha_cache_payload_entries(cache_payload, exclude_uids=excluded_uids))
 
     threading.Thread(target=_worker, daemon=True, name="gatcha-cache-refresh").start()
     return True
@@ -1208,15 +1265,18 @@ def _local_gatcha_candidates_by_uid() -> dict[str, list[dict]]:
     return grouped_candidates
 
 
-def _gatcha_cache_payload_entries(cache_payload: dict) -> list[dict]:
+def _gatcha_cache_payload_entries(cache_payload: dict, *, exclude_uids: set[str] | None = None) -> list[dict]:
     uid_entries = cache_payload.get("uids") if isinstance(cache_payload, dict) else {}
     if not isinstance(uid_entries, dict):
         return []
     profiles = cache_payload.get("profiles") if isinstance(cache_payload, dict) else {}
     if not isinstance(profiles, dict):
         profiles = {}
+    excluded = {str(uid).strip() for uid in (exclude_uids or set()) if str(uid).strip()}
     entries: list[dict] = []
     for mid, raw_entries in uid_entries.items():
+        if str(mid).strip() in excluded:
+            continue
         if not isinstance(raw_entries, list):
             continue
         profile = profiles.get(str(mid)) if isinstance(profiles.get(str(mid)), dict) else {}

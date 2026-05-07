@@ -438,13 +438,13 @@
                       关注浏览
                     </button>
                     <button type="button" id="search-lark-toggle" class="toolbar-button ghost search-lark-toggle">
-                      bilikara搜索
+                      bilikara 搜索
                     </button>
                   </div>
                 </div>
 
                 <div id="search-stage" class="search-stage">
-                  <div class="search-stage-inner">
+                  <div id="search-stage-inner" class="search-stage-inner">
                     <div id="search-main-view" class="search-face search-face-front">
                       <form id="search-form" class="search-inputs">
                         <div class="input-group">
@@ -494,6 +494,12 @@
                       <div id="lark-search-results" class="search-results hidden"></div>
                     </div>
                   </div>
+                  <form id="lark-search-hitbox-form" class="search-inputs lark-search-hitbox" aria-label="bilikara 搜索">
+                    <div class="input-group">
+                      <input type="text" id="lark-search-hitbox-query" autocomplete="off" tabindex="-1">
+                    </div>
+                    <button type="submit" id="lark-search-hitbox-button" class="next-button" tabindex="-1">搜索</button>
+                  </form>
                 </div>
               </div>
             </section>
