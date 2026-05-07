@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import queue
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -332,6 +333,83 @@ class CacheManagerPolicyTest(unittest.TestCase):
                     self.assertEqual(manager.cache_interrupted_messages["song-b"], "等待当前歌曲重新下载")
                     enqueue_front_mock.assert_called_once_with("song-a", requeue_after="song-b")
                     terminate_mock.assert_called_once_with(fake_process)
+            finally:
+                manager.shutdown()
+
+    def test_prioritize_cache_window_reorders_pending_queue_by_play_order(self):
+        with patch("bilikara.cache.CACHE_DIR", self.cache_dir), patch.object(
+            CacheManager,
+            "_worker_loop",
+            lambda self: None,
+        ):
+            manager = CacheManager(self.store, max_cache_items=3)
+            try:
+                self.store.add_item(self.make_item("song-a"), requester_name="cache-test-user")
+                self.store.add_item(self.make_item("song-b"), requester_name="cache-test-user")
+                self.store.add_item(self.make_item("song-c"), requester_name="cache-test-user")
+                with manager.lock:
+                    manager.desired_ids = {"song-a", "song-b", "song-c"}
+                    manager.pending_ids = {"song-a", "song-b", "song-c"}
+                    for item_id in ["song-c", "song-b", "song-a"]:
+                        manager.tasks.put(item_id)
+
+                manager._prioritize_cache_window(
+                    self.store.list_items(),
+                    {"song-a", "song-b", "song-c"},
+                )
+
+                queued_ids = []
+                while True:
+                    try:
+                        queued_ids.append(manager.tasks.get_nowait())
+                    except queue.Empty:
+                        break
+                self.assertEqual(queued_ids, ["song-a", "song-b", "song-c"])
+            finally:
+                manager.shutdown()
+
+    def test_prioritize_cache_window_preempts_lower_priority_active_item(self):
+        with patch("bilikara.cache.CACHE_DIR", self.cache_dir), patch.object(
+            CacheManager,
+            "_worker_loop",
+            lambda self: None,
+        ):
+            manager = CacheManager(self.store, max_cache_items=3)
+            try:
+                self.store.add_item(self.make_item("song-a"), requester_name="cache-test-user")
+                self.store.add_item(self.make_item("song-b"), requester_name="cache-test-user")
+                self.store.add_item(self.make_item("song-c"), requester_name="cache-test-user")
+                fake_process = SimpleNamespace(
+                    poll=lambda: None,
+                    terminate=lambda: None,
+                    wait=lambda timeout=None: None,
+                    kill=lambda: None,
+                )
+                with manager.lock:
+                    manager.desired_ids = {"song-a", "song-b", "song-c"}
+                    manager.pending_ids = {"song-a", "song-b", "song-c"}
+                    manager.active_item_id = "song-b"
+                    manager.active_process = fake_process
+
+                with patch.object(manager, "_terminate_process") as terminate_mock:
+                    manager._prioritize_cache_window(
+                        self.store.list_items(),
+                        {"song-a", "song-b", "song-c"},
+                    )
+
+                self.assertEqual(
+                    manager.cache_interrupted_messages["song-b"],
+                    "等待优先缓存: title-song-a - P1",
+                )
+                terminate_mock.assert_called_once_with(fake_process)
+                self.assertIn("song-b", manager.requeued_active_ids)
+                queued_ids = []
+                while True:
+                    try:
+                        queued_ids.append(manager.tasks.get_nowait())
+                    except queue.Empty:
+                        break
+                self.assertEqual(queued_ids, ["song-a", "song-b", "song-c"])
             finally:
                 manager.shutdown()
 

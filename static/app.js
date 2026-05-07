@@ -2339,6 +2339,7 @@ function ensurePlayerDelayOverlay() {
   overlay = document.createElement("div");
   overlay.className = "player-delay-overlay hidden";
   overlay.setAttribute("aria-live", "polite");
+  overlay.setAttribute("aria-hidden", "true");
   overlay.innerHTML = `
     <div class="player-delay-card">
       <div class="player-delay-head">
@@ -2383,10 +2384,27 @@ function setPlayerDelayOverlayVisible(overlay) {
     window.clearTimeout(state.localAdvanceOverlayHideTimer);
     state.localAdvanceOverlayHideTimer = null;
   }
+  if (
+    !overlay.classList.contains("hidden")
+    && (
+      overlay.classList.contains("is-visible")
+      || overlay.classList.contains("is-entering")
+    )
+  ) {
+    return;
+  }
+  overlay.classList.remove("is-visible", "is-leaving");
   overlay.classList.remove("hidden");
-  window.requestAnimationFrame(() => {
+  overlay.setAttribute("aria-hidden", "false");
+  // Force the browser to commit the hidden/base style so the following class
+  // change always starts an animation.
+  overlay.getBoundingClientRect();
+  overlay.classList.add("is-entering");
+  state.localAdvanceOverlayHideTimer = window.setTimeout(() => {
+    overlay.classList.remove("is-entering");
     overlay.classList.add("is-visible");
-  });
+    state.localAdvanceOverlayHideTimer = null;
+  }, localAdvanceOverlayFadeMs);
 }
 
 function hidePlayerDelayOverlay({ onHidden = null } = {}) {
@@ -2403,12 +2421,21 @@ function hidePlayerDelayOverlay({ onHidden = null } = {}) {
     }
     return;
   }
-  overlay.classList.remove("is-visible");
   if (state.localAdvanceOverlayHideTimer) {
     window.clearTimeout(state.localAdvanceOverlayHideTimer);
   }
+  overlay.classList.remove("hidden", "is-entering", "is-leaving");
+  overlay.classList.add("is-visible");
+  overlay.setAttribute("aria-hidden", "false");
+  // Same idea as show: make sure the visible style is committed before
+  // entering the leaving animation.
+  overlay.getBoundingClientRect();
+  overlay.classList.remove("is-visible");
+  overlay.classList.add("is-leaving");
   state.localAdvanceOverlayHideTimer = window.setTimeout(() => {
+    overlay.classList.remove("is-leaving", "is-entering", "is-visible");
     overlay.classList.add("hidden");
+    overlay.setAttribute("aria-hidden", "true");
     state.localAdvanceOverlayHideTimer = null;
     if (typeof onHidden === "function") {
       onHidden();
@@ -2426,7 +2453,7 @@ function showSongTransitionOverlayForData(data) {
     return;
   }
   const delaySeconds = manualTransitionOverlaySeconds(data);
-  clearLocalAdvanceDelay({ resetInFlight: false, hideOverlay: false });
+  clearLocalAdvanceDelay({ resetInFlight: true, hideOverlay: false });
   const token = state.localAdvanceDelayToken;
 
   state.localAdvanceOverlayMode = "manual";
@@ -2567,36 +2594,12 @@ function updateLocalAdvanceDelayOverlay() {
   }
 }
 
-function clearLocalAdvanceDelay({ resetInFlight = false, hideOverlay = true } = {}) {
-  if (state.localAdvanceDelayTimer) {
-    window.clearTimeout(state.localAdvanceDelayTimer);
-    state.localAdvanceDelayTimer = null;
-  }
-  if (state.localAdvanceCountdownTimer) {
-    window.clearInterval(state.localAdvanceCountdownTimer);
-    state.localAdvanceCountdownTimer = null;
-  }
-  if (hideOverlay) {
-    state.localAdvanceDelayDeadline = 0;
-    state.localAdvanceOverlayDurationMs = 0;
-    state.localAdvanceOverlayMode = "";
-    state.localAdvanceOverlayPrimaryItem = null;
-    state.localAdvanceOverlayFollowItems = null;
-    state.localAdvanceOverlayTotalCount = null;
-    state.localAdvanceDelayItemId = "";
-    hidePlayerDelayOverlay();
-
-    // 延迟结束后自动开始播放音视频
-    const video = activePrimaryVideoElement();
-    if (video && video.paused) {
-      state.localShouldBePlaying = true;
-      video.play().catch(() => {});
-    }
-  }
-  state.localAdvanceDelayToken += 1;
-  if (resetInFlight) {
-    state.localAdvanceInFlight = false;
-  }
+function hasLocalAdvanceDelayOverlay() {
+  return Boolean(
+    state.localAdvanceDelayDeadline > 0
+    || state.localAdvanceDelayTimer
+    || state.localAdvanceCountdownTimer,
+  );
 }
 
 function startLocalAdvanceDelay(delaySeconds) {
@@ -2618,14 +2621,6 @@ function startLocalAdvanceDelay(delaySeconds) {
   state.localAdvanceDelayTimer = window.setTimeout(() => {
     finishLocalAdvanceDelay(token, currentItemId).catch(() => {});
   }, delaySeconds * 1000);
-}
-
-async function finishLocalAdvanceDelay(token, itemId) {
-  if (token !== state.localAdvanceDelayToken || itemId !== state.localAdvanceDelayItemId) {
-    return;
-  }
-  clearLocalAdvanceDelay({ resetInFlight: true });
-  await advanceLocalPlayerNow({ showTransition: false });
 }
 
 function clearLocalAdvanceDelay({ resetInFlight = false, hideOverlay = true, onOverlayHidden = null } = {}) {
@@ -2667,20 +2662,27 @@ async function finishLocalAdvanceDelay(token, itemId) {
 
 function setPlayerFrameContent(html) {
   const overlay = playerDelayOverlay();
-  if (overlay?.parentElement === elements.playerFrame) {
-    overlay.remove();
-  }
-  elements.playerFrame.innerHTML = html;
-  if (overlay) {
+  const template = document.createElement("template");
+  template.innerHTML = html;
+  const nextNodes = Array.from(template.content.childNodes);
+  Array.from(elements.playerFrame.childNodes).forEach((node) => {
+    if (node !== overlay) {
+      node.remove();
+    }
+  });
+  elements.playerFrame.prepend(...nextNodes);
+  if (overlay && overlay.parentElement !== elements.playerFrame) {
     elements.playerFrame.appendChild(overlay);
   }
 }
 
-function teardownMountedPlayer() {
+function teardownMountedPlayer({ preserveAdvanceDelayOverlay = false } = {}) {
   clearLocalPlayerSyncTimer();
   clearLocalPlayerControlsHideTimer();
   clearLocalPlayerSeekState();
-  clearLocalAdvanceDelay({ resetInFlight: true });
+  if (!preserveAdvanceDelayOverlay) {
+    clearLocalAdvanceDelay({ resetInFlight: true });
+  }
   elements.playerFrame.querySelectorAll("video, audio").forEach((media) => {
     try {
       media.pause();
@@ -3269,7 +3271,14 @@ function renderPlayer(currentItem, playbackMode) {
   };
 
   captureLocalPlayerPreferences();
-  teardownMountedPlayer();
+  const preserveAdvanceDelayOverlay = Boolean(
+    currentItem
+    && (
+      state.pendingSongTransitionOverlayData
+      || hasLocalAdvanceDelayOverlay()
+    ),
+  );
+  teardownMountedPlayer({ preserveAdvanceDelayOverlay });
 
   if (!currentItem) {
     elements.playerFrame.innerHTML =
@@ -3562,7 +3571,14 @@ function renderPlayer(currentItem, playbackMode) {
   };
 
   captureLocalPlayerPreferences();
-  teardownMountedPlayer();
+  const preserveAdvanceDelayOverlay = Boolean(
+    currentItem
+    && (
+      state.pendingSongTransitionOverlayData
+      || hasLocalAdvanceDelayOverlay()
+    ),
+  );
+  teardownMountedPlayer({ preserveAdvanceDelayOverlay });
 
   if (!currentItem) {
     setPlayerFrameContent(
@@ -6121,7 +6137,11 @@ document.addEventListener("visibilitychange", () => {
 function handleFullscreenChange() {
   if (!isPlayerPanelFullscreen()) {
     hideFullscreenRequestToast();
-    hidePlayerDelayOverlay();
+    if (hasLocalAdvanceDelayOverlay()) {
+      updateLocalAdvanceDelayOverlay();
+    } else {
+      hidePlayerDelayOverlay();
+    }
   }
   renderPlayerFullscreenButton();
 }

@@ -1461,6 +1461,19 @@ h2 {
   opacity: 1;
 }
 
+.player-delay-overlay.is-entering,
+.player-delay-overlay.is-leaving {
+  transition: none;
+}
+
+.player-delay-overlay.is-entering {
+  animation: player-delay-overlay-in 500ms ease both;
+}
+
+.player-delay-overlay.is-leaving {
+  animation: player-delay-overlay-out 500ms ease both;
+}
+
 .player-delay-overlay.is-compact {
   background: rgba(248, 239, 226, 0.88);
   backdrop-filter: blur(12px);
@@ -1516,6 +1529,81 @@ h2 {
 
 .player-delay-overlay.is-visible .player-delay-card {
   transform: translateY(0);
+}
+
+.player-delay-overlay.is-entering .player-delay-card,
+.player-delay-overlay.is-leaving .player-delay-card {
+  transition: none;
+}
+
+.player-delay-overlay.is-entering .player-delay-card {
+  animation: player-delay-card-in 500ms ease both;
+}
+
+.player-delay-overlay.is-leaving .player-delay-card {
+  animation: player-delay-card-out 500ms ease both;
+}
+
+.player-delay-overlay.is-compact.is-entering .player-delay-card {
+  animation-name: player-delay-card-compact-in;
+}
+
+.player-delay-overlay.is-compact.is-leaving .player-delay-card {
+  animation-name: player-delay-card-compact-out;
+}
+
+@keyframes player-delay-overlay-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes player-delay-overlay-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes player-delay-card-in {
+  from {
+    transform: translateY(20px);
+  }
+  to {
+    transform: translateY(0);
+  }
+}
+
+@keyframes player-delay-card-out {
+  from {
+    transform: translateY(0);
+  }
+  to {
+    transform: translateY(20px);
+  }
+}
+
+@keyframes player-delay-card-compact-in {
+  from {
+    transform: scale(0.92);
+  }
+  to {
+    transform: scale(1);
+  }
+}
+
+@keyframes player-delay-card-compact-out {
+  from {
+    transform: scale(1);
+  }
+  to {
+    transform: scale(0.92);
+  }
 }
 
 .player-delay-head {
@@ -2407,6 +2495,11 @@ select:disabled {
 .queue-current.hidden,
 .hidden {
   display: none !important;
+}
+
+.player-delay-overlay.hidden {
+  display: flex !important;
+  visibility: hidden;
 }
 
 .song-progress-badge,
