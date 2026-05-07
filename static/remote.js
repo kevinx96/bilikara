@@ -4,6 +4,7 @@ const remoteVolumeCommitDebounceMs = 160;
 const viewportScaleResetDelaysMs = [0, 120, 360];
 const eventStreamInitialRetryMs = 1000;
 const eventStreamMaxRetryMs = 15000;
+const larkSearchTableCount = 5;
 const storageKeys = {
   layoutMode: "bilikara.remote.layout.mode",
 };
@@ -47,6 +48,10 @@ const state = {
   gatchaRefreshSaving: false,
   gatchaFavlistSaving: false,
   followBrowseVisible: false,
+  larkSearchVisible: false,
+  larkSearchLoading: false,
+  larkSearchSeq: 0,
+  remoteSearchFlipTimer: null,
   followBrowseData: null,
   followBrowseSelectedUid: "",
   followBrowseLoading: false,
@@ -113,8 +118,16 @@ const elements = {
   searchButton: document.getElementById("search-button"),
   searchMessage: document.getElementById("search-message"),
   searchResults: document.getElementById("search-results"),
+  remoteSearchStage: document.getElementById("remote-search-stage"),
   searchTag: document.querySelector(".search-panel .panel-tag"),
   searchTitle: document.querySelector(".search-panel .panel-title"),
+  larkSearchToggle: document.getElementById("lark-search-toggle"),
+  larkSearchView: document.getElementById("lark-search-view"),
+  larkSearchForm: document.getElementById("lark-search-form"),
+  larkSearchQuery: document.getElementById("lark-search-query"),
+  larkSearchButton: document.getElementById("lark-search-button"),
+  larkSearchMessage: document.getElementById("lark-search-message"),
+  larkSearchResults: document.getElementById("lark-search-results"),
   followBrowseToggle: document.getElementById("follow-browse-toggle"),
   followBrowseView: document.getElementById("follow-browse-view"),
   followUpListView: document.getElementById("follow-up-list-view"),
@@ -427,9 +440,21 @@ function setSearchMessage(message, isError = false) {
   elements.searchMessage.classList.toggle("error", Boolean(isError));
 }
 
+function setLarkSearchMessage(message, isError = false) {
+  if (!elements.larkSearchMessage) {
+    return;
+  }
+  elements.larkSearchMessage.textContent = message || "";
+  elements.larkSearchMessage.classList.toggle("error", Boolean(isError));
+}
+
 function setMessageForSource(source, message, isError = false) {
   if (source === "search") {
     setSearchMessage(message, isError);
+    return;
+  }
+  if (source === "lark") {
+    setLarkSearchMessage(message, isError);
     return;
   }
   if (source === "follow") {
@@ -441,6 +466,25 @@ function setMessageForSource(source, message, isError = false) {
     return;
   }
   setFormMessage(message, isError);
+}
+
+function setRemoteSearchStageView(showLark) {
+  if (!elements.remoteSearchStage) {
+    return;
+  }
+  const next = Boolean(showLark);
+  const previous = elements.remoteSearchStage.classList.contains("is-lark-view");
+  if (previous !== next) {
+    elements.remoteSearchStage.classList.add("is-flipping");
+    if (state.remoteSearchFlipTimer) {
+      window.clearTimeout(state.remoteSearchFlipTimer);
+    }
+    state.remoteSearchFlipTimer = window.setTimeout(() => {
+      elements.remoteSearchStage?.classList.remove("is-flipping");
+      state.remoteSearchFlipTimer = null;
+    }, 380);
+  }
+  elements.remoteSearchStage.classList.toggle("is-lark-view", next);
 }
 
 function duplicateConfirmMessage(duplicateItem, sessionEntry, activeItem) {
@@ -717,6 +761,35 @@ async function searchGatchaCache(query) {
   return Array.isArray(payload.data?.items) ? payload.data.items : [];
 }
 
+async function searchLarkPool(query) {
+  const normalizedQuery = String(query || "").trim();
+  const response = await fetch(`/api/lark/search?q=${encodeURIComponent(normalizedQuery)}`, {
+    cache: "no-store",
+    headers: clientHeaders(),
+  });
+  const payload = await response.json();
+  if (!response.ok || !payload.ok) {
+    throw new Error(payload.error || "bilikara 搜索失败");
+  }
+  return Array.isArray(payload.data?.items) ? payload.data.items : [];
+}
+
+async function searchLarkPoolTable(query, tableIndex) {
+  const normalizedQuery = String(query || "").trim();
+  const params = new URLSearchParams();
+  params.set("q", normalizedQuery);
+  params.set("table", String(tableIndex));
+  const response = await fetch(`/api/lark/search?${params.toString()}`, {
+    cache: "no-store",
+    headers: clientHeaders(),
+  });
+  const payload = await response.json();
+  if (!response.ok || !payload.ok) {
+    throw new Error(payload.error || "bilikara 搜索失败");
+  }
+  return Array.isArray(payload.data?.items) ? payload.data.items : [];
+}
+
 async function fetchGatchaBrowse(uid = "", query = "") {
   const params = new URLSearchParams();
   const normalizedUid = String(uid || "").trim();
@@ -785,6 +858,14 @@ function hideSearchResults() {
   elements.searchResults.classList.add("hidden");
 }
 
+function hideLarkSearchResults() {
+  if (!elements.larkSearchResults) {
+    return;
+  }
+  elements.larkSearchResults.innerHTML = "";
+  elements.larkSearchResults.classList.add("hidden");
+}
+
 function renderSearchResults(items) {
   elements.searchResults.innerHTML = "";
   elements.searchResults.classList.remove("hidden");
@@ -820,6 +901,80 @@ function renderSearchResults(items) {
     meta.append(title, url);
     row.append(meta, button);
     elements.searchResults.appendChild(row);
+  });
+}
+
+function renderLarkSearchResults(items) {
+  if (!elements.larkSearchResults) {
+    return;
+  }
+  elements.larkSearchResults.innerHTML = "";
+  elements.larkSearchResults.classList.remove("hidden");
+
+  if (!items.length) {
+    const empty = document.createElement("div");
+    empty.className = "search-empty";
+    empty.textContent = "bilikara 数据库里没有匹配结果。";
+    elements.larkSearchResults.appendChild(empty);
+    return;
+  }
+
+  items.forEach((item) => {
+    const row = document.createElement("div");
+    row.className = "search-result-item";
+
+    const meta = document.createElement("div");
+    const title = document.createElement("div");
+    title.className = "search-result-title";
+    title.textContent = String(item.title || "");
+
+    const url = document.createElement("div");
+    url.className = "search-result-url";
+    url.textContent = String(item.bvid || item.url || "");
+
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "primary-button";
+    button.dataset.url = String(item.url || "");
+    button.textContent = "点歌";
+
+    meta.append(title, url);
+    row.append(meta, button);
+    elements.larkSearchResults.appendChild(row);
+  });
+}
+
+function appendLarkSearchResults(items) {
+  if (!elements.larkSearchResults || !items.length) {
+    return;
+  }
+  const existingEmpty = elements.larkSearchResults.querySelector(".search-empty");
+  if (existingEmpty) {
+    existingEmpty.remove();
+  }
+  elements.larkSearchResults.classList.remove("hidden");
+  items.forEach((item) => {
+    const row = document.createElement("div");
+    row.className = "search-result-item";
+
+    const meta = document.createElement("div");
+    const title = document.createElement("div");
+    title.className = "search-result-title";
+    title.textContent = String(item.title || "");
+
+    const url = document.createElement("div");
+    url.className = "search-result-url";
+    url.textContent = String(item.bvid || item.url || "");
+
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "primary-button";
+    button.dataset.url = String(item.url || "");
+    button.textContent = "点歌";
+
+    meta.append(title, url);
+    row.append(meta, button);
+    elements.larkSearchResults.appendChild(row);
   });
 }
 
@@ -914,19 +1069,24 @@ function renderFollowBrowse() {
     return;
   }
 
-  elements.searchForm?.classList.toggle("hidden", state.followBrowseVisible);
-  elements.searchMessage?.classList.toggle("hidden", state.followBrowseVisible || !elements.searchMessage.textContent);
-  elements.searchResults?.classList.toggle("hidden", state.followBrowseVisible || !elements.searchResults.children.length);
-  elements.followBrowseView.classList.toggle("hidden", !state.followBrowseVisible);
+  const showFollow = Boolean(state.followBrowseVisible);
+  const showLark = Boolean(state.larkSearchVisible);
+  elements.remoteSearchStage?.classList.toggle("hidden", showFollow);
+  setRemoteSearchStageView(showLark && !showFollow);
+  elements.followBrowseView.classList.toggle("hidden", !showFollow);
   if (elements.followBrowseToggle) {
-    elements.followBrowseToggle.textContent = state.followBrowseVisible ? "返回搜索" : "关注浏览";
-    elements.followBrowseToggle.setAttribute("aria-pressed", String(state.followBrowseVisible));
+    elements.followBrowseToggle.textContent = showFollow ? "返回搜索" : "关注浏览";
+    elements.followBrowseToggle.setAttribute("aria-pressed", String(showFollow));
+  }
+  if (elements.larkSearchToggle) {
+    elements.larkSearchToggle.textContent = showLark ? "返回搜索" : "bilikara 搜索";
+    elements.larkSearchToggle.setAttribute("aria-pressed", String(showLark));
   }
   if (elements.searchTag) {
-    elements.searchTag.textContent = state.followBrowseVisible ? "Follow Browse" : "Local Search";
+    elements.searchTag.textContent = showLark ? "bilikara Search" : showFollow ? "Follow Browse" : "Local Search";
   }
   if (elements.searchTitle) {
-    elements.searchTitle.textContent = state.followBrowseVisible ? "关注列表" : "搜索";
+    elements.searchTitle.textContent = showLark ? "bilikara 搜索" : showFollow ? "关注列表" : "搜索";
   }
   if (!state.followBrowseVisible) {
     return;
@@ -1013,6 +1173,13 @@ async function loadFollowBrowse({ uid = state.followBrowseSelectedUid, query = "
     state.followBrowseLoading = false;
     renderFollowBrowse();
   }
+}
+
+async function refreshFollowBrowseAfterGatchaUidAdd(uid = "") {
+  state.followBrowseRenderSignature = "";
+  const currentUid = String(state.followBrowseSelectedUid || "").trim();
+  const nextUid = currentUid || String(uid || "").trim();
+  await loadFollowBrowse({ uid: nextUid, query: "", keepQuery: false });
 }
 
 async function handleGatchaDraw() {
@@ -1143,12 +1310,13 @@ async function handleGatchaUidSubmit(event) {
       renderGatchaUidView();
       return;
     }
-    setGatchaUidMessage(`正在拉取 UP 主：${ownerName} 的稿件...`);
+    setGatchaUidMessage(`正在拉取 UP 主：${ownerName} 的稿件...(稿件较多时可能需要较长时间)`);
     const result = await addGatchaUid(normalizedUid);
     setGatchaUidMessage(gatchaUidResultMessage(result, normalizedUid));
     if (elements.gatchaUidInput) {
       elements.gatchaUidInput.value = "";
     }
+    await refreshFollowBrowseAfterGatchaUidAdd(result?.uid || normalizedUid);
   } catch (error) {
     setGatchaUidMessage(error.message, true);
   } finally {
@@ -1669,7 +1837,7 @@ async function confirmGatchaFavlistSheet() {
 
   state.gatchaFavlistSaving = true;
   renderGatchaUidView();
-  setGatchaUidMessage("正在拉取选中的公开收藏夹...");
+  setGatchaUidMessage("正在拉取选中的公开收藏夹...(稿件较多时可能需要较长时间)");
   try {
     const result = await pullGatchaFavlist(intent.uid, folderIds);
     closeGatchaFavlistSheet();
@@ -1779,6 +1947,12 @@ async function confirmBindingSheet() {
     if (intent.source === "search") {
       hideSearchResults();
       elements.searchQuery.value = "";
+    }
+    if (intent.source === "lark") {
+      hideLarkSearchResults();
+      if (elements.larkSearchQuery) {
+        elements.larkSearchQuery.value = "";
+      }
     }
     if (intent.source === "follow") {
       setFollowBrowseMessage("");
@@ -2224,6 +2398,12 @@ async function addByUrl(url, position = "tail", source = "search") {
       hideSearchResults();
       elements.searchQuery.value = "";
     }
+    if (source === "lark") {
+      hideLarkSearchResults();
+      if (elements.larkSearchQuery) {
+        elements.larkSearchQuery.value = "";
+      }
+    }
     if (source === "gatcha") {
       state.gatchaCandidate = null;
       renderGatchaUidView();
@@ -2365,7 +2545,97 @@ elements.searchResults.addEventListener("click", async (event) => {
   await addByUrl(String(button.dataset.url || ""), "tail", "search");
 });
 
+elements.larkSearchToggle?.addEventListener("click", () => {
+  state.followBrowseVisible = false;
+  state.larkSearchVisible = !state.larkSearchVisible;
+  renderFollowBrowse();
+});
+
+elements.larkSearchForm?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const query = String(elements.larkSearchQuery?.value || "").trim();
+  if (!query) {
+    hideLarkSearchResults();
+    setLarkSearchMessage("请输入搜索关键词。", true);
+    return;
+  }
+
+  state.larkSearchLoading = true;
+  if (elements.larkSearchButton) {
+    elements.larkSearchButton.disabled = true;
+  }
+  const searchSeq = state.larkSearchSeq + 1;
+  state.larkSearchSeq = searchSeq;
+  const seenBvids = new Set();
+  const collectedItems = [];
+  let partialFailure = false;
+  if (elements.larkSearchResults) {
+    elements.larkSearchResults.innerHTML = "";
+    elements.larkSearchResults.classList.remove("hidden");
+  }
+  setLarkSearchMessage("正在搜索 bilikara 数据库...(联网搜索需要3-15s不等)");
+  try {
+    for (let tableIndex = 1; tableIndex <= larkSearchTableCount; tableIndex += 1) {
+      let tableItems = [];
+      try {
+        tableItems = await searchLarkPoolTable(query, tableIndex);
+      } catch (error) {
+        partialFailure = true;
+        continue;
+      }
+      if (state.larkSearchSeq !== searchSeq) {
+        return;
+      }
+      const freshItems = tableItems.filter((item) => {
+        const bvid = String(item?.bvid || "").trim();
+        if (!bvid || seenBvids.has(bvid)) {
+          return false;
+        }
+        seenBvids.add(bvid);
+        return true;
+      });
+      if (freshItems.length) {
+        collectedItems.push(...freshItems);
+        appendLarkSearchResults(freshItems);
+      }
+    }
+    if (state.larkSearchSeq !== searchSeq) {
+      return;
+    }
+    if (!collectedItems.length) {
+      renderLarkSearchResults([]);
+    }
+    setLarkSearchMessage(
+      collectedItems.length
+        ? `找到 ${collectedItems.length} 条共享结果${partialFailure ? "，部分表搜索失败" : ""}。`
+        : partialFailure
+          ? "部分表搜索失败，bilikara 数据库里暂时没有匹配结果。"
+          : "bilikara 数据库里没有匹配结果。",
+      partialFailure && !collectedItems.length,
+    );
+  } catch (error) {
+    hideLarkSearchResults();
+    setLarkSearchMessage(error.message, true);
+  } finally {
+    if (state.larkSearchSeq === searchSeq) {
+      state.larkSearchLoading = false;
+      if (elements.larkSearchButton) {
+        elements.larkSearchButton.disabled = false;
+      }
+    }
+  }
+});
+
+elements.larkSearchResults?.addEventListener("click", async (event) => {
+  const button = event.target.closest("button[data-url]");
+  if (!button) {
+    return;
+  }
+  await addByUrl(String(button.dataset.url || ""), "tail", "lark");
+});
+
 elements.followBrowseToggle?.addEventListener("click", () => {
+  state.larkSearchVisible = false;
   state.followBrowseVisible = !state.followBrowseVisible;
   renderFollowBrowse();
   if (state.followBrowseVisible && !state.followBrowseLoading) {

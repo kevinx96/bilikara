@@ -14,6 +14,7 @@ from .config import BILIBILI_HEADERS, GATCHA_KEYWORDS
 from dataclasses import dataclass
 from .models import PlaylistItem
 import bilikara.config as cfg  
+from .lark_pool_client import append_lark_pool_entries_in_background
 
 VIDEO_PATH_RE = re.compile(r"/video/(?P<vid>(BV[0-9A-Za-z]+|av\d+))", re.IGNORECASE)
 BV_RE = re.compile(r"^(BV[0-9A-Za-z]+)$", re.IGNORECASE)
@@ -377,6 +378,46 @@ def _save_gatcha_cache(cache_payload: dict) -> None:
     with temp_path.open("w", encoding="utf-8") as handle:
         json.dump(cache_payload, handle, ensure_ascii=False, indent=2)
     temp_path.replace(_GATCHA_CACHE_FILE)
+
+
+def _save_gatcha_cache_uid(cache_payload: dict, mid: str) -> None:
+    current_payload = _load_gatcha_cache(reset_legacy=False)
+    current_uids = current_payload.get("uids") if isinstance(current_payload, dict) else {}
+    if not isinstance(current_uids, dict):
+        current_uids = {}
+    payload_uids = cache_payload.get("uids") if isinstance(cache_payload, dict) else {}
+    if not isinstance(payload_uids, dict):
+        payload_uids = {}
+
+    current_profiles = current_payload.get("profiles") if isinstance(current_payload, dict) else {}
+    if not isinstance(current_profiles, dict):
+        current_profiles = {}
+    payload_profiles = cache_payload.get("profiles") if isinstance(cache_payload, dict) else {}
+    if not isinstance(payload_profiles, dict):
+        payload_profiles = {}
+
+    merged_uids = dict(current_uids)
+    normalized_mid = str(mid)
+    merged_uids[normalized_mid] = _dedupe_gatcha_entries(payload_uids.get(normalized_mid, []))
+
+    merged_profiles = {str(uid): dict(profile) for uid, profile in current_profiles.items() if isinstance(profile, dict)}
+    for uid, profile in payload_profiles.items():
+        uid_key = str(uid)
+        if uid_key == normalized_mid or uid_key not in merged_profiles:
+            merged_profiles[uid_key] = dict(profile) if isinstance(profile, dict) else profile
+
+    try:
+        updated_at = max(float(current_payload.get("updated_at") or 0), float(cache_payload.get("updated_at") or 0))
+    except (TypeError, ValueError):
+        updated_at = time.time()
+    _save_gatcha_cache(
+        {
+            "schema_version": _GATCHA_CACHE_SCHEMA_VERSION,
+            "uids": merged_uids,
+            "profiles": merged_profiles,
+            "updated_at": updated_at,
+        }
+    )
 
 
 def _empty_gatcha_favlist_payload() -> dict:
@@ -880,14 +921,21 @@ def refresh_gatcha_favlist(
 ) -> dict:
     if not _GATCHA_REFRESH_LOCK.acquire(blocking=False):
         raise BilibiliError(GATCHA_TASK_BUSY_MESSAGE)
+    result: dict | None = None
+    entries: list[dict] = []
     try:
         if on_start is not None:
             on_start()
-        return _refresh_gatcha_favlist_unlocked(raw_mid, raw_folder_ids)
+        result = _refresh_gatcha_favlist_unlocked(raw_mid, raw_folder_ids)
+        with _GATCHA_FAVLIST_LOCK:
+            entries = list(_load_gatcha_favlist().get("items") or [])
     finally:
         _GATCHA_REFRESH_LOCK.release()
         if on_done is not None:
             on_done()
+    if entries:
+        _append_lark_pool_entries_async(entries)
+    return result or {}
 
 
 def _refresh_existing_gatcha_favlist_cache() -> dict | None:
@@ -986,7 +1034,7 @@ def _refresh_gatcha_uid_cache(cache_payload: dict, mid: str, *, force_full: bool
         cache_payload["uids"][mid] = merged_entries
         cache_payload["updated_at"] = time.time()
         with _GATCHA_CACHE_LOCK:
-            _save_gatcha_cache(cache_payload)
+            _save_gatcha_cache_uid(cache_payload, mid)
         return {
             "uid": mid,
             "mode": "incremental",
@@ -997,19 +1045,19 @@ def _refresh_gatcha_uid_cache(cache_payload: dict, mid: str, *, force_full: bool
     cache_payload["uids"][mid] = []
     cache_payload["updated_at"] = time.time()
     with _GATCHA_CACHE_LOCK:
-        _save_gatcha_cache(cache_payload)
+        _save_gatcha_cache_uid(cache_payload, mid)
 
     def _save_mid_progress(entries: list[dict]) -> None:
         cache_payload["uids"][mid] = _dedupe_gatcha_entries(entries)
         cache_payload["updated_at"] = time.time()
         with _GATCHA_CACHE_LOCK:
-            _save_gatcha_cache(cache_payload)
+            _save_gatcha_cache_uid(cache_payload, mid)
 
     fetched_entries = _fetch_gatcha_videos_for_uid(mid, on_progress=_save_mid_progress)
     cache_payload["uids"][mid] = _dedupe_gatcha_entries(fetched_entries)
     cache_payload["updated_at"] = time.time()
     with _GATCHA_CACHE_LOCK:
-        _save_gatcha_cache(cache_payload)
+        _save_gatcha_cache_uid(cache_payload, mid)
     return {
         "uid": mid,
         "mode": "full",
@@ -1065,6 +1113,7 @@ def refresh_gatcha_cache_in_background(
     on_start: callable | None = None,
     on_done: callable | None = None,
     use_global_lock: bool = True,
+    upload_default_uids_to_lark: bool = True,
 ) -> bool:
     if use_global_lock:
         if not _GATCHA_REFRESH_LOCK.acquire(blocking=False):
@@ -1072,9 +1121,23 @@ def refresh_gatcha_cache_in_background(
         if on_start is not None:
             on_start()
 
+    cached_default_uids_before_refresh: set[str] = set()
+    if not upload_default_uids_to_lark:
+        default_uids = set(_default_gatcha_uids())
+        with _GATCHA_CACHE_LOCK:
+            previous_cache_payload = _load_gatcha_cache(reset_legacy=False)
+        previous_uid_entries = previous_cache_payload.get("uids") if isinstance(previous_cache_payload, dict) else {}
+        if isinstance(previous_uid_entries, dict):
+            cached_default_uids_before_refresh = {
+                uid
+                for uid in default_uids
+                if isinstance(previous_uid_entries.get(uid), list) and previous_uid_entries.get(uid)
+            }
+
     def _worker() -> None:
+        cache_payload: dict | None = None
         try:
-            refresh_gatcha_cache()
+            cache_payload = refresh_gatcha_cache()
         except Exception:
             return
         finally:
@@ -1082,6 +1145,11 @@ def refresh_gatcha_cache_in_background(
                 _GATCHA_REFRESH_LOCK.release()
                 if on_done is not None:
                     on_done()
+        if cache_payload is not None:
+            excluded_uids = set()
+            if not upload_default_uids_to_lark:
+                excluded_uids = set(_default_gatcha_uids()) - cached_default_uids_before_refresh
+            _append_lark_pool_entries_async(_gatcha_cache_payload_entries(cache_payload, exclude_uids=excluded_uids))
 
     threading.Thread(target=_worker, daemon=True, name="gatcha-cache-refresh").start()
     return True
@@ -1090,6 +1158,7 @@ def refresh_gatcha_cache_in_background(
 def add_gatcha_uid(raw_mid: object, *, on_start: callable | None = None, on_done: callable | None = None) -> dict:
     if not _GATCHA_REFRESH_LOCK.acquire(blocking=False):
         raise BilibiliError(GATCHA_TASK_BUSY_MESSAGE)
+    entries: list[dict] = []
     try:
         if on_start is not None:
             on_start()
@@ -1131,10 +1200,20 @@ def add_gatcha_uid(raw_mid: object, *, on_start: callable | None = None, on_done
         }
         cache_payload["profiles"] = cache_profiles
         cache_result = _refresh_gatcha_uid_cache(cache_payload, mid)
+        with _GATCHA_CACHE_LOCK:
+            fresh_cache_payload = _load_gatcha_cache()
+        entries = _gatcha_cache_payload_entries(
+            {
+                "uids": {mid: fresh_cache_payload.get("uids", {}).get(mid, [])},
+                "profiles": {mid: fresh_cache_payload.get("profiles", {}).get(mid, {})},
+            }
+        )
     finally:
         _GATCHA_REFRESH_LOCK.release()
         if on_done is not None:
             on_done()
+    if entries:
+        _append_lark_pool_entries_async(entries)
 
     return {
         "uid": mid,
@@ -1184,6 +1263,40 @@ def _local_gatcha_candidates_by_uid() -> dict[str, list[dict]]:
         if valid_entries:
             grouped_candidates[mid] = valid_entries
     return grouped_candidates
+
+
+def _gatcha_cache_payload_entries(cache_payload: dict, *, exclude_uids: set[str] | None = None) -> list[dict]:
+    uid_entries = cache_payload.get("uids") if isinstance(cache_payload, dict) else {}
+    if not isinstance(uid_entries, dict):
+        return []
+    profiles = cache_payload.get("profiles") if isinstance(cache_payload, dict) else {}
+    if not isinstance(profiles, dict):
+        profiles = {}
+    excluded = {str(uid).strip() for uid in (exclude_uids or set()) if str(uid).strip()}
+    entries: list[dict] = []
+    for mid, raw_entries in uid_entries.items():
+        if str(mid).strip() in excluded:
+            continue
+        if not isinstance(raw_entries, list):
+            continue
+        profile = profiles.get(str(mid)) if isinstance(profiles.get(str(mid)), dict) else {}
+        for entry in raw_entries:
+            if not isinstance(entry, dict):
+                continue
+            payload = dict(entry)
+            payload.setdefault("mid", str(mid))
+            if profile:
+                payload.setdefault("owner_name", str(profile.get("name") or ""))
+                payload.setdefault("owner_url", str(profile.get("space_url") or ""))
+            entries.append(payload)
+    return entries
+
+
+def _append_lark_pool_entries_async(entries: list[dict]) -> None:
+    try:
+        append_lark_pool_entries_in_background(entries)
+    except Exception:
+        pass
 
 
 def search_gatcha_cache(query: str, *, limit: int = 30) -> list[dict]:

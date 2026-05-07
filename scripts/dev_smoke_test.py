@@ -144,10 +144,12 @@ class SmokeRunner:
         raise RuntimeError(f"Server did not become ready: {last_error}")
 
     def open_observer_pages(self) -> None:
+        host_url = f"{self.base_url}/?bilikara_smoke_bypass_fullscreen=1"
         if self.args.no_open_browser:
             print_skip("Open browser", "Skipped by --no-open-browser")
+            print_info(f"Open the Host smoke URL manually for transition-delay checks: {host_url}")
             return
-        opened_host = webbrowser.open(self.base_url)
+        opened_host = webbrowser.open(host_url)
         time.sleep(0.5)
         opened_remote = webbrowser.open_new_tab(f"{self.base_url}/remote")
         if opened_host:
@@ -190,6 +192,8 @@ class SmokeRunner:
                 "refresh-gatcha-cache-button",
                 "pull-gatcha-favlist-button",
                 "gatcha-favlist-modal",
+                "search-lark-toggle",
+                "lark-search-form",
             ],
             "/remote": [
                 "follow-browse-toggle",
@@ -209,6 +213,7 @@ class SmokeRunner:
                 "downloadHistoryExport",
                 "previewGatchaUid",
                 "/api/gatcha/favlist/preview",
+                "/api/lark/search",
                 "/api/gatcha/refresh",
                 "/api/gatcha/favlist",
                 "/api/app/update",
@@ -1020,7 +1025,7 @@ class SmokeRunner:
                 else:
                     print_warn("Could not confirm a near-end seek; transition UI may require fallback next-song")
                 self.visual_checkpoint(
-                    "Watch the Host player now. Playback should be about 3s before the end so the in-player countdown can stay visible without leaving fullscreen.",
+                    "Watch the Host player now. Playback should be about 3s before the end, then the 5s countdown should appear before the next song starts.",
                     seconds=self.args.transition_visual_pause,
                 )
                 state_after_seek = self.get_state()

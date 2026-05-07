@@ -61,7 +61,10 @@ class AppContextStateRevisionTest(unittest.TestCase):
             self.assertTrue(context.refresh_startup_gatcha_cache_in_background())
 
         self.assertEqual(refresh.call_count, 2)
-        self.assertEqual(refresh.call_args_list[0].kwargs, {"use_global_lock": False})
+        self.assertEqual(
+            refresh.call_args_list[0].kwargs,
+            {"use_global_lock": False, "upload_default_uids_to_lark": False},
+        )
         self.assertIn("on_start", refresh.call_args_list[1].kwargs)
         self.assertIn("on_done", refresh.call_args_list[1].kwargs)
         self.assertNotIn("use_global_lock", refresh.call_args_list[1].kwargs)
