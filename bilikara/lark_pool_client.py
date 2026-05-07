@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -44,6 +45,7 @@ _WRITE_FIELD_NAMES = _REQUIRED_FIELD_NAMES | _OPTIONAL_FIELD_NAMES
 _REQUIRED_SEARCH_FIELDS = {"bvid", "title", "url"}
 _DEBUG_LOGS = str(os.environ.get("BILIKARA_LARK_DEBUG") or "").strip().lower() in {"1", "true", "yes", "on"}
 _INVALID_VIDEO_TITLES = {"已失效视频"}
+_VALID_BVID_RE = re.compile(r"^BV[0-9A-Za-z]{10}$")
 
 
 class LarkPoolError(RuntimeError):
@@ -615,6 +617,8 @@ def normalize_pool_entry(entry: dict) -> dict | None:
     title = str(entry.get("title") or "").strip()
     url = str(entry.get("url") or "").strip()
     if title in _INVALID_VIDEO_TITLES:
+        return None
+    if not _VALID_BVID_RE.match(bvid):
         return None
     if not url and bvid:
         url = f"https://www.bilibili.com/video/{bvid}"

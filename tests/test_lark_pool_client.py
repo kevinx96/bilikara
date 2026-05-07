@@ -1,4 +1,4 @@
-import json
+﻿import json
 import uuid
 import unittest
 from pathlib import Path
@@ -95,11 +95,23 @@ class LarkPoolClientTest(unittest.TestCase):
 
         with patch.object(lark_pool, "_cloudflare_json", side_effect=fake_cloudflare):
             result = lark_pool.append_lark_pool_entries(
-                [{"bvid": "BVCFADD", "title": "new", "url": "https://www.bilibili.com/video/BVCFADD"}]
+                [{"bvid": "BV1CFADD0001", "title": "new", "url": "https://www.bilibili.com/video/BV1CFADD0001"}]
             )
 
         self.assertEqual(result["added"], 1)
-        self.assertEqual(posted_payloads[0]["records"][0]["bvid"], "BVCFADD")
+        self.assertEqual(posted_payloads[0]["records"][0]["bvid"], "BV1CFADD0001")
+
+    def test_append_lark_pool_entries_rejects_short_dummy_bvids(self):
+        with patch.object(lark_pool, "_cloudflare_json") as cloudflare:
+            result = lark_pool.append_lark_pool_entries(
+                [
+                    {"bvid": "BVFAV1", "title": "dummy", "url": "https://www.bilibili.com/video/BVFAV1"},
+                    {"bvid": "BVADDED42", "title": "dummy", "url": "https://www.bilibili.com/video/BVADDED42"},
+                ]
+            )
+
+        cloudflare.assert_not_called()
+        self.assertEqual(result, {"attempted": 0, "added": 0})
 
     def test_active_tables_skip_tables_without_search_fields(self):
         with (
@@ -235,7 +247,7 @@ class LarkPoolClientTest(unittest.TestCase):
         temp_root = Path.cwd() / ".tmp"
         temp_root.mkdir(exist_ok=True)
         sync_file = temp_root / f"lark_pool_sync_{uuid.uuid4().hex}.json"
-        sync_file.write_text(json.dumps({"bvids": ["BVOLD"]}), encoding="utf-8")
+        sync_file.write_text(json.dumps({"bvids": ["BV1OLD000001"]}), encoding="utf-8")
         posted_records = []
 
         def fake_post(url, payload, *, token=None, timeout=12.0):
@@ -256,15 +268,15 @@ class LarkPoolClientTest(unittest.TestCase):
         ):
             result = lark_pool.append_lark_pool_entries_to_lark(
                 [
-                    {"bvid": "BVOLD", "title": "old", "url": "https://www.bilibili.com/video/BVOLD"},
-                    {"bvid": "BVNEW", "title": "new", "url": "https://www.bilibili.com/video/BVNEW"},
+                    {"bvid": "BV1OLD000001", "title": "old", "url": "https://www.bilibili.com/video/BV1OLD000001"},
+                    {"bvid": "BV1NEW000001", "title": "new", "url": "https://www.bilibili.com/video/BV1NEW000001"},
                 ]
             )
 
         self.assertEqual(result["added"], 1)
-        self.assertEqual(posted_records[0]["fields"]["bvid"], "BVNEW")
+        self.assertEqual(posted_records[0]["fields"]["bvid"], "BV1NEW000001")
         payload = json.loads(sync_file.read_text(encoding="utf-8"))
-        self.assertIn("BVNEW", payload["bvids"])
+        self.assertIn("BV1NEW000001", payload["bvids"])
 
     def test_append_lark_pool_entries_skips_invalid_video_titles(self):
         temp_root = Path.cwd() / ".tmp"
@@ -290,19 +302,19 @@ class LarkPoolClientTest(unittest.TestCase):
             result = lark_pool.append_lark_pool_entries_to_lark(
                 [
                     {
-                        "bvid": "BVDEAD",
+                        "bvid": "BV1DEAD0001",
                         "title": next(iter(lark_pool._INVALID_VIDEO_TITLES)),
-                        "url": "https://www.bilibili.com/video/BVDEAD",
+                        "url": "https://www.bilibili.com/video/BV1DEAD0001",
                     },
-                    {"bvid": "BVALIVE", "title": "alive", "url": "https://www.bilibili.com/video/BVALIVE"},
+                    {"bvid": "BV1ALIVE0000", "title": "alive", "url": "https://www.bilibili.com/video/BV1ALIVE0000"},
                 ]
             )
 
         self.assertEqual(result["attempted"], 1)
         self.assertEqual(result["added"], 1)
-        self.assertEqual([record["fields"]["bvid"] for record in posted_records], ["BVALIVE"])
+        self.assertEqual([record["fields"]["bvid"] for record in posted_records], ["BV1ALIVE0000"])
         payload = json.loads(sync_file.read_text(encoding="utf-8"))
-        self.assertNotIn("BVDEAD", payload["bvids"])
+        self.assertNotIn("BV1DEAD0001", payload["bvids"])
 
     def test_append_lark_pool_entries_to_lark_preserves_tags_and_can_target_table(self):
         temp_root = Path.cwd() / ".tmp"
@@ -340,9 +352,9 @@ class LarkPoolClientTest(unittest.TestCase):
             result = lark_pool.append_lark_pool_entries_to_lark(
                 [
                     {
-                        "bvid": "BVTAGGED",
+                        "bvid": "BV1TAGGED000",
                         "title": "tagged",
-                        "url": "https://www.bilibili.com/video/BVTAGGED",
+                        "url": "https://www.bilibili.com/video/BV1TAGGED000",
                         "tag_1": "work",
                         "tag_4": "music",
                         "tag_status": "1",
@@ -362,3 +374,4 @@ class LarkPoolClientTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
