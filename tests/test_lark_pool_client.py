@@ -1,7 +1,7 @@
-import json
+﻿import json
+import uuid
 import unittest
 from pathlib import Path
-from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 import bilikara.lark_pool_client as lark_pool
@@ -15,6 +15,7 @@ class LarkPoolClientTest(unittest.TestCase):
                 "_post_json",
                 return_value={"code": 0, "tenant_access_token": "tenant-token", "expire": 3600},
             ),
+            patch.object(lark_pool, "APP_SECRET", "secret"),
             patch.object(lark_pool, "_TOKEN_VALUE", ""),
             patch.object(lark_pool, "_TOKEN_EXPIRES_AT", 0.0),
         ):
@@ -46,6 +47,7 @@ class LarkPoolClientTest(unittest.TestCase):
             }
 
         with (
+            patch.object(lark_pool, "_search_cloudflare_pool", return_value=None),
             patch.object(lark_pool, "_tenant_access_token", return_value="token"),
             patch.object(lark_pool, "_active_tables", return_value=[{"app_token": "app", "table_id": "table"}]),
             patch.object(lark_pool, "_post_json", side_effect=fake_post),
@@ -55,6 +57,61 @@ class LarkPoolClientTest(unittest.TestCase):
         self.assertEqual(results[0]["bvid"], "BVPOOL1")
         self.assertEqual(results[0]["title"], "karaoke title")
         self.assertEqual(results[0]["source"], "bilikara")
+
+    def test_search_lark_pool_uses_cloudflare_first(self):
+        def fake_cloudflare(method, path, payload=None, *, timeout=12.0):
+            self.assertEqual(method, "GET")
+            self.assertIn("/search?", path)
+            self.assertLessEqual(timeout, 2.0)
+            return [
+                {
+                    "mid": "42",
+                    "bvid": "BVCF1",
+                    "title": "cloudflare karaoke",
+                    "url": "https://www.bilibili.com/video/BVCF1",
+                    "owner_name": "owner",
+                    "owner_url": "https://space.bilibili.com/42",
+                }
+            ]
+
+        with (
+            patch.object(lark_pool, "_cloudflare_json", side_effect=fake_cloudflare),
+            patch.object(lark_pool, "_search_lark_pool_legacy") as legacy,
+        ):
+            results = lark_pool.search_lark_pool("karaoke")
+
+        legacy.assert_not_called()
+        self.assertEqual(results[0]["bvid"], "BVCF1")
+        self.assertEqual(results[0]["source"], "cloudflare")
+
+    def test_append_lark_pool_entries_posts_to_cloudflare(self):
+        posted_payloads = []
+
+        def fake_cloudflare(method, path, payload=None, *, timeout=12.0):
+            posted_payloads.append(payload)
+            self.assertEqual(method, "POST")
+            self.assertEqual(path, "/batch-add")
+            return {"attempted": 1, "added": 1, "skipped_existing": 0, "feishu_queued": 1}
+
+        with patch.object(lark_pool, "_cloudflare_json", side_effect=fake_cloudflare):
+            result = lark_pool.append_lark_pool_entries(
+                [{"bvid": "BV1CFADD0001", "title": "new", "url": "https://www.bilibili.com/video/BV1CFADD0001"}]
+            )
+
+        self.assertEqual(result["added"], 1)
+        self.assertEqual(posted_payloads[0]["records"][0]["bvid"], "BV1CFADD0001")
+
+    def test_append_lark_pool_entries_rejects_short_dummy_bvids(self):
+        with patch.object(lark_pool, "_cloudflare_json") as cloudflare:
+            result = lark_pool.append_lark_pool_entries(
+                [
+                    {"bvid": "BVFAV1", "title": "dummy", "url": "https://www.bilibili.com/video/BVFAV1"},
+                    {"bvid": "BVADDED42", "title": "dummy", "url": "https://www.bilibili.com/video/BVADDED42"},
+                ]
+            )
+
+        cloudflare.assert_not_called()
+        self.assertEqual(result, {"attempted": 0, "added": 0})
 
     def test_active_tables_skip_tables_without_search_fields(self):
         with (
@@ -102,6 +159,7 @@ class LarkPoolClientTest(unittest.TestCase):
             return {"code": 0, "data": {"items": []}}
 
         with (
+            patch.object(lark_pool, "_search_cloudflare_pool", return_value=None),
             patch.object(lark_pool, "_tenant_access_token", return_value="token"),
             patch.object(
                 lark_pool,
@@ -144,6 +202,8 @@ class LarkPoolClientTest(unittest.TestCase):
             patch.object(lark_pool, "_ACTIVE_TABLES", []),
             patch.object(lark_pool, "_TABLE_PROBED", set()),
             patch.object(lark_pool, "BITABLE_TABLES", (("app1", "table1"), ("app2", "table2"))),
+            patch.object(lark_pool, "_CLOUDFLARE_API_URL", ""),
+            patch.object(lark_pool, "APP_SECRET", "secret"),
             patch.object(lark_pool, "_tenant_access_token", return_value="token"),
             patch.object(lark_pool, "_table_field_names", return_value={"bvid", "title", "url"}) as fields,
             patch.object(lark_pool, "_table_record_count", return_value=1) as count,
@@ -170,6 +230,8 @@ class LarkPoolClientTest(unittest.TestCase):
             patch.object(lark_pool, "_ACTIVE_TABLES", []),
             patch.object(lark_pool, "_TABLE_PROBED", set()),
             patch.object(lark_pool, "BITABLE_TABLES", (("app1", "table1"), ("app2", "table2"))),
+            patch.object(lark_pool, "_CLOUDFLARE_API_URL", ""),
+            patch.object(lark_pool, "APP_SECRET", "secret"),
             patch.object(lark_pool, "_tenant_access_token", return_value="token"),
             patch.object(lark_pool, "_table_field_names", return_value={"bvid", "title", "url"}),
             patch.object(lark_pool, "_table_record_count", return_value=0),
@@ -182,72 +244,134 @@ class LarkPoolClientTest(unittest.TestCase):
             self.assertEqual(post_count, 1)
 
     def test_append_lark_pool_entries_skips_locally_synced_bvids(self):
-        with TemporaryDirectory() as temp_dir:
-            sync_file = Path(temp_dir) / "lark_pool_sync.json"
-            sync_file.write_text(json.dumps({"bvids": ["BVOLD"]}), encoding="utf-8")
-            posted_records = []
+        temp_root = Path.cwd() / ".tmp"
+        temp_root.mkdir(exist_ok=True)
+        sync_file = temp_root / f"lark_pool_sync_{uuid.uuid4().hex}.json"
+        sync_file.write_text(json.dumps({"bvids": ["BV1OLD000001"]}), encoding="utf-8")
+        posted_records = []
 
-            def fake_post(url, payload, *, token=None, timeout=12.0):
-                self.assertIn("/batch_create", url)
-                posted_records.extend(payload["records"])
-                return {"code": 0, "data": {}}
+        def fake_post(url, payload, *, token=None, timeout=12.0):
+            self.assertIn("/batch_create", url)
+            posted_records.extend(payload["records"])
+            return {"code": 0, "data": {}}
 
-            with (
-                patch.object(lark_pool, "_SYNC_FILE", sync_file),
-                patch.object(lark_pool.cfg, "DATA_DIR", Path(temp_dir)),
-                patch.object(lark_pool, "_tenant_access_token", return_value="token"),
-                patch.object(
-                    lark_pool,
-                    "_active_tables",
-                    return_value=[{"index": 1, "app_token": "app", "table_id": "table", "count": 1}],
-                ),
-                patch.object(lark_pool, "_post_json", side_effect=fake_post),
-            ):
-                result = lark_pool.append_lark_pool_entries(
-                    [
-                        {"bvid": "BVOLD", "title": "old", "url": "https://www.bilibili.com/video/BVOLD"},
-                        {"bvid": "BVNEW", "title": "new", "url": "https://www.bilibili.com/video/BVNEW"},
-                    ]
-                )
+        with (
+            patch.object(lark_pool, "_SYNC_FILE", sync_file),
+            patch.object(lark_pool.cfg, "DATA_DIR", temp_root),
+            patch.object(lark_pool, "_tenant_access_token", return_value="token"),
+            patch.object(
+                lark_pool,
+                "_active_tables",
+                return_value=[{"index": 1, "app_token": "app", "table_id": "table", "count": 1}],
+            ),
+            patch.object(lark_pool, "_post_json", side_effect=fake_post),
+        ):
+            result = lark_pool.append_lark_pool_entries_to_lark(
+                [
+                    {"bvid": "BV1OLD000001", "title": "old", "url": "https://www.bilibili.com/video/BV1OLD000001"},
+                    {"bvid": "BV1NEW000001", "title": "new", "url": "https://www.bilibili.com/video/BV1NEW000001"},
+                ]
+            )
 
-            self.assertEqual(result["added"], 1)
-            self.assertEqual(posted_records[0]["fields"]["bvid"], "BVNEW")
-            payload = json.loads(sync_file.read_text(encoding="utf-8"))
-            self.assertIn("BVNEW", payload["bvids"])
+        self.assertEqual(result["added"], 1)
+        self.assertEqual(posted_records[0]["fields"]["bvid"], "BV1NEW000001")
+        payload = json.loads(sync_file.read_text(encoding="utf-8"))
+        self.assertIn("BV1NEW000001", payload["bvids"])
 
     def test_append_lark_pool_entries_skips_invalid_video_titles(self):
-        with TemporaryDirectory() as temp_dir:
-            sync_file = Path(temp_dir) / "lark_pool_sync.json"
-            posted_records = []
+        temp_root = Path.cwd() / ".tmp"
+        temp_root.mkdir(exist_ok=True)
+        sync_file = temp_root / f"lark_pool_sync_invalid_{uuid.uuid4().hex}.json"
+        posted_records = []
 
-            def fake_post(url, payload, *, token=None, timeout=12.0):
-                posted_records.extend(payload["records"])
-                return {"code": 0, "data": {}}
+        def fake_post(url, payload, *, token=None, timeout=12.0):
+            posted_records.extend(payload["records"])
+            return {"code": 0, "data": {}}
 
-            with (
-                patch.object(lark_pool, "_SYNC_FILE", sync_file),
-                patch.object(lark_pool.cfg, "DATA_DIR", Path(temp_dir)),
-                patch.object(lark_pool, "_tenant_access_token", return_value="token"),
-                patch.object(
-                    lark_pool,
-                    "_active_tables",
-                    return_value=[{"index": 1, "app_token": "app", "table_id": "table", "count": 1}],
-                ),
-                patch.object(lark_pool, "_post_json", side_effect=fake_post),
-            ):
-                result = lark_pool.append_lark_pool_entries(
-                    [
-                        {"bvid": "BVDEAD", "title": "已失效视频", "url": "https://www.bilibili.com/video/BVDEAD"},
-                        {"bvid": "BVALIVE", "title": "alive", "url": "https://www.bilibili.com/video/BVALIVE"},
-                    ]
-                )
+        with (
+            patch.object(lark_pool, "_SYNC_FILE", sync_file),
+            patch.object(lark_pool.cfg, "DATA_DIR", temp_root),
+            patch.object(lark_pool, "_tenant_access_token", return_value="token"),
+            patch.object(
+                lark_pool,
+                "_active_tables",
+                return_value=[{"index": 1, "app_token": "app", "table_id": "table", "count": 1}],
+            ),
+            patch.object(lark_pool, "_post_json", side_effect=fake_post),
+        ):
+            result = lark_pool.append_lark_pool_entries_to_lark(
+                [
+                    {
+                        "bvid": "BV1DEAD0001",
+                        "title": next(iter(lark_pool._INVALID_VIDEO_TITLES)),
+                        "url": "https://www.bilibili.com/video/BV1DEAD0001",
+                    },
+                    {"bvid": "BV1ALIVE0000", "title": "alive", "url": "https://www.bilibili.com/video/BV1ALIVE0000"},
+                ]
+            )
 
-            self.assertEqual(result["attempted"], 1)
-            self.assertEqual(result["added"], 1)
-            self.assertEqual([record["fields"]["bvid"] for record in posted_records], ["BVALIVE"])
-            payload = json.loads(sync_file.read_text(encoding="utf-8"))
-            self.assertNotIn("BVDEAD", payload["bvids"])
+        self.assertEqual(result["attempted"], 1)
+        self.assertEqual(result["added"], 1)
+        self.assertEqual([record["fields"]["bvid"] for record in posted_records], ["BV1ALIVE0000"])
+        payload = json.loads(sync_file.read_text(encoding="utf-8"))
+        self.assertNotIn("BV1DEAD0001", payload["bvids"])
+
+    def test_append_lark_pool_entries_to_lark_preserves_tags_and_can_target_table(self):
+        temp_root = Path.cwd() / ".tmp"
+        temp_root.mkdir(exist_ok=True)
+        sync_file = temp_root / f"lark_pool_sync_tags_{uuid.uuid4().hex}.json"
+        posted_urls = []
+        posted_records = []
+
+        def fake_post(url, payload, *, token=None, timeout=12.0):
+            posted_urls.append(url)
+            posted_records.extend(payload["records"])
+            return {"code": 0, "data": {}}
+
+        with (
+            patch.object(lark_pool, "_SYNC_FILE", sync_file),
+            patch.object(lark_pool.cfg, "DATA_DIR", temp_root),
+            patch.object(lark_pool, "_tenant_access_token", return_value="token"),
+            patch.object(
+                lark_pool,
+                "_active_tables",
+                return_value=[
+                    {"index": 1, "app_token": "app", "table_id": "table1", "count": 0},
+                    {
+                        "index": 2,
+                        "app_token": "app",
+                        "table_id": "table2",
+                        "count": 0,
+                        "field_names": sorted(lark_pool._WRITE_FIELD_NAMES),
+                        "field_types": {"tag_status": 2, "mid": 2},
+                    },
+                ],
+            ),
+            patch.object(lark_pool, "_post_json", side_effect=fake_post),
+        ):
+            result = lark_pool.append_lark_pool_entries_to_lark(
+                [
+                    {
+                        "bvid": "BV1TAGGED000",
+                        "title": "tagged",
+                        "url": "https://www.bilibili.com/video/BV1TAGGED000",
+                        "tag_1": "work",
+                        "tag_4": "music",
+                        "tag_status": "1",
+                    }
+                ],
+                only_table_index=2,
+                use_sync_cache=False,
+            )
+
+        self.assertEqual(result["added"], 1)
+        self.assertIn("table2", posted_urls[0])
+        self.assertEqual(posted_records[0]["fields"]["tag_1"], "work")
+        self.assertEqual(posted_records[0]["fields"]["tag_4"], "music")
+        self.assertEqual(posted_records[0]["fields"]["tag_status"], 1)
+        self.assertNotIn("mid", posted_records[0]["fields"])
 
 
 if __name__ == "__main__":
     unittest.main()
+

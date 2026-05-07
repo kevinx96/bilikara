@@ -43,6 +43,8 @@ const state = {
   bbdownLoginRenderSignature: "",
   searchCookieFaceRenderSignature: "",
   gatchaUidFaceRenderSignature: "",
+  gatchaTaskLastMessageSignature: "",
+  gatchaTaskWatchStartedAt: Date.now() / 1000,
   historyRenderSignature: "",
   playlistEmptyRenderSignature: "",
   cacheSliderRenderSignature: "",
@@ -935,7 +937,10 @@ async function searchGatchaCache(query) {
 
 async function searchLarkPool(query) {
   const normalizedQuery = String(query || "").trim();
-  const response = await fetch(`/api/lark/search?q=${encodeURIComponent(normalizedQuery)}`, {
+  const params = new URLSearchParams();
+  params.set("q", normalizedQuery);
+  params.set("limit", "80");
+  const response = await fetch(`/api/lark/search?${params.toString()}`, {
     cache: "no-store",
     headers: clientHeaders(),
   });
@@ -951,6 +956,7 @@ async function searchLarkPoolTable(query, tableIndex) {
   const params = new URLSearchParams();
   params.set("q", normalizedQuery);
   params.set("table", String(tableIndex));
+  params.set("limit", "80");
   const response = await fetch(`/api/lark/search?${params.toString()}`, {
     cache: "no-store",
     headers: clientHeaders(),
@@ -1337,6 +1343,39 @@ function gatchaTaskBusyMessage() {
   return state.data?.gatcha?.message || "拉取任务执行中，请等待任务结束";
 }
 
+function syncGatchaTaskTerminalMessage() {
+  const task = state.data?.gatcha || {};
+  if (task.busy || state.gatchaUidSaving || state.gatchaRefreshSaving || state.gatchaFavlistSaving) {
+    return;
+  }
+  const status = String(task.last_status || "");
+  if (!["success", "partial", "failed"].includes(status)) {
+    return;
+  }
+  const updatedAt = Number(task.last_updated_at || 0);
+  if (updatedAt && updatedAt < state.gatchaTaskWatchStartedAt - 1) {
+    return;
+  }
+  const signature = JSON.stringify({
+    status,
+    message: task.last_message || "",
+    error: task.last_error || "",
+    updatedAt,
+  });
+  if (signature === state.gatchaTaskLastMessageSignature) {
+    return;
+  }
+  state.gatchaTaskLastMessageSignature = signature;
+  const fallback =
+    status === "success"
+      ? "抽卡缓存更新完成。"
+      : status === "partial"
+        ? "抽卡缓存已部分更新，但有项目拉取失败。"
+        : "抽卡缓存更新失败。";
+  const detail = task.last_error ? `${task.last_message || fallback} ${task.last_error}` : task.last_message || fallback;
+  setGatchaUidMessage(detail, status !== "success");
+}
+
 function syncSearchStageView(view) {
   const nextView = view || "search";
   const previousView = state.searchStageView || "search";
@@ -1435,6 +1474,7 @@ function renderSearchCookieFace() {
 }
 
 function renderGatchaUidFace() {
+  syncGatchaTaskTerminalMessage();
   const showUid = Boolean(state.gatchaUidVisible);
   const taskBusy = gatchaTaskBusy();
   const signature = JSON.stringify({
@@ -1444,6 +1484,8 @@ function renderGatchaUidFace() {
     favlistSaving: state.gatchaFavlistSaving,
     taskBusy,
     taskMessage: gatchaTaskBusyMessage(),
+    taskLastStatus: state.data?.gatcha?.last_status || "",
+    taskLastUpdatedAt: state.data?.gatcha?.last_updated_at || 0,
   });
   if (signature === state.gatchaUidFaceRenderSignature) {
     return;
@@ -5694,29 +5736,21 @@ async function handleLarkSearchSubmit(event) {
   }
   setLarkSearchMessage("正在搜索 bilikara 数据库...(联网搜索需要3-15s不等)");
   try {
-    for (let tableIndex = 1; tableIndex <= larkSearchTableCount; tableIndex += 1) {
-      let tableItems = [];
-      try {
-        tableItems = await searchLarkPoolTable(query, tableIndex);
-      } catch (error) {
-        partialFailure = true;
-        continue;
+    const poolItems = await searchLarkPool(query);
+    if (state.larkSearchSeq !== searchSeq) {
+      return;
+    }
+    const freshItems = poolItems.filter((item) => {
+      const bvid = String(item?.bvid || "").trim();
+      if (!bvid || seenBvids.has(bvid)) {
+        return false;
       }
-      if (state.larkSearchSeq !== searchSeq) {
-        return;
-      }
-      const freshItems = tableItems.filter((item) => {
-        const bvid = String(item?.bvid || "").trim();
-        if (!bvid || seenBvids.has(bvid)) {
-          return false;
-        }
-        seenBvids.add(bvid);
-        return true;
-      });
-      if (freshItems.length) {
-        collectedItems.push(...freshItems);
-        appendSearchResultItems(elements.larkSearchResults, freshItems);
-      }
+      seenBvids.add(bvid);
+      return true;
+    });
+    if (freshItems.length) {
+      collectedItems.push(...freshItems);
+      appendSearchResultItems(elements.larkSearchResults, freshItems);
     }
     if (state.larkSearchSeq !== searchSeq) {
       return;
@@ -5729,7 +5763,7 @@ async function handleLarkSearchSubmit(event) {
         ? `搜索到 ${collectedItems.length} 条共享结果${partialFailure ? "，部分表搜索失败" : ""}。`
         : partialFailure
           ? "部分表搜索失败，bilikara 数据库里暂时没有匹配结果。"
-          : "bilikara 数据库里没有匹配结果。",
+          : "bilikara 数据库里没有匹配结果。快使用添加 UID 功能/拉取收藏添加你喜爱的up主/稿件吧",
       partialFailure && !collectedItems.length,
     );
   } catch (error) {
@@ -6796,7 +6830,12 @@ elements.refreshGatchaCacheButton?.addEventListener("click", async () => {
   try {
     const result = await refreshGatchaCache();
     if (result?.started !== false && state.data) {
-      state.data.gatcha = { busy: true, message: gatchaTaskBusyMessage() };
+      state.data.gatcha = {
+        ...(state.data.gatcha || {}),
+        busy: true,
+        message: gatchaTaskBusyMessage(),
+        last_status: "running",
+      };
     }
     setGatchaUidMessage(result?.started === false ? "抽卡缓存已经在更新中。" : "已开始更新抽卡缓存。");
   } catch (error) {

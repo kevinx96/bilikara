@@ -585,10 +585,14 @@ class BilikaraHandler(BaseHTTPRequestHandler):
             query = route_query.get("q", [""])[0]
             table_index = route_query.get("table", [""])[0]
             try:
+                limit = max(1, min(100, int(route_query.get("limit", ["80"])[0] or "80")))
+            except (TypeError, ValueError):
+                limit = 80
+            try:
                 if table_index:
-                    results = search_lark_pool_table(query, int(table_index))
+                    results = search_lark_pool_table(query, int(table_index), limit=limit)
                 else:
-                    results = search_lark_pool(query)
+                    results = search_lark_pool(query, limit=limit)
                 self._write_json({"ok": True, "data": {"items": results}})
             except Exception as e:
                 self._write_json({"ok": False, "error": str(e)})

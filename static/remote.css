@@ -1219,6 +1219,8 @@ select:disabled {
 .search-results {
   display: grid;
   gap: 10px;
+  align-content: start;
+  grid-auto-rows: max-content;
   margin-top: 12px;
   max-height: clamp(220px, 42vh, 460px);
   overflow-y: auto;

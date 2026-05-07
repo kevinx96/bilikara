@@ -3927,6 +3927,8 @@ select:disabled {
 .search-results {
   display: grid;
   gap: 10px;
+  align-content: start;
+  grid-auto-rows: max-content;
   min-height: 0;
   max-height: 100%;
   overflow-y: auto;
