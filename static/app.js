@@ -1218,20 +1218,6 @@ function renderFollowBrowse() {
         count.className = "follow-up-count";
         count.textContent = `${Number(owner.count || 0)} 首`;
 
-        button.addEventListener("click", async (event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          const uid = String(button.dataset.uid || "").trim();
-          if (!uid) {
-            return;
-          }
-          state.followBrowseSelectedUid = uid;
-          if (elements.followSearchQuery) {
-            elements.followSearchQuery.value = "";
-          }
-          await loadFollowBrowse({ uid, query: "" });
-        });
-
         button.append(name, count);
         elements.followUpGrid.appendChild(button);
       });
@@ -1406,6 +1392,7 @@ function syncSearchStageView(view) {
   if (state.searchFlipFrame) {
     window.cancelAnimationFrame(state.searchFlipFrame);
     state.searchFlipFrame = null;
+    elements.searchStage?.classList.remove("is-preparing-flip");
   }
 
   if (isInitialRender) {
@@ -1426,22 +1413,28 @@ function syncSearchStageView(view) {
     setClassToggle(elements.searchStage, "is-lark-view", activeView === "lark");
   };
   const clearFlip = () => {
-    elements.searchStage?.classList.remove("is-flipping");
+    elements.searchStage?.classList.remove("is-flipping", "is-preparing-flip");
     state.searchFlipTimer = null;
   };
   const searchViewOrder = ["search", "browse", "lark"];
   const previousIndex = searchViewOrder.indexOf(previousView);
   const nextIndex = searchViewOrder.indexOf(nextView);
   const forwardSteps = (nextIndex - previousIndex + searchViewOrder.length) % searchViewOrder.length;
+  const startAngle = state.searchStageAngle;
   if (forwardSteps === 1) {
     state.searchStageAngle -= 120;
   } else if (forwardSteps === 2) {
     state.searchStageAngle += 120;
   }
 
-  elements.searchStage?.classList.add("is-flipping");
+  elements.searchStage?.classList.add("is-preparing-flip", "is-flipping");
+  if (elements.searchStageInner) {
+    elements.searchStageInner.style.transform = `rotateY(${startAngle}deg)`;
+    elements.searchStageInner.getBoundingClientRect();
+  }
   state.searchFlipFrame = window.requestAnimationFrame(() => {
     state.searchFlipFrame = null;
+    elements.searchStage?.classList.remove("is-preparing-flip");
     if (elements.searchStageInner) {
       elements.searchStageInner.style.transform = `rotateY(${state.searchStageAngle}deg)`;
     }
@@ -6689,7 +6682,6 @@ elements.followUpGrid?.addEventListener("click", async (event) => {
   if (!uid) {
     return;
   }
-  event.preventDefault();
   state.followBrowseSelectedUid = uid;
   if (elements.followSearchQuery) {
     elements.followSearchQuery.value = "";

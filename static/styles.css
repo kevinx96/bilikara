@@ -3620,12 +3620,22 @@ select:disabled {
   transition: transform 420ms ease;
 }
 
+.search-stage:not(.is-flipping) .search-stage-inner,
+.search-stage.is-preparing-flip .search-stage-inner {
+  transition: none;
+}
+
 .search-stage.is-cookie-view .search-stage-inner {
   transform: rotateY(-120deg);
 }
 
 .search-stage.is-lark-view .search-stage-inner {
   transform: rotateY(120deg);
+}
+
+.search-stage.is-cookie-view:not(.is-flipping) .search-stage-inner,
+.search-stage.is-lark-view:not(.is-flipping) .search-stage-inner {
+  transform: none !important;
 }
 
 .search-face {
@@ -3654,6 +3664,11 @@ select:disabled {
   pointer-events: none;
   grid-template-rows: auto auto minmax(0, 1fr);
   transform: rotateY(240deg);
+}
+
+.search-stage.is-cookie-view:not(.is-flipping) .search-face-back,
+.search-stage.is-lark-view:not(.is-flipping) .search-face-lark {
+  transform: none;
 }
 
 .search-stage.is-cookie-view .search-face-front {
