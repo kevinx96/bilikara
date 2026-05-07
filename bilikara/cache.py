@@ -238,6 +238,46 @@ class CacheManager:
                     )
         return payload
 
+    def reconcile_cache_state(self) -> None:
+        items = self.store.list_items()
+        if not items:
+            return
+        desired_ids = {item.id for item in items[: self.max_cache_items]} if self.max_cache_items > 0 else set()
+        invalidated_ids: list[str] = []
+
+        for item in items:
+            if item.cache_status != "ready" or self._item_cache_ready(item):
+                continue
+            self.store.update_item(
+                item.id,
+                cache_status="pending",
+                cache_progress=0.0,
+                cache_message="缓存文件已清空，等待重新缓存",
+                video_relative_path="",
+                video_media_url="",
+                audio_variants=[],
+                selected_audio_variant_id="",
+                persist_backup=False,
+            )
+            self._record_item_activity(item.id)
+            invalidated_ids.append(item.id)
+
+        if not invalidated_ids:
+            return
+
+        with self.lock:
+            self.desired_ids = desired_ids
+
+        fresh_items = self.store.list_items()
+        fresh_by_id = {item.id: item for item in fresh_items}
+        for item_id in invalidated_ids:
+            if item_id not in desired_ids:
+                continue
+            item = fresh_by_id.get(item_id)
+            if item:
+                self._ensure_item_cached(item)
+        self._prioritize_cache_window(fresh_items, desired_ids)
+
     def set_max_cache_items(self, max_cache_items: int) -> int:
         self.set_cache_policy(max_cache_items=max_cache_items)
         with self.lock:
@@ -2149,13 +2189,45 @@ class CacheManager:
             return total
         return total
 
+    @staticmethod
+    def _cache_path_from_relative_path(relative_path: object) -> Path | None:
+        value = str(relative_path or "").strip().replace("\\", "/")
+        if not value:
+            return None
+        candidate = Path(value)
+        if candidate.is_absolute() or ".." in candidate.parts:
+            return None
+        return CACHE_DIR / candidate
+
+    @classmethod
+    def _cache_path_from_media_url(cls, media_url: object) -> Path | None:
+        value = str(media_url or "").strip()
+        if not value:
+            return None
+        parsed = urllib.parse.urlparse(value)
+        path = urllib.parse.unquote(parsed.path or value)
+        for prefix in ("/media/", "media/"):
+            if path.startswith(prefix):
+                return cls._cache_path_from_relative_path(path.removeprefix(prefix))
+        return None
+
     def _item_cache_ready(self, item) -> bool:
-        video_path = CACHE_DIR / item.video_relative_path if item.video_relative_path else None
-        has_audio_variants = any(
-            isinstance(variant, dict) and str(variant.get("audio_url") or "").strip()
+        video_path = self._cache_path_from_relative_path(item.video_relative_path)
+        if not video_path or not video_path.exists():
+            return False
+
+        audio_variants = [
+            variant
             for variant in item.audio_variants
-        )
-        return bool(video_path and video_path.exists() and has_audio_variants)
+            if isinstance(variant, dict)
+        ]
+        if not audio_variants:
+            return False
+        for variant in audio_variants:
+            audio_path = self._cache_path_from_media_url(variant.get("audio_url"))
+            if not audio_path or not audio_path.exists():
+                return False
+        return True
 
     def _ensure_item_cached(self, item) -> None:
         if self._item_cache_ready(item):

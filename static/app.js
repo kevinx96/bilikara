@@ -86,6 +86,7 @@ const state = {
   localAdvanceDelayTimer: null,
   localAdvanceCountdownTimer: null,
   localAdvanceOverlayHideTimer: null,
+  localAdvanceDelayStartAt: 0,
   localAdvanceDelayDeadline: 0,
   localAdvanceOverlayDurationMs: 0,
   localAdvanceOverlayMode: "",
@@ -449,6 +450,12 @@ function setElementTitle(element, value) {
   }
 }
 
+function closeOpenMenus() {
+  document.querySelectorAll(".menu-content").forEach((menu) => {
+    menu.classList.add("hidden");
+  });
+}
+
 function selectedRequesterName() {
   return String(elements.requesterSelect?.value || "").trim();
 }
@@ -630,6 +637,9 @@ function showMountedPlayerControls() {
 function toggleMountedLocalPlayback() {
   if (frontendPlaybackMode(state.data?.playback_mode) !== "local" || !state.data?.current_item) {
     return false;
+  }
+  if (isLocalAdvanceHoldingItem(state.data.current_item.id)) {
+    return true;
   }
   const video = activePrimaryVideoElement();
   if (!video) {
@@ -2376,6 +2386,31 @@ function resumeMountedPlayerAfterOverlay() {
   video.play().catch(() => {});
 }
 
+function isLocalAdvanceHoldingItem(itemId) {
+  const normalizedItemId = String(itemId || "");
+  return Boolean(
+    normalizedItemId
+    && state.localAdvanceDelayDeadline > 0
+    && normalizedItemId === state.localAdvanceDelayItemId,
+  );
+}
+
+function stopMountedPlayerForAdvanceDelay(itemId) {
+  if (!isLocalAdvanceHoldingItem(itemId)) {
+    return;
+  }
+  state.localShouldBePlaying = false;
+  clearLocalPlayerSeekState();
+
+  const { video, audio } = activeLocalPlayerElements();
+  if (audio && !audio.paused) {
+    audio.pause();
+  }
+  if (video && !video.paused) {
+    video.pause();
+  }
+}
+
 function setPlayerDelayOverlayVisible(overlay) {
   if (!overlay) {
     return;
@@ -2460,18 +2495,21 @@ function showSongTransitionOverlayForData(data) {
   state.localAdvanceOverlayPrimaryItem = primaryItem;
   state.localAdvanceOverlayFollowItems = data.current_item ? playlist : playlist.slice(1);
   state.localAdvanceOverlayTotalCount = (data.current_item ? 1 : 0) + playlist.length;
-  state.localAdvanceOverlayDurationMs = (delaySeconds * 1000) + localAdvanceOverlayFadeMs;
-  state.localAdvanceDelayDeadline = Date.now() + state.localAdvanceOverlayDurationMs;
+  state.localAdvanceDelayItemId = String(primaryItem.id || "");
+  state.localAdvanceOverlayDurationMs = delaySeconds * 1000;
+  state.localAdvanceDelayStartAt = Date.now() + localAdvanceOverlayFadeMs;
+  state.localAdvanceDelayDeadline = state.localAdvanceDelayStartAt + state.localAdvanceOverlayDurationMs;
   updateLocalAdvanceDelayOverlay();
   state.localAdvanceCountdownTimer = window.setInterval(updateLocalAdvanceDelayOverlay, 250);
   state.localAdvanceDelayTimer = window.setTimeout(() => {
     if (state.localAdvanceDelayToken === token) {
+      updateLocalAdvanceDelayOverlay();
       clearLocalAdvanceDelay({
         resetInFlight: false,
         onOverlayHidden: resumeMountedPlayerAfterOverlay,
       });
     }
-  }, state.localAdvanceOverlayDurationMs);
+  }, Math.max(0, state.localAdvanceDelayDeadline - Date.now()));
 }
 
 function maybeShowSongTransitionOverlay(previousData, nextData, { force = false } = {}) {
@@ -2481,6 +2519,12 @@ function maybeShowSongTransitionOverlay(previousData, nextData, { force = false 
   const previousId = currentItemIdFromData(previousData);
   const nextId = currentItemIdFromData(nextData);
   if (!nextId || (!force && previousId === nextId)) {
+    return;
+  }
+  if (
+    currentItemIdFromData(state.pendingSongTransitionOverlayData) === nextId
+    || isLocalAdvanceHoldingItem(nextId)
+  ) {
     return;
   }
   const transitionKey = `${nextId}|${Number(nextData.state_revision || 0)}`;
@@ -2574,14 +2618,17 @@ function renderLocalAdvanceDelayQueue(overlay) {
 
 function updateLocalAdvanceDelayOverlay() {
   const overlay = ensurePlayerDelayOverlay();
+  const now = Date.now();
+  const countdownStartAt = Number(state.localAdvanceDelayStartAt || 0);
+  const countdownNow = countdownStartAt > 0 ? Math.max(now, countdownStartAt) : now;
+  const totalDurationMs = Math.max(1000, Number(state.localAdvanceOverlayDurationMs || 0));
+  const remainingMs = Math.max(0, state.localAdvanceDelayDeadline - countdownNow);
   const remainingSeconds = Math.max(
     0,
-    Math.ceil((state.localAdvanceDelayDeadline - Date.now()) / 1000),
+    Math.ceil(remainingMs / 1000),
   );
   const countNode = overlay.querySelector("[data-delay-count]");
   setTextContent(countNode, String(remainingSeconds));
-  const totalDurationMs = Math.max(1000, Number(state.localAdvanceOverlayDurationMs || 0));
-  const remainingMs = Math.max(0, state.localAdvanceDelayDeadline - Date.now());
   const progress = Math.max(0, Math.min(1, remainingMs / totalDurationMs));
   overlay.style.setProperty("--delay-ring-offset", String(119.38 * (1 - progress)));
   renderLocalAdvanceDelayQueue(overlay);
@@ -2597,6 +2644,7 @@ function updateLocalAdvanceDelayOverlay() {
 function hasLocalAdvanceDelayOverlay() {
   return Boolean(
     state.localAdvanceDelayDeadline > 0
+    || state.localAdvanceDelayStartAt > 0
     || state.localAdvanceDelayTimer
     || state.localAdvanceCountdownTimer,
   );
@@ -2614,13 +2662,15 @@ function startLocalAdvanceDelay(delaySeconds) {
   const token = state.localAdvanceDelayToken;
   state.localAdvanceOverlayMode = "auto";
   state.localAdvanceOverlayDurationMs = delaySeconds * 1000;
-  state.localAdvanceDelayDeadline = Date.now() + state.localAdvanceOverlayDurationMs;
+  state.localAdvanceDelayStartAt = Date.now() + localAdvanceOverlayFadeMs;
+  state.localAdvanceDelayDeadline = state.localAdvanceDelayStartAt + state.localAdvanceOverlayDurationMs;
+  stopMountedPlayerForAdvanceDelay(currentItemId);
   updateLocalAdvanceDelayOverlay();
   showMountedPlayerControls();
   state.localAdvanceCountdownTimer = window.setInterval(updateLocalAdvanceDelayOverlay, 250);
   state.localAdvanceDelayTimer = window.setTimeout(() => {
     finishLocalAdvanceDelay(token, currentItemId).catch(() => {});
-  }, delaySeconds * 1000);
+  }, Math.max(0, state.localAdvanceDelayDeadline - Date.now()));
 }
 
 function clearLocalAdvanceDelay({ resetInFlight = false, hideOverlay = true, onOverlayHidden = null } = {}) {
@@ -2633,6 +2683,7 @@ function clearLocalAdvanceDelay({ resetInFlight = false, hideOverlay = true, onO
     state.localAdvanceCountdownTimer = null;
   }
   if (hideOverlay) {
+    state.localAdvanceDelayStartAt = 0;
     state.localAdvanceDelayDeadline = 0;
     state.localAdvanceOverlayDurationMs = 0;
     state.localAdvanceOverlayMode = "";
@@ -2652,6 +2703,7 @@ async function finishLocalAdvanceDelay(token, itemId) {
   if (token !== state.localAdvanceDelayToken || itemId !== state.localAdvanceDelayItemId) {
     return;
   }
+  updateLocalAdvanceDelayOverlay();
   clearLocalAdvanceDelay({
     resetInFlight: true,
     onOverlayHidden: () => {
@@ -3392,6 +3444,10 @@ function renderPlayer(currentItem, playbackMode) {
   });
 
   video.addEventListener("play", () => {
+    if (isLocalAdvanceHoldingItem(currentItem.id)) {
+      stopMountedPlayerForAdvanceDelay(currentItem.id);
+      return;
+    }
     if (isSplitPlayerSeekSettling(video, audio)) {
       state.localSeekResumeAfterSettle = true;
       state.localShouldBePlaying = true;
@@ -3691,6 +3747,10 @@ function renderPlayer(currentItem, playbackMode) {
   });
 
   video.addEventListener("play", () => {
+    if (isLocalAdvanceHoldingItem(currentItem.id)) {
+      stopMountedPlayerForAdvanceDelay(currentItem.id);
+      return;
+    }
     if (isSplitPlayerSeekSettling(video, audio)) {
       state.localSeekResumeAfterSettle = true;
       state.localShouldBePlaying = true;
@@ -5387,6 +5447,9 @@ async function handlePlaylistAction(button) {
     if (action === "play-now") {
       maybeShowSongTransitionOverlay(previousData, state.data, { force: true });
     }
+    if (action === "play-now" || action === "move-next") {
+      closeOpenMenus();
+    }
     render();
   } catch (error) {
     setAppMessage(error.message, true);
@@ -5928,6 +5991,7 @@ elements.historyList.addEventListener("click", async (event) => {
   }
   const point = anchorPointForEvent(event, button);
   await handleAddByUrl(url, button.dataset.action === "history-next" ? "next" : "tail", point);
+  closeOpenMenus();
 });
 
 elements.confirmCancel.addEventListener("click", () => {
@@ -6083,7 +6147,7 @@ document.addEventListener("click", (event) => {
     if (menu) {
       const isHidden = menu.classList.contains("hidden");
       // Close all other menus first
-      document.querySelectorAll(".menu-content").forEach((m) => m.classList.add("hidden"));
+      closeOpenMenus();
       if (isHidden) {
         menu.classList.remove("hidden");
       }
@@ -6094,7 +6158,7 @@ document.addEventListener("click", (event) => {
 
   // Close menus if clicking outside
   if (!event.target.closest(".menu-content")) {
-    document.querySelectorAll(".menu-content").forEach((m) => m.classList.add("hidden"));
+    closeOpenMenus();
   }
 });
 

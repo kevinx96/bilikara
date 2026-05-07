@@ -3870,23 +3870,27 @@ select:disabled {
   padding-right: 4px;
 }
 
+.history-list::-webkit-scrollbar,
 .search-results::-webkit-scrollbar,
 .follow-up-grid::-webkit-scrollbar {
   width: 8px;
 }
 
+.history-list::-webkit-scrollbar-track,
 .search-results::-webkit-scrollbar-track,
 .follow-up-grid::-webkit-scrollbar-track {
   background: rgba(67, 53, 41, 0.05);
   border-radius: 999px;
 }
 
+.history-list::-webkit-scrollbar-thumb,
 .search-results::-webkit-scrollbar-thumb,
 .follow-up-grid::-webkit-scrollbar-thumb {
   background: rgba(143, 49, 29, 0.24);
   border-radius: 999px;
 }
 
+.history-list::-webkit-scrollbar-thumb:hover,
 .search-results::-webkit-scrollbar-thumb:hover,
 .follow-up-grid::-webkit-scrollbar-thumb:hover {
   background: rgba(143, 49, 29, 0.36);
