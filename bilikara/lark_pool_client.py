@@ -27,9 +27,6 @@ BITABLE_TABLES = (
 _BASE_URL = "https://open.feishu.cn/open-apis"
 _CLOUDFLARE_API_URL = (os.environ.get("BILIKARA_CF_API_URL") or "https://api.kevinx96.icu").rstrip("/")
 _CLOUDFLARE_SEARCH_TIMEOUT = float(os.environ.get("BILIKARA_CF_SEARCH_TIMEOUT") or "2.0")
-_TABLE_LIMIT = 20_000
-_APPEND_CHUNK_SIZE = 400
-_SYNC_FILE = cfg.DATA_DIR / "lark_pool_sync.json"
 _TOKEN_LOCK = threading.RLock()
 _TOKEN_VALUE = ""
 _TOKEN_EXPIRES_AT = 0.0
@@ -38,7 +35,6 @@ _TABLES_READY = False
 _ACTIVE_TABLES: list[dict[str, Any]] = []
 _TABLE_PROBED: set[int] = set()
 _FIELD_TYPES_BY_TABLE: dict[tuple[str, str], dict[str, Any]] = {}
-_SYNC_LOCK = threading.RLock()
 _REQUIRED_FIELD_NAMES = {"mid", "bvid", "title", "url", "owner_name", "owner_url"}
 _OPTIONAL_FIELD_NAMES = {"tag_1", "tag_2", "tag_3", "tag_4", "tag_5", "tag_status"}
 _WRITE_FIELD_NAMES = _REQUIRED_FIELD_NAMES | _OPTIONAL_FIELD_NAMES
@@ -586,29 +582,6 @@ def search_lark_pool(query: str, *, limit: int = 80) -> list[dict]:
     return _search_lark_pool_legacy(normalized_query, limit=limit)
 
 
-def _load_synced_bvids() -> set[str]:
-    try:
-        payload = json.loads(_SYNC_FILE.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return set()
-    bvids = payload.get("bvids") if isinstance(payload, dict) else []
-    return {str(bvid).strip() for bvid in bvids if str(bvid).strip()}
-
-
-def _save_synced_bvids(bvids: set[str]) -> None:
-    cfg.DATA_DIR.mkdir(parents=True, exist_ok=True)
-    payload = {"schema_version": 1, "bvids": sorted(bvids), "updated_at": time.time()}
-    temp_path = Path(str(_SYNC_FILE) + ".tmp")
-    temp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    try:
-        temp_path.replace(_SYNC_FILE)
-    except PermissionError:
-        _SYNC_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        try:
-            temp_path.unlink(missing_ok=True)
-        except OSError:
-            pass
-
 
 def normalize_pool_entry(entry: dict) -> dict | None:
     if not isinstance(entry, dict):
@@ -670,94 +643,6 @@ def append_cloudflare_pool_entries(entries: list[dict]) -> dict:
         "feishu_queued": int(payload.get("feishu_queued") or 0),
     }
 
-
-def _is_number_field_type(field_type: Any) -> bool:
-    return str(field_type).strip().lower() in {"2", "number"}
-
-
-def _coerce_feishu_field_value(field_name: str, value: Any, field_type: Any = None) -> Any:
-    if value is None:
-        return None
-    text = str(value).strip() if not isinstance(value, (int, float)) else value
-    if text == "":
-        return None
-    if _is_number_field_type(field_type):
-        try:
-            number = float(text)
-        except (TypeError, ValueError):
-            return None
-        return int(number) if number.is_integer() else number
-    return value
-
-
-def _feishu_record_fields(entry: dict[str, Any], field_names: set[str], field_types: dict[str, Any]) -> dict[str, Any]:
-    fields: dict[str, Any] = {}
-    for key, value in entry.items():
-        if key not in field_names:
-            continue
-        coerced = _coerce_feishu_field_value(key, value, field_types.get(key))
-        if coerced is None:
-            continue
-        fields[key] = coerced
-    return fields
-
-
-def append_lark_pool_entries_to_lark(
-    entries: list[dict],
-    *,
-    start_table_index: int = 1,
-    only_table_index: int | None = None,
-    use_sync_cache: bool = True,
-) -> dict:
-    normalized = _normalize_pool_entries(entries)
-    if not normalized:
-        return {"attempted": 0, "added": 0}
-
-    with _SYNC_LOCK:
-        synced_bvids = _load_synced_bvids() if use_sync_cache else set()
-        pending = [entry for entry in normalized if entry["bvid"] not in synced_bvids]
-        if not pending:
-            return {"attempted": len(normalized), "added": 0}
-        token = _tenant_access_token()
-        added = 0
-        cursor = 0
-        for table in _active_tables():
-            table_index = int(table.get("index") or 0)
-            if only_table_index is not None and table_index != int(only_table_index):
-                continue
-            if only_table_index is None and table_index < int(start_table_index):
-                continue
-            capacity = max(0, _TABLE_LIMIT - int(table.get("count") or 0))
-            if capacity <= 0:
-                continue
-            field_names = set(table.get("field_names") or _WRITE_FIELD_NAMES)
-            field_types = table.get("field_types") if isinstance(table.get("field_types"), dict) else {}
-            while cursor < len(pending) and capacity > 0:
-                chunk = pending[cursor : cursor + min(_APPEND_CHUNK_SIZE, capacity)]
-                records = [
-                    {"fields": _feishu_record_fields(entry, field_names, field_types)}
-                    for entry in chunk
-                ]
-                _log_lark_request("bilikara pool append", {"records": records})
-                _require_success(
-                    _post_json(
-                        _records_url(table["app_token"], table["table_id"], "/batch_create"),
-                        {"records": records},
-                        token=token,
-                        timeout=20,
-                    ),
-                    "bilikara pool append failed",
-                )
-                cursor += len(chunk)
-                capacity -= len(chunk)
-                added += len(chunk)
-                synced_bvids.update(entry["bvid"] for entry in chunk)
-                _bump_table_count(int(table["index"]), len(chunk))
-                if use_sync_cache:
-                    _save_synced_bvids(synced_bvids)
-            if cursor >= len(pending):
-                break
-        return {"attempted": len(normalized), "added": added}
 
 
 def append_lark_pool_entries(entries: list[dict]) -> dict:

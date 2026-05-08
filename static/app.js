@@ -1392,6 +1392,7 @@ function syncSearchStageView(view) {
   if (state.searchFlipFrame) {
     window.cancelAnimationFrame(state.searchFlipFrame);
     state.searchFlipFrame = null;
+    elements.searchStage?.classList.remove("is-preparing-flip");
   }
 
   if (isInitialRender) {
@@ -1412,22 +1413,28 @@ function syncSearchStageView(view) {
     setClassToggle(elements.searchStage, "is-lark-view", activeView === "lark");
   };
   const clearFlip = () => {
-    elements.searchStage?.classList.remove("is-flipping");
+    elements.searchStage?.classList.remove("is-flipping", "is-preparing-flip");
     state.searchFlipTimer = null;
   };
   const searchViewOrder = ["search", "browse", "lark"];
   const previousIndex = searchViewOrder.indexOf(previousView);
   const nextIndex = searchViewOrder.indexOf(nextView);
   const forwardSteps = (nextIndex - previousIndex + searchViewOrder.length) % searchViewOrder.length;
+  const startAngle = state.searchStageAngle;
   if (forwardSteps === 1) {
     state.searchStageAngle -= 120;
   } else if (forwardSteps === 2) {
     state.searchStageAngle += 120;
   }
 
-  elements.searchStage?.classList.add("is-flipping");
+  elements.searchStage?.classList.add("is-preparing-flip", "is-flipping");
+  if (elements.searchStageInner) {
+    elements.searchStageInner.style.transform = `rotateY(${startAngle}deg)`;
+    elements.searchStageInner.getBoundingClientRect();
+  }
   state.searchFlipFrame = window.requestAnimationFrame(() => {
     state.searchFlipFrame = null;
+    elements.searchStage?.classList.remove("is-preparing-flip");
     if (elements.searchStageInner) {
       elements.searchStageInner.style.transform = `rotateY(${state.searchStageAngle}deg)`;
     }
