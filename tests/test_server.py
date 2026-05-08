@@ -209,6 +209,31 @@ class PlaylistAddRequestTest(unittest.TestCase):
 
         fetch_video.assert_not_called()
 
+    def test_missing_bilibili_video_error_deletes_pool_bvid(self):
+        handler = BilikaraHandler.__new__(BilikaraHandler)
+
+        with patch(
+            "bilikara.server.delete_cloudflare_pool_entry",
+            return_value={"success": True, "found": True, "deleted": True},
+        ) as delete_entry:
+            handler._delete_missing_bvid_from_pool_if_needed(
+                {"url": "https://www.bilibili.com/video/BV1VpCJBHEGg"},
+                server_module.BilibiliError("啥都木有"),
+            )
+
+        delete_entry.assert_called_once_with("BV1VpCJBHEGg")
+
+    def test_other_bilibili_errors_do_not_delete_pool_bvid(self):
+        handler = BilikaraHandler.__new__(BilikaraHandler)
+
+        with patch("bilikara.server.delete_cloudflare_pool_entry") as delete_entry:
+            handler._delete_missing_bvid_from_pool_if_needed(
+                {"url": "https://www.bilibili.com/video/BV1VpCJBHEGg"},
+                server_module.BilibiliError("请求太频繁"),
+            )
+
+        delete_entry.assert_not_called()
+
 
 class PlaylistExportRouteTest(unittest.TestCase):
     def test_playlist_export_csv_route_downloads_friendly_csv(self):

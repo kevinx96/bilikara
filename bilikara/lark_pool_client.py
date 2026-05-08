@@ -644,6 +644,31 @@ def append_cloudflare_pool_entries(entries: list[dict]) -> dict:
     }
 
 
+def delete_cloudflare_pool_entry(bvid: str) -> dict:
+    normalized_bvid = str(bvid or "").strip()
+    if not _VALID_BVID_RE.match(normalized_bvid):
+        return {"success": False, "deleted": False, "error": "invalid bvid"}
+    try:
+        payload = _cloudflare_json("POST", "/delete-invalid", {"bvid": normalized_bvid}, timeout=10)
+    except LarkPoolError as exc:
+        return {"success": False, "bvid": normalized_bvid, "deleted": False, "error": str(exc)}
+    if not isinstance(payload, dict):
+        return {
+            "success": False,
+            "bvid": normalized_bvid,
+            "deleted": False,
+            "error": "Cloudflare returned an invalid payload",
+        }
+    return {
+        "success": bool(payload.get("success")),
+        "bvid": str(payload.get("bvid") or normalized_bvid),
+        "found": bool(payload.get("found")),
+        "deleted": bool(payload.get("deleted")),
+        "feishu_queued": bool(payload.get("feishu_queued")),
+        "error": str(payload.get("error") or ""),
+    }
+
+
 
 def append_lark_pool_entries(entries: list[dict]) -> dict:
     return append_cloudflare_pool_entries(entries)
