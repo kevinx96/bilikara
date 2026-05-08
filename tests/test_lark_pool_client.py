@@ -266,6 +266,38 @@ class LarkPoolClientTest(unittest.TestCase):
         self.assertEqual(timeout, 20)
         self.assertEqual(payload["records"][0]["bvid"], "BV1NEW000001")
 
+    def test_delete_cloudflare_pool_entry_posts_single_bvid(self):
+        requests = []
+
+        def fake_cloudflare(method, path, payload=None, *, timeout=12.0):
+            requests.append((method, path, payload, timeout))
+            return {
+                "success": True,
+                "bvid": "BV1xx411c7mD",
+                "found": True,
+                "deleted": True,
+                "feishu_queued": True,
+            }
+
+        with patch.object(lark_pool, "_cloudflare_json", side_effect=fake_cloudflare):
+            result = lark_pool.delete_cloudflare_pool_entry("BV1xx411c7mD")
+
+        self.assertTrue(result["deleted"])
+        self.assertEqual(len(requests), 1)
+        method, path, payload, timeout = requests[0]
+        self.assertEqual(method, "POST")
+        self.assertEqual(path, "/delete-invalid")
+        self.assertEqual(timeout, 10)
+        self.assertEqual(payload, {"bvid": "BV1xx411c7mD"})
+
+    def test_delete_cloudflare_pool_entry_rejects_invalid_bvid(self):
+        with patch.object(lark_pool, "_cloudflare_json") as cloudflare:
+            result = lark_pool.delete_cloudflare_pool_entry("BVSHORT")
+
+        cloudflare.assert_not_called()
+        self.assertFalse(result["success"])
+        self.assertFalse(result["deleted"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -32,7 +32,7 @@ from .bilibili import (
     refresh_gatcha_favlist,
     search_gatcha_cache,
 )
-from .lark_pool_client import search_lark_pool, search_lark_pool_table
+from .lark_pool_client import delete_cloudflare_pool_entry, search_lark_pool, search_lark_pool_table
 from .cache import CacheManager
 from .config import (
     APP_RELEASES_URL,
@@ -52,6 +52,8 @@ from .store import PlaylistStore
 from .updater import check_for_update
 
 RANGE_RE = re.compile(r"bytes=(\d*)-(\d*)")
+BVID_IN_TEXT_RE = re.compile(r"BV[0-9A-Za-z]{10}")
+MISSING_BILIBILI_VIDEO_MESSAGE = "啥都木有"
 
 
 class DuplicateSessionRequestError(ValueError):
@@ -981,6 +983,8 @@ class BilikaraHandler(BaseHTTPRequestHandler):
                 status=HTTPStatus.CONFLICT,
             )
         except BilibiliError as exc:
+            if route == "/api/playlist/add":
+                self._delete_missing_bvid_from_pool_if_needed(body, exc)
             self._write_json({"ok": False, "error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
         except DuplicateSessionRequestError as exc:
             self._write_json(
@@ -1027,6 +1031,21 @@ class BilikaraHandler(BaseHTTPRequestHandler):
             raise DuplicateSessionRequestError(item, existing_session_entry, active_duplicate)
         CONTEXT.add_item(item, position=position, requester_name=requester_name)
         self._write_json({"ok": True, "data": CONTEXT.snapshot()})
+
+    def _delete_missing_bvid_from_pool_if_needed(self, body: dict, error: Exception) -> None:
+        error_message = str(error).strip()
+        if error_message != MISSING_BILIBILI_VIDEO_MESSAGE:
+            return
+        bvid = self._extract_bvid_from_add_body(body)
+        if not bvid:
+            return
+        delete_cloudflare_pool_entry(bvid)
+
+    @staticmethod
+    def _extract_bvid_from_add_body(body: dict) -> str:
+        raw_url = str(body.get("url") or "")
+        match = BVID_IN_TEXT_RE.search(raw_url)
+        return match.group(0) if match else ""
 
     def _serve_static(self, route: str) -> None:
         if route in {"", "/"}:
