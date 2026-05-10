@@ -1222,6 +1222,7 @@ select:disabled {
   align-content: start;
   grid-auto-rows: max-content;
   margin-top: 12px;
+  min-height: 0;
   max-height: clamp(220px, 42vh, 460px);
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -1261,7 +1262,8 @@ select:disabled {
   border: 1px solid rgba(67, 53, 41, 0.08);
 }
 
-.search-result-item > div {
+.search-result-item > div,
+.search-result-meta {
   min-width: 0;
 }
 
@@ -1274,6 +1276,11 @@ select:disabled {
   font-size: 14px;
   line-height: 1.4;
   word-break: break-word;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  overflow: hidden;
 }
 
 .search-result-url {
@@ -1303,6 +1310,73 @@ select:disabled {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.gatcha-stage {
+  position: relative;
+  min-width: 0;
+  min-height: 154px;
+  perspective: 1400px;
+}
+
+.gatcha-stage-inner {
+  display: grid;
+  min-width: 0;
+  transform-style: preserve-3d;
+  transition: transform 400ms ease;
+}
+
+.gatcha-stage:not(.is-flipping) .gatcha-stage-inner,
+.gatcha-stage.is-preparing-flip .gatcha-stage-inner {
+  transition: none;
+}
+
+.gatcha-stage.is-uid-view .gatcha-stage-inner {
+  transform: rotateY(180deg);
+}
+
+.gatcha-stage.is-uid-view:not(.is-flipping) .gatcha-stage-inner {
+  transform: none !important;
+}
+
+.gatcha-face {
+  grid-area: 1 / 1;
+  display: grid;
+  min-width: 0;
+  backface-visibility: hidden;
+  pointer-events: none;
+}
+
+.gatcha-face-front {
+  pointer-events: auto;
+}
+
+.gatcha-face-back {
+  transform: rotateY(180deg);
+}
+
+.gatcha-stage.is-uid-view:not(.is-flipping) .gatcha-face-back {
+  transform: none;
+}
+
+.gatcha-stage.is-uid-view .gatcha-face-front {
+  pointer-events: none;
+}
+
+.gatcha-stage.is-uid-view .gatcha-face-back {
+  pointer-events: auto;
+}
+
+.gatcha-stage:not(.is-uid-view):not(.is-flipping) .gatcha-face-back,
+.gatcha-stage.is-uid-view:not(.is-flipping) .gatcha-face-front {
+  display: none;
+  content-visibility: hidden;
+}
+
+.gatcha-stage.is-flip-pruned[data-previous-view="draw"] .gatcha-face-front,
+.gatcha-stage.is-flip-pruned[data-previous-view="uid"] .gatcha-face-back {
+  visibility: hidden;
+  pointer-events: none;
+}
+
 .gatcha-uid-toggle {
   min-height: 40px;
   padding-inline: 12px;
@@ -1317,7 +1391,10 @@ select:disabled {
 }
 
 .remote-search-stage {
+  position: relative;
   min-width: 0;
+  max-width: 100%;
+  height: clamp(260px, 46vh, 460px);
   perspective: 1400px;
 }
 
@@ -1328,42 +1405,104 @@ select:disabled {
 .remote-search-stage-inner {
   display: grid;
   min-width: 0;
+  max-width: 100%;
   transform-style: preserve-3d;
-  transition: transform 360ms ease;
+  transition: transform 400ms ease;
+}
+
+.remote-search-stage:not(.is-flipping) .remote-search-stage-inner,
+.remote-search-stage.is-preparing-flip .remote-search-stage-inner {
+  transition: none;
 }
 
 .remote-search-stage.is-lark-view .remote-search-stage-inner {
-  transform: rotateY(-180deg);
+  transform: rotateY(120deg);
+}
+
+.remote-search-stage.is-browse-view .remote-search-stage-inner {
+  transform: rotateY(-120deg);
+}
+
+.remote-search-stage.is-browse-view:not(.is-flipping) .remote-search-stage-inner,
+.remote-search-stage.is-lark-view:not(.is-flipping) .remote-search-stage-inner {
+  transform: none !important;
 }
 
 .remote-search-face {
   grid-area: 1 / 1;
   display: grid;
   gap: 12px;
+  align-content: start;
+  min-height: 0;
+  height: 100%;
   min-width: 0;
+  max-width: 100%;
   backface-visibility: hidden;
   pointer-events: none;
 }
 
 .remote-search-face-front {
+  grid-template-rows: auto auto minmax(0, 1fr);
   pointer-events: auto;
 }
 
 .remote-search-face-lark {
-  transform: rotateY(-180deg);
+  grid-template-rows: auto auto minmax(0, 1fr);
+  pointer-events: none;
+  transform: rotateY(240deg);
 }
 
+.remote-search-face-back {
+  transform: rotateY(120deg);
+}
+
+.remote-search-stage.is-browse-view:not(.is-flipping) .remote-search-face-back,
+.remote-search-stage.is-lark-view:not(.is-flipping) .remote-search-face-lark {
+  transform: none;
+}
+
+.remote-search-stage.is-browse-view .remote-search-face-front,
 .remote-search-stage.is-lark-view .remote-search-face-front {
   pointer-events: none;
 }
 
+.remote-search-stage.is-browse-view .remote-search-face-back,
 .remote-search-stage.is-lark-view .remote-search-face-lark {
   pointer-events: auto;
 }
 
+.remote-search-stage:not(.is-browse-view):not(.is-flipping) .remote-search-face-back,
+.remote-search-stage.is-browse-view:not(.is-flipping) .remote-search-face-front,
+.remote-search-stage.is-browse-view:not(.is-flipping) .remote-search-face-lark,
 .remote-search-stage:not(.is-lark-view):not(.is-flipping) .remote-search-face-lark,
-.remote-search-stage.is-lark-view:not(.is-flipping) .remote-search-face-front {
+.remote-search-stage.is-lark-view:not(.is-flipping) .remote-search-face-front,
+.remote-search-stage.is-lark-view:not(.is-flipping) .remote-search-face-back {
+  display: none;
   content-visibility: hidden;
+}
+
+.remote-search-stage.is-flip-pruned[data-previous-view="search"] .remote-search-face-front,
+.remote-search-stage.is-flip-pruned[data-previous-view="browse"] .remote-search-face-back,
+.remote-search-stage.is-flip-pruned[data-previous-view="lark"] .remote-search-face-lark {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.remote-search-stage.is-flip-pruned[data-next-view="search"] .remote-search-face-back,
+.remote-search-stage.is-flip-pruned[data-next-view="search"] .remote-search-face-lark,
+.remote-search-stage.is-flip-pruned[data-next-view="browse"] .remote-search-face-front,
+.remote-search-stage.is-flip-pruned[data-next-view="browse"] .remote-search-face-lark,
+.remote-search-stage.is-flip-pruned[data-next-view="lark"] .remote-search-face-front,
+.remote-search-stage.is-flip-pruned[data-next-view="lark"] .remote-search-face-back {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.remote-search-stage.is-flipping[data-skipped-view="search"] .remote-search-face-front,
+.remote-search-stage.is-flipping[data-skipped-view="browse"] .remote-search-face-back,
+.remote-search-stage.is-flipping[data-skipped-view="lark"] .remote-search-face-lark {
+  visibility: hidden;
+  pointer-events: none;
 }
 
 .follow-browser {
