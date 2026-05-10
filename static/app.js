@@ -2456,7 +2456,8 @@ function escapeRegExpText(text) {
 }
 
 function delayOverlayTitleForItem(item, fallback = "未命名歌曲") {
-  let title = String(item?.display_title || item?.title || fallback).trim();
+  let originalTitle = String(item?.display_title || item?.title || "").trim();
+  let title = originalTitle;
   const partCandidates = [
     item?.part_title,
     ...(Array.isArray(item?.selected_parts) ? item.selected_parts : []),
@@ -2469,7 +2470,7 @@ function delayOverlayTitleForItem(item, fallback = "未命名歌曲") {
       .replace(new RegExp(`\\s*(?:-|–|—|·|\\||/)?\\s*${escapedPart}\\s*$`, "i"), "")
       .trim();
   }
-  return title || fallback;
+  return title || originalTitle || fallback;
 }
 
 function delayOverlayItemSignature(item) {
