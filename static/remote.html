@@ -60,6 +60,7 @@
         </div>
         <h2 id="current-title">正在读取状态...</h2>
         <p id="current-requester" class="requester-line hidden"></p>
+        <p id="current-owner" class="current-owner-line hidden"></p>
         <p id="current-cache-state" class="queue-state current-cache-state hidden"></p>
         <p id="current-meta" class="muted"></p>
         <div id="audio-variant-bar" class="audio-variant-bar hidden"></div>
@@ -173,6 +174,15 @@
             <option value="played">导出本场</option>
             <option value="history">全部历史</option>
           </select>
+          <select id="history-export-page-size" class="history-export-page-size" aria-label="图片每页歌曲数">
+            <option value="200" selected>图片每页 200 首</option>
+            <option value="150">图片每页 150 首</option>
+            <option value="100">图片每页 100 首</option>
+            <option value="80">图片每页 80 首</option>
+            <option value="60">图片每页 60 首</option>
+            <option value="50">图片每页 50 首</option>
+          </select>
+          <p class="history-export-note">仅影响图片分页；CSV 会导出完整列表。</p>
           <button type="button" id="history-export-image-button" class="primary-button">导出图片</button>
           <button type="button" id="history-export-csv-button" class="ghost-button">导出 CSV</button>
         </div>
@@ -369,6 +379,24 @@
           </div>
         </div>
       </div>
+      <div id="reorder-confirm-sheet" class="binding-sheet hidden" aria-hidden="true">
+        <div id="reorder-confirm-sheet-backdrop" class="binding-sheet-backdrop"></div>
+        <div class="binding-sheet-panel reorder-confirm-panel">
+          <div class="binding-sheet-handle" aria-hidden="true"></div>
+          <div class="binding-sheet-head">
+            <div>
+              <p class="panel-tag">Queue Order</p>
+              <h2>确认调整顺序</h2>
+            </div>
+            <button type="button" id="reorder-confirm-sheet-close" class="ghost-button binding-sheet-close">关闭</button>
+          </div>
+          <p id="reorder-confirm-sheet-text" class="muted reorder-confirm-text"></p>
+          <div class="binding-sheet-actions">
+            <button type="button" id="reorder-confirm-sheet-cancel" class="ghost-button">取消</button>
+            <button type="button" id="reorder-confirm-sheet-confirm" class="primary-button">确认移动</button>
+          </div>
+        </div>
+      </div>
     </main>
 
     <template id="queue-item-template">
@@ -384,7 +412,9 @@
           <div class="queue-main">
             <h3 class="queue-title"></h3>
             <div class="queue-meta-row">
-              <span class="queue-requester hidden"></span>
+              <div class="queue-meta-info">
+                <span class="queue-requester hidden"></span>
+              </div>
               <div class="queue-actions-wrap">
                 <button type="button" class="menu-toggle" data-action="toggle-menu" aria-label="更多操作">
                   <svg viewBox="0 0 24 24" aria-hidden="true" width="16" height="16">
@@ -422,9 +452,11 @@
         <div class="history-main">
           <h3 class="history-title"></h3>
           <div class="history-meta">
-            <span class="history-time"></span>
-            <span class="history-count"></span>
-            <span class="history-requester hidden"></span>
+            <div class="history-meta-info">
+              <span class="history-time"></span>
+              <span class="history-count"></span>
+              <span class="history-requester hidden"></span>
+            </div>
             <div class="history-actions-wrap">
               <button type="button" class="menu-toggle" data-action="toggle-menu" aria-label="更多操作">
                 <svg viewBox="0 0 24 24" aria-hidden="true" width="16" height="16">

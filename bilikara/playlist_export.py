@@ -30,7 +30,7 @@ def playlist_csv_bytes(items: list[dict[str, Any]], *, time_header: str = "点�
             "BV 号",
             "点歌人",
             "UP 主",
-            "UP 主UID",
+            "UP 主 UID",
             "点歌次数",
             time_header,
             "视频链接",
@@ -48,7 +48,7 @@ def playlist_csv_bytes(items: list[dict[str, Any]], *, time_header: str = "点�
                 "BV 号": _video_id(entry),
                 "点歌人": _text(entry.get("requester_name")),
                 "UP 主": _text(entry.get("owner_name")),
-                "UP 主UID": _text(entry.get("owner_mid")),
+                "UP 主 UID": _text(entry.get("owner_mid")),
                 "点歌次数": _request_count(entry),
                 time_header: _format_time(entry.get("requested_at")),
                 "视频链接": _text(entry.get("resolved_url")),
@@ -64,6 +64,7 @@ def playlist_image_export(
     *,
     logo_path: Path | None = None,
     title: str = "bilikara 歌单导出",
+    page_size: int = PLAYLIST_IMAGE_PAGE_SIZE,
 ) -> tuple[bytes, str, str]:
     try:
         from PIL import Image, ImageDraw, ImageFont
@@ -71,15 +72,20 @@ def playlist_image_export(
         raise RuntimeError("图片导出需要安装 Pillow：py -m pip install Pillow") from exc
 
     ordered_items = _items_in_export_order(items)
+    try:
+        normalized_page_size = max(1, int(page_size))
+    except (TypeError, ValueError):
+        normalized_page_size = PLAYLIST_IMAGE_PAGE_SIZE
     pages = [
-        ordered_items[index : index + PLAYLIST_IMAGE_PAGE_SIZE]
-        for index in range(0, max(1, len(ordered_items)), PLAYLIST_IMAGE_PAGE_SIZE)
+        ordered_items[index : index + normalized_page_size]
+        for index in range(0, max(1, len(ordered_items)), normalized_page_size)
     ]
     rendered_pages = [
         _render_playlist_page(
             page,
             page_number=page_index + 1,
             page_count=len(pages),
+            start_index=page_index * normalized_page_size,
             total_count=len(ordered_items),
             logo_path=logo_path,
             title=title,
@@ -110,6 +116,7 @@ def _render_playlist_page(
     *,
     page_number: int,
     page_count: int,
+    start_index: int,
     total_count: int,
     logo_path: Path | None,
     title: str,
@@ -162,7 +169,6 @@ def _render_playlist_page(
         draw.text((cursor_x, table_y + 30), label, fill="#8F3E2B", font=header_font)
         cursor_x += col_w
 
-    start_index = (page_number - 1) * PLAYLIST_IMAGE_PAGE_SIZE
     for row_index, entry in enumerate(entries):
         top = table_y + header_h + row_index * row_h
         bg = "#FFFFFF" if row_index % 2 == 0 else "#FBF6EF"

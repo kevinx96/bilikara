@@ -726,6 +726,15 @@
         <option value="played">本场记录</option>
         <option value="history">全部历史</option>
       </select>
+      <select id="confirm-page-size" class="confirm-page-size hidden" aria-label="图片每页歌曲数">
+        <option value="200" selected>图片每页 200 首</option>
+        <option value="150">图片每页 150 首</option>
+        <option value="100">图片每页 100 首</option>
+        <option value="80">图片每页 80 首</option>
+        <option value="60">图片每页 60 首</option>
+        <option value="50">图片每页 50 首</option>
+      </select>
+      <p id="confirm-page-size-note" class="confirm-page-size-note hidden">仅影响图片分页；CSV 会导出完整列表。</p>
       <div class="confirm-actions">
         <button type="button" id="confirm-cancel" class="toolbar-button">取消</button>
         <button type="button" id="confirm-secondary" class="toolbar-button hidden">导出 CSV</button>

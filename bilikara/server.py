@@ -286,6 +286,7 @@ class AppContext:
         is_paused: bool,
         current_time: float = 0.0,
         duration: float | None = None,
+        client_info: object | None = None,
     ) -> None:
         normalized_item_id = str(item_id or "").strip()
         if not normalized_item_id:
@@ -306,13 +307,21 @@ class AppContext:
                     previous_duration = max(0.0, float(self._player_status.get("duration") or 0.0))
                 except (TypeError, ValueError):
                     previous_duration = 0.0
-            self._player_status = {
+            next_status = {
                 "item_id": normalized_item_id,
                 "is_paused": bool(is_paused),
                 "current_time": max(0.0, float(current_time or 0.0)),
                 "duration": normalized_duration or previous_duration,
                 "updated_at": time.time(),
             }
+            if isinstance(client_info, dict):
+                next_status["client_info"] = {
+                    "user_agent": str(client_info.get("user_agent") or "")[:500],
+                    "platform": str(client_info.get("platform") or "")[:120],
+                    "language": str(client_info.get("language") or "")[:80],
+                    "vendor": str(client_info.get("vendor") or "")[:120],
+                }
+            self._player_status = next_status
         if (not is_paused) or float(current_time or 0.0) > 0:
             self.store.mark_item_playback_started(normalized_item_id)
         self._notify_state_changed()
@@ -618,6 +627,11 @@ class BilikaraHandler(BaseHTTPRequestHandler):
             query = parse_qs(urlparse(self.path).query)
             export_format = str(query.get("format", ["csv"])[0] or "csv").strip().lower()
             export_source = str(query.get("source", ["history"])[0] or "history").strip().lower()
+            try:
+                export_page_size = int(query.get("page_size", ["200"])[0] or "200")
+            except (TypeError, ValueError):
+                export_page_size = 200
+            export_page_size = export_page_size if export_page_size in {200, 150, 100, 80, 60, 50} else 200
             source_settings = {
                 "history": {
                     "items": lambda: CONTEXT.history_snapshot(),
@@ -651,6 +665,7 @@ class BilikaraHandler(BaseHTTPRequestHandler):
                         history,
                         logo_path=_playlist_export_logo_path(),
                         title=str(settings["title"]),
+                        page_size=export_page_size,
                     )
                     suffix = Path(default_filename).suffix or ".png"
                     filename = f"bilikara-{settings['filename']}-{timestamp}{suffix}"
@@ -892,6 +907,7 @@ class BilikaraHandler(BaseHTTPRequestHandler):
                     is_paused=is_paused,
                     current_time=current_time,
                     duration=duration,
+                    client_info=body.get("client_info"),
                 )
                 self._write_json({"ok": True})
                 return

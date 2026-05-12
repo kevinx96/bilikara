@@ -5,6 +5,8 @@ const viewportScaleResetDelaysMs = [0, 120, 360];
 const eventStreamInitialRetryMs = 1000;
 const eventStreamMaxRetryMs = 15000;
 const larkSearchTableCount = 5;
+const playerControlStatusRefreshDelaysMs = [180, 520, 1100, 1800];
+const playerControlStatusSyncTimeoutMs = 3200;
 const storageKeys = {
   layoutMode: "bilikara.remote.layout.mode",
 };
@@ -18,6 +20,8 @@ const state = {
   openQueueMenuId: null,
   openHistoryMenuId: null,
   playerControlPendingAction: "",
+  playerControlStatusSync: null,
+  playerControlStatusRefreshTimers: [],
   audioVariantSwitchInFlight: false,
   audioVariantSwitchUnlockAt: 0,
   audioVariantSwitchTimer: null,
@@ -35,6 +39,9 @@ const state = {
   bindingIntent: null,
   gatchaFavlistSheetOpen: false,
   gatchaFavlistIntent: null,
+  reorderConfirmSheetOpen: false,
+  reorderConfirmIntent: null,
+  reorderConfirmSaving: false,
   bindingAccordion: {
     video: false,
     audio: false,
@@ -53,11 +60,29 @@ const state = {
   larkSearchVisible: false,
   larkSearchLoading: false,
   larkSearchSeq: 0,
+  remoteSearchStageView: "",
+  remoteSearchStageAngle: 0,
   remoteSearchFlipTimer: null,
+  remoteSearchFlipFrame: null,
+  remoteSearchPruneTimer: null,
+  gatchaStageView: "",
+  gatchaStageAngle: 0,
+  gatchaFlipTimer: null,
+  gatchaFlipFrame: null,
+  gatchaPruneTimer: null,
+  gatchaMidpointCallback: null,
   followBrowseData: null,
   followBrowseSelectedUid: "",
   followBrowseLoading: false,
   followBrowseRenderSignature: "",
+  requesterSelectRenderSignature: "",
+  currentNowPlayingSignature: "",
+  currentPlaybackClockSignature: "",
+  currentPlaybackClockBaseSeconds: 0,
+  currentPlaybackClockDurationSeconds: 0,
+  currentPlaybackClockStartedAt: 0,
+  currentPlaybackClockPaused: true,
+  currentPlaybackClockTimer: null,
   layoutMode: "full",
   remoteAccessRenderSignature: "",
   viewportScaleResetTimers: [],
@@ -80,6 +105,7 @@ const elements = {
   remotePopoverUrlHint: document.getElementById("remote-popover-url-hint"),
   currentTitle: document.getElementById("current-title"),
   currentRequester: document.getElementById("current-requester"),
+  currentOwner: document.getElementById("current-owner"),
   currentCacheState: document.getElementById("current-cache-state"),
   currentMeta: document.getElementById("current-meta"),
   audioVariantBar: document.getElementById("audio-variant-bar"),
@@ -111,6 +137,12 @@ const elements = {
   gatchaFavlistSheetClose: document.getElementById("gatcha-favlist-sheet-close"),
   gatchaFavlistSheetCancel: document.getElementById("gatcha-favlist-sheet-cancel"),
   gatchaFavlistSheetConfirm: document.getElementById("gatcha-favlist-sheet-confirm"),
+  reorderConfirmSheet: document.getElementById("reorder-confirm-sheet"),
+  reorderConfirmSheetBackdrop: document.getElementById("reorder-confirm-sheet-backdrop"),
+  reorderConfirmSheetText: document.getElementById("reorder-confirm-sheet-text"),
+  reorderConfirmSheetClose: document.getElementById("reorder-confirm-sheet-close"),
+  reorderConfirmSheetCancel: document.getElementById("reorder-confirm-sheet-cancel"),
+  reorderConfirmSheetConfirm: document.getElementById("reorder-confirm-sheet-confirm"),
   requestForm: document.getElementById("request-form"),
   requesterSelect: document.getElementById("requester-select"),
   urlInput: document.getElementById("url-input"),
@@ -121,6 +153,7 @@ const elements = {
   searchMessage: document.getElementById("search-message"),
   searchResults: document.getElementById("search-results"),
   remoteSearchStage: document.getElementById("remote-search-stage"),
+  remoteSearchStageInner: document.getElementById("remote-search-stage-inner"),
   searchTag: document.querySelector(".search-panel .panel-tag"),
   searchTitle: document.querySelector(".search-panel .panel-title"),
   larkSearchToggle: document.getElementById("lark-search-toggle"),
@@ -154,6 +187,8 @@ const elements = {
   gatchaInitView: document.getElementById("gatcha-init-view"),
   gatchaResultView: document.getElementById("gatcha-result-view"),
   gatchaCandidateTitle: document.getElementById("gatcha-candidate-title"),
+  gatchaStage: document.getElementById("gatcha-stage"),
+  gatchaStageInner: document.getElementById("gatcha-stage-inner"),
   gatchaUidView: document.getElementById("gatcha-uid-view"),
   gatchaUidForm: document.getElementById("gatcha-uid-form"),
   gatchaUidInput: document.getElementById("gatcha-uid-input"),
@@ -168,6 +203,7 @@ const elements = {
   historyViewButton: document.getElementById("history-view-button"),
   historyExportRow: document.getElementById("history-export-row"),
   historyExportSource: document.getElementById("history-export-source"),
+  historyExportPageSize: document.getElementById("history-export-page-size"),
   historyExportImageButton: document.getElementById("history-export-image-button"),
   historyExportCsvButton: document.getElementById("history-export-csv-button"),
   appToast: document.getElementById("app-toast"),
@@ -196,6 +232,11 @@ function clientHeaders(extraHeaders = {}) {
 function requesterBadgeText(requesterName) {
   const normalized = String(requesterName || "").trim();
   return normalized ? `点歌人 ${normalized}` : "";
+}
+
+function ownerLineText(ownerName) {
+  const normalized = String(ownerName || "").trim();
+  return normalized ? `UP 主：${normalized}` : "";
 }
 
 function selectedRequesterName() {
@@ -470,23 +511,227 @@ function setMessageForSource(source, message, isError = false) {
   setFormMessage(message, isError);
 }
 
-function setRemoteSearchStageView(showLark) {
+function setRemoteSearchStageView(view) {
   if (!elements.remoteSearchStage) {
     return;
   }
-  const next = Boolean(showLark);
-  const previous = elements.remoteSearchStage.classList.contains("is-lark-view");
-  if (previous !== next) {
-    elements.remoteSearchStage.classList.add("is-flipping");
-    if (state.remoteSearchFlipTimer) {
-      window.clearTimeout(state.remoteSearchFlipTimer);
-    }
-    state.remoteSearchFlipTimer = window.setTimeout(() => {
-      elements.remoteSearchStage?.classList.remove("is-flipping");
-      state.remoteSearchFlipTimer = null;
-    }, 380);
+  const nextView = ["search", "browse", "lark"].includes(view) ? view : "search";
+  const previousView = state.remoteSearchStageView || "search";
+  const isInitialRender = !state.remoteSearchStageView;
+  if (state.remoteSearchStageView === nextView) {
+    return;
   }
-  elements.remoteSearchStage.classList.toggle("is-lark-view", next);
+  state.remoteSearchStageView = nextView;
+
+  if (state.remoteSearchFlipTimer) {
+    window.clearTimeout(state.remoteSearchFlipTimer);
+    state.remoteSearchFlipTimer = null;
+  }
+  if (state.remoteSearchPruneTimer) {
+    window.clearTimeout(state.remoteSearchPruneTimer);
+    state.remoteSearchPruneTimer = null;
+  }
+  elements.remoteSearchStage.classList.remove("is-flip-pruned");
+  if (state.remoteSearchFlipFrame) {
+    window.cancelAnimationFrame(state.remoteSearchFlipFrame);
+    state.remoteSearchFlipFrame = null;
+    elements.remoteSearchStage.classList.remove("is-preparing-flip", "is-flip-pruned");
+  }
+
+  const applySearchStageClass = (activeView) => {
+    elements.remoteSearchStage.classList.toggle("is-browse-view", activeView === "browse");
+    elements.remoteSearchStage.classList.toggle("is-lark-view", activeView === "lark");
+  };
+  const clearFlip = () => {
+    elements.remoteSearchStage?.classList.remove("is-flipping", "is-preparing-flip", "is-flip-pruned");
+    elements.remoteSearchStage?.removeAttribute("data-previous-view");
+    elements.remoteSearchStage?.removeAttribute("data-next-view");
+    elements.remoteSearchStage?.removeAttribute("data-skipped-view");
+    state.remoteSearchFlipTimer = null;
+  };
+
+  if (isInitialRender) {
+    const initialAngles = { search: 0, browse: -120, lark: 120 };
+    state.remoteSearchStageAngle = initialAngles[nextView] ?? 0;
+    if (elements.remoteSearchStageInner) {
+      elements.remoteSearchStageInner.style.transform = `rotateY(${state.remoteSearchStageAngle}deg)`;
+    }
+    applySearchStageClass(nextView);
+    elements.remoteSearchStage.classList.remove("is-flipping", "is-preparing-flip", "is-flip-pruned");
+    elements.remoteSearchStage.removeAttribute("data-previous-view");
+    elements.remoteSearchStage.removeAttribute("data-next-view");
+    elements.remoteSearchStage.removeAttribute("data-skipped-view");
+    return;
+  }
+
+  const searchViewOrder = ["search", "browse", "lark"];
+  const previousIndex = searchViewOrder.indexOf(previousView);
+  const nextIndex = searchViewOrder.indexOf(nextView);
+  const forwardSteps = (nextIndex - previousIndex + searchViewOrder.length) % searchViewOrder.length;
+  const skippedView = searchViewOrder.find((candidate) => candidate !== previousView && candidate !== nextView) || "";
+  const startAngle = state.remoteSearchStageAngle;
+  if (forwardSteps === 1) {
+    state.remoteSearchStageAngle -= 120;
+  } else if (forwardSteps === 2) {
+    state.remoteSearchStageAngle += 120;
+  }
+
+  elements.remoteSearchStage.dataset.previousView = previousView;
+  elements.remoteSearchStage.dataset.nextView = nextView;
+  if (skippedView) {
+    elements.remoteSearchStage.dataset.skippedView = skippedView;
+  } else {
+    elements.remoteSearchStage.removeAttribute("data-skipped-view");
+  }
+  elements.remoteSearchStage.classList.add("is-preparing-flip", "is-flipping");
+  if (elements.remoteSearchStageInner) {
+    elements.remoteSearchStageInner.style.transform = `rotateY(${startAngle}deg)`;
+    elements.remoteSearchStageInner.getBoundingClientRect();
+  }
+  state.remoteSearchFlipFrame = window.requestAnimationFrame(() => {
+    state.remoteSearchFlipFrame = null;
+    elements.remoteSearchStage?.classList.remove("is-preparing-flip");
+    if (elements.remoteSearchStageInner) {
+      elements.remoteSearchStageInner.style.transform = `rotateY(${state.remoteSearchStageAngle}deg)`;
+    }
+  });
+  state.remoteSearchPruneTimer = window.setTimeout(() => {
+    state.remoteSearchPruneTimer = null;
+    elements.remoteSearchStage?.classList.add("is-flip-pruned");
+    applySearchStageClass(nextView);
+  }, 150);
+  state.remoteSearchFlipTimer = window.setTimeout(clearFlip, 420);
+}
+
+function setGatchaStageView(showUid, onMidpoint) {
+  if (!elements.gatchaStage) {
+    if (typeof onMidpoint === "function") {
+      onMidpoint();
+    }
+    return;
+  }
+  const nextView = showUid ? "uid" : "draw";
+  const previousView = state.gatchaStageView || "draw";
+  const isInitialRender = !state.gatchaStageView;
+  if (state.gatchaStageView === nextView) {
+    if (elements.gatchaStage.classList.contains("is-flipping") && !elements.gatchaStage.classList.contains("is-flip-pruned")) {
+      state.gatchaMidpointCallback = onMidpoint;
+      return;
+    }
+    if (typeof onMidpoint === "function") {
+      onMidpoint();
+    }
+    return;
+  }
+  state.gatchaStageView = nextView;
+
+  if (state.gatchaFlipTimer) {
+    window.clearTimeout(state.gatchaFlipTimer);
+    state.gatchaFlipTimer = null;
+  }
+  if (state.gatchaPruneTimer) {
+    window.clearTimeout(state.gatchaPruneTimer);
+    state.gatchaPruneTimer = null;
+  }
+  elements.gatchaStage.classList.remove("is-flip-pruned");
+  if (state.gatchaFlipFrame) {
+    window.cancelAnimationFrame(state.gatchaFlipFrame);
+    state.gatchaFlipFrame = null;
+    elements.gatchaStage.classList.remove("is-preparing-flip", "is-flip-pruned");
+  }
+
+  const applyGatchaStageClass = (activeView) => {
+    elements.gatchaStage.classList.toggle("is-uid-view", activeView === "uid");
+  };
+  const clearFlip = () => {
+    elements.gatchaStage?.classList.remove("is-flipping", "is-preparing-flip", "is-flip-pruned");
+    elements.gatchaStage?.removeAttribute("data-previous-view");
+    state.gatchaFlipTimer = null;
+  };
+
+  if (isInitialRender) {
+    state.gatchaStageAngle = nextView === "uid" ? 180 : 0;
+    if (elements.gatchaStageInner) {
+      elements.gatchaStageInner.style.transform = `rotateY(${state.gatchaStageAngle}deg)`;
+    }
+    applyGatchaStageClass(nextView);
+    elements.gatchaStage.classList.remove("is-flipping", "is-preparing-flip", "is-flip-pruned");
+    elements.gatchaStage.removeAttribute("data-previous-view");
+    if (typeof onMidpoint === "function") {
+      onMidpoint();
+    }
+    return;
+  }
+
+  const startAngle = state.gatchaStageAngle;
+  state.gatchaStageAngle += nextView === "uid" ? 180 : -180;
+  state.gatchaMidpointCallback = onMidpoint;
+  elements.gatchaStage.dataset.previousView = previousView;
+  elements.gatchaStage.classList.add("is-preparing-flip", "is-flipping");
+  if (elements.gatchaStageInner) {
+    elements.gatchaStageInner.style.transform = `rotateY(${startAngle}deg)`;
+    elements.gatchaStageInner.getBoundingClientRect();
+  }
+  state.gatchaFlipFrame = window.requestAnimationFrame(() => {
+    state.gatchaFlipFrame = null;
+    elements.gatchaStage?.classList.remove("is-preparing-flip");
+    if (elements.gatchaStageInner) {
+      elements.gatchaStageInner.style.transform = `rotateY(${state.gatchaStageAngle}deg)`;
+    }
+  });
+  state.gatchaPruneTimer = window.setTimeout(() => {
+    state.gatchaPruneTimer = null;
+    elements.gatchaStage?.classList.add("is-flip-pruned");
+    applyGatchaStageClass(nextView);
+    const midpointCallback = state.gatchaMidpointCallback;
+    state.gatchaMidpointCallback = null;
+    if (typeof midpointCallback === "function") {
+      midpointCallback();
+    }
+  }, 150);
+  state.gatchaFlipTimer = window.setTimeout(clearFlip, 420);
+}
+
+function setupRemoteFlipStages() {
+  const searchInner = elements.remoteSearchStage?.querySelector(".remote-search-stage-inner");
+  if (searchInner) {
+    elements.remoteSearchStageInner = searchInner;
+    elements.followBrowseView?.classList.remove("hidden");
+    elements.followBrowseView?.classList.add("remote-search-face", "remote-search-face-back", "follow-browser");
+    elements.larkSearchView?.classList.add("remote-search-face", "remote-search-face-lark");
+    if (elements.followBrowseView && elements.followBrowseView.parentElement !== searchInner) {
+      searchInner.insertBefore(elements.followBrowseView, elements.larkSearchView || null);
+    }
+  }
+
+  if (elements.gatchaStage || !elements.gatchaInitView || !elements.gatchaResultView || !elements.gatchaUidView) {
+    return;
+  }
+  const gatchaPanel = elements.gatchaInitView.closest(".gatcha-panel");
+  if (!gatchaPanel) {
+    return;
+  }
+
+  const stage = document.createElement("div");
+  stage.id = "gatcha-stage";
+  stage.className = "gatcha-stage";
+  const inner = document.createElement("div");
+  inner.id = "gatcha-stage-inner";
+  inner.className = "gatcha-stage-inner";
+  const mainFace = document.createElement("div");
+  mainFace.id = "gatcha-main-view";
+  mainFace.className = "gatcha-face gatcha-face-front";
+
+  gatchaPanel.insertBefore(stage, elements.gatchaInitView);
+  stage.appendChild(inner);
+  inner.appendChild(mainFace);
+  mainFace.append(elements.gatchaInitView, elements.gatchaResultView);
+  elements.gatchaUidView.classList.remove("hidden");
+  elements.gatchaUidView.classList.add("gatcha-face", "gatcha-face-back");
+  inner.appendChild(elements.gatchaUidView);
+
+  elements.gatchaStage = stage;
+  elements.gatchaStageInner = inner;
 }
 
 function duplicateConfirmMessage(duplicateItem, sessionEntry, activeItem) {
@@ -533,15 +778,23 @@ function selectedHistoryExportSource() {
   return source === "history" ? "history" : "played";
 }
 
-async function downloadHistoryExport(format, source = selectedHistoryExportSource()) {
+function selectedHistoryExportPageSize() {
+  const pageSize = Number.parseInt(String(elements.historyExportPageSize?.value || "200"), 10);
+  return [200, 150, 100, 80, 60, 50].includes(pageSize) ? pageSize : 200;
+}
+
+async function downloadHistoryExport(format, source = selectedHistoryExportSource(), pageSize = selectedHistoryExportPageSize()) {
   const normalizedFormat = String(format || "").trim().toLowerCase();
   const normalizedSource = source === "history" ? "history" : "played";
+  const requestedPageSize = Number.parseInt(String(pageSize || "200"), 10);
+  const normalizedPageSize = [200, 150, 100, 80, 60, 50].includes(requestedPageSize) ? requestedPageSize : 200;
   if (!["csv", "image"].includes(normalizedFormat)) {
     return;
   }
   const params = new URLSearchParams({
     format: normalizedFormat,
     source: normalizedSource,
+    page_size: String(normalizedPageSize),
   });
   const response = await fetch(`/api/playlist/export?${params.toString()}`, {
     cache: "no-store",
@@ -574,10 +827,11 @@ async function downloadHistoryExport(format, source = selectedHistoryExportSourc
 
 async function exportHistory(format) {
   const source = selectedHistoryExportSource();
+  const pageSize = selectedHistoryExportPageSize();
   const sourceLabel = source === "played" ? "本场记录" : "全部历史";
-  setAppMessage(format === "csv" ? `正在导出${sourceLabel} CSV...` : `正在导出${sourceLabel}图片...`);
+  setAppMessage(format === "csv" ? `正在导出${sourceLabel} CSV...` : `正在导出${sourceLabel}图片（每页 ${pageSize} 首）...`);
   try {
-    await downloadHistoryExport(format, source);
+    await downloadHistoryExport(format, source, pageSize);
     setAppMessage(format === "csv" ? `${sourceLabel} CSV 已开始下载。` : `${sourceLabel}图片已开始下载。`);
   } catch (error) {
     setAppMessage(error.message, true);
@@ -645,7 +899,7 @@ async function refreshCacheStatusOnly() {
       state.data = payload.data;
       const current = state.data.current_item;
       if (current) {
-        elements.currentCacheState.textContent = currentCacheStateLabel(current);
+        renderCurrentPlaybackState(current);
         if (current.cache_status === "downloading" || current.cache_status === "queued" || current.cache_status === "waiting") {
           state.autoRefreshTimer = setTimeout(refreshCacheStatusOnly, 1000);
           return;
@@ -922,6 +1176,7 @@ function renderSearchResults(items) {
     row.className = "search-result-item";
 
     const meta = document.createElement("div");
+    meta.className = "search-result-meta";
 
     const title = document.createElement("div");
     title.className = "search-result-title";
@@ -963,6 +1218,7 @@ function renderLarkSearchResults(items) {
     row.className = "search-result-item";
 
     const meta = document.createElement("div");
+    meta.className = "search-result-meta";
     const title = document.createElement("div");
     title.className = "search-result-title";
     title.textContent = String(item.title || "");
@@ -997,6 +1253,7 @@ function appendLarkSearchResults(items) {
     row.className = "search-result-item";
 
     const meta = document.createElement("div");
+    meta.className = "search-result-meta";
     const title = document.createElement("div");
     title.className = "search-result-title";
     title.textContent = String(item.title || "");
@@ -1083,6 +1340,7 @@ function renderFollowSongResults(items, emptyText) {
     row.className = "search-result-item";
 
     const meta = document.createElement("div");
+    meta.className = "search-result-meta";
     const title = document.createElement("div");
     title.className = "search-result-title";
     title.textContent = String(item.title || "");
@@ -1110,9 +1368,7 @@ function renderFollowBrowse() {
 
   const showFollow = Boolean(state.followBrowseVisible);
   const showLark = Boolean(state.larkSearchVisible);
-  elements.remoteSearchStage?.classList.toggle("hidden", showFollow);
-  setRemoteSearchStageView(showLark && !showFollow);
-  elements.followBrowseView.classList.toggle("hidden", !showFollow);
+  setRemoteSearchStageView(showFollow ? "browse" : showLark ? "lark" : "search");
   if (elements.followBrowseToggle) {
     elements.followBrowseToggle.textContent = showFollow ? "返回搜索" : "关注浏览";
     elements.followBrowseToggle.setAttribute("aria-pressed", String(showFollow));
@@ -1259,6 +1515,11 @@ function setGatchaUidMessage(message, isError = false) {
   elements.gatchaUidMessage.classList.toggle("hidden", !message);
 }
 
+function syncGatchaMainContent(showUid, hasCandidate) {
+  elements.gatchaInitView?.classList.toggle("hidden", showUid || hasCandidate);
+  elements.gatchaResultView?.classList.toggle("hidden", showUid || !hasCandidate);
+}
+
 function renderGatchaUidView() {
   syncGatchaTaskTerminalMessage();
   const showUid = Boolean(state.gatchaUidVisible);
@@ -1267,9 +1528,9 @@ function renderGatchaUidView() {
   if (elements.gatchaCandidateTitle && state.gatchaCandidate?.title) {
     elements.gatchaCandidateTitle.textContent = state.gatchaCandidate.title;
   }
-  elements.gatchaUidView?.classList.toggle("hidden", !showUid);
-  elements.gatchaInitView?.classList.toggle("hidden", showUid || hasCandidate);
-  elements.gatchaResultView?.classList.toggle("hidden", showUid || !hasCandidate);
+  setGatchaStageView(showUid, () => {
+    syncGatchaMainContent(showUid, hasCandidate);
+  });
   if (elements.gatchaUidToggle) {
     elements.gatchaUidToggle.textContent = showUid ? "返回抽卡" : "添加 UID";
     elements.gatchaUidToggle.setAttribute("aria-pressed", String(showUid));
@@ -1394,6 +1655,12 @@ function frontendPlaybackMode(_mode) {
 
 function renderRequesterSelect(sessionUsers) {
   const users = Array.isArray(sessionUsers) ? sessionUsers : [];
+  const signature = JSON.stringify(users);
+  if (signature === state.requesterSelectRenderSignature) {
+    return;
+  }
+  state.requesterSelectRenderSignature = signature;
+
   const previousValue = selectedRequesterName();
   elements.requesterSelect.innerHTML = "";
 
@@ -1421,12 +1688,25 @@ function renderRequesterSelect(sessionUsers) {
 
 function renderCurrentItem(current, playbackMode) {
   if (current) {
-    elements.currentTitle.textContent = current.display_title;
     const requesterText = requesterBadgeText(current.requester_name);
-    elements.currentRequester.textContent = requesterText;
-    elements.currentRequester.classList.toggle("hidden", !requesterText);
+    const ownerText = ownerLineText(current.owner_name);
+    const nowPlayingSignature = JSON.stringify([
+      current.id || "",
+      current.display_title || "",
+      requesterText,
+      ownerText,
+    ]);
+    if (nowPlayingSignature !== state.currentNowPlayingSignature) {
+      state.currentNowPlayingSignature = nowPlayingSignature;
+      elements.currentTitle.textContent = current.display_title;
+      elements.currentRequester.textContent = requesterText;
+      elements.currentRequester.classList.toggle("hidden", !requesterText);
+      elements.currentOwner.textContent = ownerText;
+      elements.currentOwner.classList.toggle("hidden", !ownerText);
+      elements.currentMeta.textContent = ""; // 不显示 log 避免高度抖动
+    }
     
-    elements.currentCacheState.textContent = currentCacheStateLabel(current);
+    renderCurrentPlaybackState(current);
     elements.currentCacheState.classList.remove("hidden");
     
     if (current.cache_status === "downloading" || current.cache_status === "queued" || current.cache_status === "waiting") {
@@ -1440,17 +1720,22 @@ function renderCurrentItem(current, playbackMode) {
     
     elements.currentCacheState.classList.toggle("ready", current.cache_status === "ready");
     elements.currentCacheState.classList.toggle("failed", current.cache_status === "failed");
-    elements.currentMeta.textContent = ""; // 不显示 log 避免高度抖动
     return;
   }
 
-  elements.currentTitle.textContent = "当前还没有正在播放的歌曲";
-  elements.currentRequester.textContent = "";
-  elements.currentRequester.classList.add("hidden");
-  elements.currentCacheState.textContent = "";
-  elements.currentCacheState.classList.add("hidden");
-  elements.currentCacheState.classList.remove("ready", "failed");
-  elements.currentMeta.textContent = "点歌后会进入点歌列表，轮到时由服务端页面播放。";
+  if (state.currentNowPlayingSignature !== "__empty__") {
+    state.currentNowPlayingSignature = "__empty__";
+    clearCurrentPlaybackClock();
+    elements.currentTitle.textContent = "当前还没有正在播放的歌曲";
+    elements.currentRequester.textContent = "";
+    elements.currentRequester.classList.add("hidden");
+    elements.currentOwner.textContent = "";
+    elements.currentOwner.classList.add("hidden");
+    elements.currentCacheState.textContent = "";
+    elements.currentCacheState.classList.add("hidden");
+    elements.currentCacheState.classList.remove("ready", "failed");
+    elements.currentMeta.textContent = "点歌后会进入点歌列表，轮到时由服务端页面播放。";
+  }
 }
 
 function audioVariantsForItem(item) {
@@ -1859,6 +2144,84 @@ function closeGatchaFavlistSheet() {
   }, 280);
 }
 
+function openReorderConfirmSheet(intent) {
+  if (!intent?.itemId || !Number.isInteger(intent.targetIndex) || !elements.reorderConfirmSheet) {
+    return;
+  }
+
+  const title = String(intent.title || "").trim() || "这首歌";
+  state.reorderConfirmIntent = {
+    itemId: intent.itemId,
+    targetIndex: intent.targetIndex,
+    title,
+  };
+  state.reorderConfirmSaving = false;
+  state.reorderConfirmSheetOpen = true;
+  if (elements.reorderConfirmSheetText) {
+    elements.reorderConfirmSheetText.textContent = `确认将《${title}》移动到第 ${intent.targetIndex + 1} 首吗？`;
+  }
+  if (elements.reorderConfirmSheetConfirm) {
+    elements.reorderConfirmSheetConfirm.disabled = false;
+    elements.reorderConfirmSheetConfirm.textContent = "确认移动";
+  }
+  elements.reorderConfirmSheet.classList.remove("hidden");
+  elements.reorderConfirmSheet.setAttribute("aria-hidden", "false");
+  requestAnimationFrame(() => {
+    elements.reorderConfirmSheet.classList.add("is-open");
+  });
+}
+
+function closeReorderConfirmSheet() {
+  state.reorderConfirmSheetOpen = false;
+  state.reorderConfirmIntent = null;
+  state.reorderConfirmSaving = false;
+  elements.reorderConfirmSheet?.classList.remove("is-open");
+  elements.reorderConfirmSheet?.setAttribute("aria-hidden", "true");
+  window.setTimeout(() => {
+    if (state.reorderConfirmSheetOpen) {
+      return;
+    }
+    elements.reorderConfirmSheet?.classList.add("hidden");
+    if (elements.reorderConfirmSheetText) {
+      elements.reorderConfirmSheetText.textContent = "";
+    }
+    if (elements.reorderConfirmSheetConfirm) {
+      elements.reorderConfirmSheetConfirm.disabled = false;
+      elements.reorderConfirmSheetConfirm.textContent = "确认移动";
+    }
+  }, 280);
+}
+
+async function confirmReorderConfirmSheet() {
+  const intent = state.reorderConfirmIntent;
+  if (!intent?.itemId || !Number.isInteger(intent.targetIndex) || state.reorderConfirmSaving) {
+    return;
+  }
+
+  state.reorderConfirmSaving = true;
+  if (elements.reorderConfirmSheetConfirm) {
+    elements.reorderConfirmSheetConfirm.disabled = true;
+    elements.reorderConfirmSheetConfirm.textContent = "移动中";
+  }
+
+  try {
+    state.data = await apiPost("/api/playlist/reorder", {
+      item_id: intent.itemId,
+      index: intent.targetIndex,
+    });
+    closeReorderConfirmSheet();
+    setFormMessage("已更新点歌列表顺序。");
+    render();
+  } catch (error) {
+    state.reorderConfirmSaving = false;
+    if (elements.reorderConfirmSheetConfirm) {
+      elements.reorderConfirmSheetConfirm.disabled = false;
+      elements.reorderConfirmSheetConfirm.textContent = "确认移动";
+    }
+    setFormMessage(error.message, true);
+  }
+}
+
 async function confirmGatchaFavlistSheet() {
   const intent = state.gatchaFavlistIntent;
   if (!intent?.uid) {
@@ -2130,6 +2493,86 @@ function currentPlayerStatus(currentItem) {
   return playerStatus;
 }
 
+function playerStatusUpdatedAt(playerStatus) {
+  const updatedAt = Number(playerStatus?.updated_at || 0);
+  return Number.isFinite(updatedAt) && updatedAt > 0 ? updatedAt : 0;
+}
+
+function clearPlayerControlStatusRefreshTimers() {
+  state.playerControlStatusRefreshTimers.forEach((timerId) => {
+    window.clearTimeout(timerId);
+  });
+  state.playerControlStatusRefreshTimers = [];
+}
+
+function clearPlayerControlStatusSync() {
+  state.playerControlStatusSync = null;
+  clearPlayerControlStatusRefreshTimers();
+}
+
+function renderAfterPlayerControlStatusSync() {
+  const currentItem = state.data?.current_item;
+  renderCurrentPlaybackState(currentItem);
+  renderPlayerControls(currentItem, frontendPlaybackMode(state.data?.playback_mode));
+}
+
+function playerControlStatusSyncPending(currentItem, playerStatus = currentPlayerStatus(currentItem)) {
+  const sync = state.playerControlStatusSync;
+  if (!sync) {
+    return false;
+  }
+  if (!currentItem || String(currentItem.id || "") !== sync.itemId) {
+    clearPlayerControlStatusSync();
+    return false;
+  }
+  if (playerStatusUpdatedAt(playerStatus) > sync.updatedAfter) {
+    clearPlayerControlStatusSync();
+    return false;
+  }
+  if (Date.now() >= sync.expiresAt) {
+    clearPlayerControlStatusSync();
+    return false;
+  }
+  return true;
+}
+
+function schedulePlayerControlStatusRefresh() {
+  clearPlayerControlStatusRefreshTimers();
+  const timers = playerControlStatusRefreshDelaysMs.map((delayMs) => (
+    window.setTimeout(async () => {
+      if (!state.playerControlStatusSync) {
+        return;
+      }
+      await fetchState({ force: true }).catch(() => {});
+      const currentItem = state.data?.current_item;
+      playerControlStatusSyncPending(currentItem);
+      renderAfterPlayerControlStatusSync();
+    }, delayMs)
+  ));
+  timers.push(window.setTimeout(() => {
+    if (!state.playerControlStatusSync) {
+      return;
+    }
+    clearPlayerControlStatusSync();
+    renderAfterPlayerControlStatusSync();
+  }, playerControlStatusSyncTimeoutMs));
+  state.playerControlStatusRefreshTimers = timers;
+}
+
+function beginPlayerControlStatusSync(currentItem) {
+  const itemId = String(currentItem?.id || "").trim();
+  if (!itemId) {
+    clearPlayerControlStatusSync();
+    return;
+  }
+  state.playerControlStatusSync = {
+    itemId,
+    updatedAfter: playerStatusUpdatedAt(currentPlayerStatus(currentItem)),
+    expiresAt: Date.now() + playerControlStatusSyncTimeoutMs,
+  };
+  schedulePlayerControlStatusRefresh();
+}
+
 function renderPlayerControls(currentItem, playbackMode) {
   if (!currentItem) {
     elements.playerControlPanel.classList.add("hidden");
@@ -2258,10 +2701,112 @@ function currentCacheStateLabel(item) {
     return "";
   }
   if (item.cache_status === "downloading") {
+    const message = String(item.cache_message || "").trim();
+    if (message) {
+      return message;
+    }
     const size = Number(item.cache_size_bytes || 0);
     return size > 0 ? `缓存中 · ${formatBytes(size)}` : "缓存中";
   }
   return queueStateLabel(item);
+}
+
+function formatPlaybackClockSeconds(seconds) {
+  const normalizedSeconds = Math.max(0, Math.floor(Number(seconds || 0)));
+  const hours = Math.floor(normalizedSeconds / 3600);
+  const minutes = Math.floor((normalizedSeconds % 3600) / 60);
+  const restSeconds = normalizedSeconds % 60;
+  if (hours > 0) {
+    return `${hours}:${String(minutes).padStart(2, "0")}:${String(restSeconds).padStart(2, "0")}`;
+  }
+  return `${minutes}:${String(restSeconds).padStart(2, "0")}`;
+}
+
+function clearCurrentPlaybackClock() {
+  if (state.currentPlaybackClockTimer) {
+    window.clearInterval(state.currentPlaybackClockTimer);
+    state.currentPlaybackClockTimer = null;
+  }
+  state.currentPlaybackClockSignature = "";
+  state.currentPlaybackClockBaseSeconds = 0;
+  state.currentPlaybackClockDurationSeconds = 0;
+  state.currentPlaybackClockStartedAt = 0;
+  state.currentPlaybackClockPaused = true;
+}
+
+function currentPlaybackClockText() {
+  const durationSeconds = Math.max(0, Number(state.currentPlaybackClockDurationSeconds || 0));
+  if (!(durationSeconds > 0)) {
+    return "";
+  }
+  const baseSeconds = Math.max(0, Number(state.currentPlaybackClockBaseSeconds || 0));
+  const elapsedSeconds = state.currentPlaybackClockPaused
+    ? 0
+    : Math.max(0, (Date.now() - Number(state.currentPlaybackClockStartedAt || Date.now())) / 1000);
+  const currentSeconds = Math.min(durationSeconds, baseSeconds + elapsedSeconds);
+  return `${formatPlaybackClockSeconds(currentSeconds)} / ${formatPlaybackClockSeconds(durationSeconds)}`;
+}
+
+function paintCurrentPlaybackClock() {
+  const text = currentPlaybackClockText();
+  if (!text || !elements.currentCacheState) {
+    return;
+  }
+  if (elements.currentCacheState.textContent !== text) {
+    elements.currentCacheState.textContent = text;
+  }
+}
+
+function renderCurrentPlaybackState(current) {
+  if (!current || current.cache_status !== "ready") {
+    if (
+      state.playerControlStatusSync
+      && (!current || String(current.id || "") !== state.playerControlStatusSync.itemId)
+    ) {
+      clearPlayerControlStatusSync();
+    }
+    clearCurrentPlaybackClock();
+    elements.currentCacheState.textContent = currentCacheStateLabel(current);
+    return;
+  }
+
+  const playerStatus = currentPlayerStatus(current);
+  const durationSeconds = Number(playerStatus?.duration || 0);
+  const currentSeconds = Math.max(0, Number(playerStatus?.current_time || 0));
+  const isPaused = Boolean(playerStatus?.is_paused);
+  const waitingForHostStatus = playerControlStatusSyncPending(current, playerStatus);
+  if (!(durationSeconds > 0) || (!currentSeconds && isPaused)) {
+    clearCurrentPlaybackClock();
+    elements.currentCacheState.textContent = currentCacheStateLabel(current);
+    return;
+  }
+
+  const signature = [
+    current.id || "",
+    Math.round(currentSeconds),
+    Math.round(durationSeconds),
+    isPaused ? "paused" : "playing",
+    waitingForHostStatus ? "host-sync" : "live",
+  ].join("|");
+  if (signature !== state.currentPlaybackClockSignature) {
+    state.currentPlaybackClockSignature = signature;
+    state.currentPlaybackClockBaseSeconds = currentSeconds;
+    state.currentPlaybackClockDurationSeconds = durationSeconds;
+    state.currentPlaybackClockStartedAt = Date.now();
+    state.currentPlaybackClockPaused = waitingForHostStatus || isPaused;
+  }
+
+  paintCurrentPlaybackClock();
+  if (waitingForHostStatus || isPaused) {
+    if (state.currentPlaybackClockTimer) {
+      window.clearInterval(state.currentPlaybackClockTimer);
+      state.currentPlaybackClockTimer = null;
+    }
+    return;
+  }
+  if (!state.currentPlaybackClockTimer) {
+    state.currentPlaybackClockTimer = window.setInterval(paintCurrentPlaybackClock, 1000);
+  }
 }
 
 function formatBytes(value) {
@@ -2484,17 +3029,9 @@ async function sendPlayerControl(action, deltaSeconds = 0) {
 
   try {
     state.playerControlPendingAction = action;
-    if (action === "toggle-play") {
-      const existingStatus = currentPlayerStatus(currentItem) || { item_id: currentItem.id, is_paused: false };
-      state.data.player_status = {
-        ...existingStatus,
-        item_id: currentItem.id,
-        is_paused: !Boolean(existingStatus.is_paused),
-      };
-      renderPlayerControls(currentItem, playbackMode);
-    } else {
-      renderPlayerControls(currentItem, playbackMode);
-    }
+    beginPlayerControlStatusSync(currentItem);
+    renderCurrentPlaybackState(currentItem);
+    renderPlayerControls(currentItem, playbackMode);
     applyStateSnapshot(await apiPost("/api/player/control", {
       action,
       item_id: currentItem.id,
@@ -2502,6 +3039,7 @@ async function sendPlayerControl(action, deltaSeconds = 0) {
     }));
     setFormMessage(message);
   } catch (error) {
+    clearPlayerControlStatusSync();
     setFormMessage(error.message, true);
     await fetchState().catch(() => {});
   }
@@ -2935,6 +3473,22 @@ elements.gatchaFavlistSheetConfirm?.addEventListener("click", async () => {
   await confirmGatchaFavlistSheet();
 });
 
+elements.reorderConfirmSheetClose?.addEventListener("click", () => {
+  closeReorderConfirmSheet();
+});
+
+elements.reorderConfirmSheetCancel?.addEventListener("click", () => {
+  closeReorderConfirmSheet();
+});
+
+elements.reorderConfirmSheetBackdrop?.addEventListener("click", () => {
+  closeReorderConfirmSheet();
+});
+
+elements.reorderConfirmSheetConfirm?.addEventListener("click", async () => {
+  await confirmReorderConfirmSheet();
+});
+
 elements.bindingVideoToggle?.addEventListener("click", () => {
   state.bindingAccordion.video = !state.bindingAccordion.video;
   renderBindingAccordion();
@@ -3105,6 +3659,9 @@ document.addEventListener("keydown", (event) => {
   if (state.gatchaFavlistSheetOpen) {
     closeGatchaFavlistSheet();
   }
+  if (state.reorderConfirmSheetOpen) {
+    closeReorderConfirmSheet();
+  }
 });
 
 document.addEventListener("visibilitychange", () => {
@@ -3142,6 +3699,7 @@ window.addEventListener("pagehide", disconnectClient);
 window.addEventListener("beforeunload", disconnectClient);
 
 async function startRemoteSession() {
+  setupRemoteFlipStages();
   hydrateLocalPreferences();
   renderLayoutMode();
   try {
