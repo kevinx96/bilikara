@@ -13,6 +13,7 @@
   --action-button-width: 96px;
   --top-controls-width: 628px;
   --status-chip-width: 164px;
+  --language-control-width: 132px;
   --layout-control-width: 164px;
   --remote-mini-control-width: 100px;
   --playback-control-width: 228px;
@@ -471,8 +472,23 @@ h2 {
   flex: 0 0 var(--layout-control-width);
 }
 
+.language-control {
+  width: var(--language-control-width);
+  min-width: var(--language-control-width);
+  flex: 0 0 var(--language-control-width);
+}
+
 .layout-control .mode-switch {
   align-self: center;
+}
+
+.language-switch {
+  align-self: center;
+}
+
+.language-switch .mode-button {
+  min-width: 0;
+  padding: 8px 10px;
 }
 
 .playback-control {
@@ -4201,7 +4217,8 @@ select:disabled {
     min-width: 100%;
   }
 
-  .layout-control {
+  .layout-control,
+  .language-control {
     width: 100%;
     min-width: 100%;
     flex: 1 1 auto;
