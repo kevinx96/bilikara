@@ -133,6 +133,7 @@ h1 {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 12px;
   position: relative;
 }
@@ -149,10 +150,29 @@ h1 {
 }
 
 
+.language-control {
+  width: 132px;
+  min-width: 132px;
+  justify-items: start;
+}
+
+
+.language-switch {
+  align-self: center;
+}
+
+
+.language-switch .mode-button {
+  min-width: 0;
+  padding: 9px 10px;
+}
+
+
 .remote-qr-control {
   position: relative;
   width: 92px;
   min-width: 92px;
+  margin-left: auto;
   justify-items: center;
 }
 

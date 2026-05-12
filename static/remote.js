@@ -6,10 +6,14 @@ const eventStreamInitialRetryMs = 1000;
 const eventStreamMaxRetryMs = 15000;
 const larkSearchTableCount = 5;
 const storageKeys = {
+  language: "bilikara.ui.language",
   layoutMode: "bilikara.remote.layout.mode",
 };
 
 const state = {
+  language: "zh",
+  translations: {},
+  translationsLoaded: false,
   clientId: createClientId(),
   disconnectSent: false,
   data: null,
@@ -78,6 +82,7 @@ const state = {
 const elements = {
   viewportMeta: document.getElementById("viewport-meta"),
   remoteShell: document.getElementById("remote-shell"),
+  languageSwitch: document.getElementById("language-switch"),
   layoutModeSwitch: document.getElementById("layout-mode-switch"),
   remoteQrControl: document.getElementById("remote-qr-control"),
   remoteQrToggle: document.getElementById("remote-qr-toggle"),
@@ -209,7 +214,7 @@ function clientHeaders(extraHeaders = {}) {
 
 function requesterBadgeText(requesterName) {
   const normalized = String(requesterName || "").trim();
-  return normalized ? `点歌人 ${normalized}` : "";
+  return normalized ? t("request.requesterBadge", { name: normalized }) : "";
 }
 
 function selectedRequesterName() {
@@ -230,6 +235,143 @@ function writeLocalPreference(key, value) {
     window.localStorage?.setItem(key, String(value));
   } catch {
     // Ignore storage failures and keep runtime behavior working.
+  }
+}
+
+function normalizeLanguage(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "cn" || normalized === "zh-cn" || normalized === "zh_hans" || normalized === "zh-hans") {
+    return "zh";
+  }
+  if (normalized === "jp" || normalized === "ja-jp") {
+    return "ja";
+  }
+  if (normalized === "en" || normalized === "ja" || normalized === "zh") {
+    return normalized;
+  }
+  return "zh";
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function t(key, replacements = {}) {
+  const fallbackLanguage = state.translations.defaultLanguage || "zh";
+  const languages = state.translations.languages || {};
+  const activeMessages = languages[state.language] || {};
+  const fallbackMessages = languages[fallbackLanguage] || {};
+  const source = Object.prototype.hasOwnProperty.call(activeMessages, key)
+    ? activeMessages[key]
+    : fallbackMessages[key] || key;
+  return String(source).replace(/\{([a-zA-Z0-9_]+)\}/g, (match, name) => (
+    Object.prototype.hasOwnProperty.call(replacements, name) ? String(replacements[name]) : match
+  ));
+}
+
+function htmlT(key, replacements = {}) {
+  const escapedReplacements = {};
+  Object.entries(replacements).forEach(([name, value]) => {
+    escapedReplacements[name] = escapeHtml(value);
+  });
+  return t(key, escapedReplacements);
+}
+
+function activeLocale() {
+  if (state.language === "en") {
+    return "en-US";
+  }
+  if (state.language === "ja") {
+    return "ja-JP";
+  }
+  return "zh-CN";
+}
+
+function setTextContent(element, key, replacements = {}) {
+  if (!element) {
+    return;
+  }
+  element.textContent = t(key, replacements);
+}
+
+function setElementAttribute(element, attribute, key, replacements = {}) {
+  if (!element) {
+    return;
+  }
+  element.setAttribute(attribute, t(key, replacements));
+}
+
+function setElementTitle(element, key, replacements = {}) {
+  setElementAttribute(element, "title", key, replacements);
+}
+
+function applyStaticI18n(root = document) {
+  root.querySelectorAll("[data-i18n]").forEach((element) => {
+    setTextContent(element, element.dataset.i18n);
+  });
+  root.querySelectorAll("[data-i18n-placeholder]").forEach((element) => {
+    setElementAttribute(element, "placeholder", element.dataset.i18nPlaceholder);
+  });
+  root.querySelectorAll("[data-i18n-title]").forEach((element) => {
+    setElementTitle(element, element.dataset.i18nTitle);
+  });
+  root.querySelectorAll("[data-i18n-aria-label]").forEach((element) => {
+    setElementAttribute(element, "aria-label", element.dataset.i18nAriaLabel);
+  });
+  root.querySelectorAll("[data-i18n-alt]").forEach((element) => {
+    setElementAttribute(element, "alt", element.dataset.i18nAlt);
+  });
+  document.documentElement.lang = state.language === "zh" ? "zh-CN" : state.language;
+  document.title = t("document.remoteTitle");
+}
+
+function renderLanguageSwitch() {
+  elements.languageSwitch?.querySelectorAll("button[data-language]").forEach((button) => {
+    button.classList.toggle("active", normalizeLanguage(button.dataset.language) === state.language);
+  });
+}
+
+function invalidateLanguageSensitiveRenderCache() {
+  state.remoteAccessRenderSignature = "";
+  state.followBrowseRenderSignature = "";
+  state.requesterSelectRenderSignature = "";
+  state.gatchaTaskLastMessageSignature = "";
+}
+
+function setLanguage(language) {
+  const nextLanguage = normalizeLanguage(language);
+  if (state.language === nextLanguage) {
+    renderLanguageSwitch();
+    return;
+  }
+  state.language = nextLanguage;
+  writeLocalPreference(storageKeys.language, nextLanguage);
+  invalidateLanguageSensitiveRenderCache();
+  applyStaticI18n();
+  renderLanguageSwitch();
+  if (state.data) {
+    render();
+  }
+}
+
+async function loadTranslations() {
+  state.language = normalizeLanguage(readLocalString(storageKeys.language, state.language));
+  try {
+    const response = await fetch("/i18n.json", { cache: "no-store" });
+    if (response.ok) {
+      state.translations = await response.json();
+    }
+  } catch {
+    state.translations = {};
+  } finally {
+    state.translationsLoaded = true;
+    applyStaticI18n();
+    renderLanguageSwitch();
   }
 }
 
@@ -362,11 +504,11 @@ function renderRemoteAccess(remoteAccess) {
   const localUrl = String(remoteAccess?.local_url || "");
   const displayUrl = preferredUrl || localUrl || `${window.location.origin}/remote`;
   const displayHint = lanUrls.length > 1
-    ? `可用局域网地址: ${lanUrls.join(" · ")}`
+    ? t("remote.multipleLanHint", { urls: lanUrls.join(" · ") })
     : lanUrls.length === 1
-      ? "请确保手机和服务端在同一个局域网内。"
-      : "暂未检测到局域网地址，可稍后刷新或手动检查网络。";
-  const signature = JSON.stringify({ displayUrl, displayHint });
+      ? t("remote.defaultHint")
+      : t("remote.noLanHint");
+  const signature = JSON.stringify({ language: state.language, displayUrl, displayHint });
   if (signature === state.remoteAccessRenderSignature) {
     return;
   }
@@ -391,7 +533,7 @@ function renderRemoteQr(url, targets = []) {
     targets.forEach(({ image, placeholder }) => {
       image?.classList.add("hidden");
       if (placeholder) {
-        placeholder.textContent = "暂无可用访问地址";
+        placeholder.textContent = t("remote.noAddress");
         placeholder.classList.remove("hidden");
       }
     });
@@ -409,7 +551,7 @@ function renderRemoteQr(url, targets = []) {
 
     image.dataset.qrUrl = qrUrl;
     image.classList.add("hidden");
-    placeholder.textContent = "正在生成二维码...";
+    placeholder.textContent = t("remote.qrLoading");
     placeholder.classList.remove("hidden");
     image.onload = () => {
       placeholder.classList.add("hidden");
@@ -417,7 +559,7 @@ function renderRemoteQr(url, targets = []) {
     };
     image.onerror = () => {
       image.classList.add("hidden");
-      placeholder.textContent = "二维码生成失败";
+      placeholder.textContent = t("remote.qrFailed");
       placeholder.classList.remove("hidden");
     };
     image.src = qrUrl;
@@ -708,15 +850,15 @@ function setupRemoteFlipStages() {
 }
 
 function duplicateConfirmMessage(duplicateItem, sessionEntry, activeItem) {
-  const title = duplicateItem?.display_title || activeItem?.display_title || sessionEntry?.display_title || "这首歌";
+  const title = duplicateItem?.display_title || activeItem?.display_title || sessionEntry?.display_title || t("request.thisSong");
   const count = Number(sessionEntry?.request_count || 0);
   if (activeItem && count > 0) {
-    return `《${title}》当前点歌列表里已经有了，而且本次已点过 ${count} 次，仍要继续点歌吗？`;
+    return t("request.duplicateActiveAndSession", { title, count });
   }
   if (activeItem) {
-    return `《${title}》当前点歌列表里已经有了，仍要继续点歌吗？`;
+    return t("request.duplicateActive", { title });
   }
-  return `《${title}》本次已经点过 ${count || 1} 次，仍要继续点歌吗？`;
+  return t("request.duplicateSession", { title, count: count || 1 });
 }
 
 async function apiPost(url, payload = {}) {
@@ -727,7 +869,7 @@ async function apiPost(url, payload = {}) {
   });
   const data = await response.json();
   if (!response.ok || !data.ok) {
-    const error = new Error(data.error || "请求失败");
+    const error = new Error(data.error || t("error.requestFailed"));
     error.status = response.status;
     error.code = data.code || "";
     error.payload = data;
@@ -766,7 +908,7 @@ async function downloadHistoryExport(format, source = selectedHistoryExportSourc
     headers: clientHeaders(),
   });
   if (!response.ok) {
-    let message = "导出失败";
+    let message = t("history.exportFailed");
     try {
       const payload = await response.json();
       message = payload.error || message;
@@ -792,11 +934,15 @@ async function downloadHistoryExport(format, source = selectedHistoryExportSourc
 
 async function exportHistory(format) {
   const source = selectedHistoryExportSource();
-  const sourceLabel = source === "played" ? "本场记录" : "全部历史";
-  setAppMessage(format === "csv" ? `正在导出${sourceLabel} CSV...` : `正在导出${sourceLabel}图片...`);
+  const sourceLabel = source === "played" ? t("history.playedSource") : t("history.allSource");
+  setAppMessage(format === "csv"
+    ? t("remote.exportingCsv", { source: sourceLabel })
+    : t("remote.exportingImage", { source: sourceLabel }));
   try {
     await downloadHistoryExport(format, source);
-    setAppMessage(format === "csv" ? `${sourceLabel} CSV 已开始下载。` : `${sourceLabel}图片已开始下载。`);
+    setAppMessage(format === "csv"
+      ? t("history.csvDownloadStarted", { source: sourceLabel })
+      : t("history.imageDownloadStarted", { source: sourceLabel }));
   } catch (error) {
     setAppMessage(error.message, true);
   }
@@ -850,7 +996,7 @@ async function fetchState(options = {}) {
   const response = await fetch("/api/state", { headers: clientHeaders() });
   const payload = await response.json();
   if (!response.ok || !payload.ok) {
-    throw new Error(payload.error || "获取状态失败");
+    throw new Error(payload.error || t("error.stateFailed"));
   }
   applyStateSnapshot(payload.data, { forceRender: force || !state.data });
 }
@@ -976,7 +1122,7 @@ async function searchGatchaCache(query) {
   });
   const payload = await response.json();
   if (!response.ok || !payload.ok) {
-    throw new Error(payload.error || "搜索失败");
+    throw new Error(payload.error || t("error.searchFailed"));
   }
   return Array.isArray(payload.data?.items) ? payload.data.items : [];
 }
@@ -992,7 +1138,7 @@ async function searchLarkPool(query) {
   });
   const payload = await response.json();
   if (!response.ok || !payload.ok) {
-    throw new Error(payload.error || "bilikara 搜索失败");
+    throw new Error(payload.error || t("error.larkSearchFailed"));
   }
   return Array.isArray(payload.data?.items) ? payload.data.items : [];
 }
@@ -1009,7 +1155,7 @@ async function searchLarkPoolTable(query, tableIndex) {
   });
   const payload = await response.json();
   if (!response.ok || !payload.ok) {
-    throw new Error(payload.error || "bilikara 搜索失败");
+    throw new Error(payload.error || t("error.larkSearchFailed"));
   }
   return Array.isArray(payload.data?.items) ? payload.data.items : [];
 }
@@ -1031,7 +1177,7 @@ async function fetchGatchaBrowse(uid = "", query = "") {
   });
   const payload = await response.json();
   if (!response.ok || !payload.ok) {
-    throw new Error(payload.error || "关注浏览失败");
+    throw new Error(payload.error || t("error.browseFailed"));
   }
   return payload.data || { owners: [], items: [] };
 }
@@ -1064,7 +1210,7 @@ function gatchaTaskBusy() {
 }
 
 function gatchaTaskBusyMessage() {
-  return state.data?.gatcha?.message || "拉取任务执行中，请等待任务结束";
+  return state.data?.gatcha?.message || t("gatcha.busyFallback");
 }
 
 function syncGatchaTaskTerminalMessage() {
@@ -1092,10 +1238,10 @@ function syncGatchaTaskTerminalMessage() {
   state.gatchaTaskLastMessageSignature = signature;
   const fallback =
     status === "success"
-      ? "抽卡缓存更新完成。"
+      ? t("gatcha.refreshDone")
       : status === "partial"
-        ? "抽卡缓存已部分更新，但有项目拉取失败。"
-        : "抽卡缓存更新失败。";
+        ? t("gatcha.refreshPartial")
+        : t("gatcha.refreshFailed");
   const detail = task.last_error ? `${task.last_message || fallback} ${task.last_error}` : task.last_message || fallback;
   setGatchaUidMessage(detail, status !== "success");
 }
@@ -1104,10 +1250,16 @@ function gatchaUidResultMessage(result, fallbackUid = "") {
   const cache = result?.cache || {};
   const addedCount = Number(cache.added_count || 0);
   const totalCount = Number(cache.total_count || 0);
-  const modeLabel = cache.mode === "incremental" ? "最新" : "所有";
-  const ownerLabel = result?.name ? `UP 主 ${result.name}` : `UID ${result?.uid || fallbackUid}`;
-  const listAction = result?.added ? "已添加" : "已在关注列表中";
-  return `${ownerLabel} ${listAction}，已拉取${modeLabel}稿件，新增 ${addedCount} 条，缓存共 ${totalCount} 条。`;
+  const modeLabel = cache.mode === "incremental" ? t("gatcha.latestMode") : t("gatcha.allMode");
+  const ownerLabel = result?.name ? t("gatcha.ownerName", { name: result.name }) : `UID ${result?.uid || fallbackUid}`;
+  const listAction = result?.added ? t("gatcha.addedToFollow") : t("gatcha.alreadyFollowed");
+  return t("gatcha.uidResult", {
+    owner: ownerLabel,
+    action: listAction,
+    mode: modeLabel,
+    added: addedCount,
+    total: totalCount,
+  });
 }
 
 function hideSearchResults() {
@@ -1130,7 +1282,7 @@ function renderSearchResults(items) {
   if (!items.length) {
     const empty = document.createElement("div");
     empty.className = "search-empty";
-    empty.textContent = "未找到缓存结果。";
+    empty.textContent = t("search.empty");
     elements.searchResults.appendChild(empty);
     return;
   }
@@ -1154,7 +1306,7 @@ function renderSearchResults(items) {
     button.type = "button";
     button.className = "primary-button";
     button.dataset.url = String(item.url || "");
-    button.textContent = "点歌";
+    button.textContent = t("search.add");
 
     meta.append(title, url);
     row.append(meta, button);
@@ -1172,7 +1324,7 @@ function renderLarkSearchResults(items) {
   if (!items.length) {
     const empty = document.createElement("div");
     empty.className = "search-empty";
-    empty.textContent = "bilikara 数据库里没有匹配结果。";
+    empty.textContent = t("search.larkNoResults");
     elements.larkSearchResults.appendChild(empty);
     return;
   }
@@ -1195,7 +1347,7 @@ function renderLarkSearchResults(items) {
     button.type = "button";
     button.className = "primary-button";
     button.dataset.url = String(item.url || "");
-    button.textContent = "点歌";
+    button.textContent = t("search.add");
 
     meta.append(title, url);
     row.append(meta, button);
@@ -1230,7 +1382,7 @@ function appendLarkSearchResults(items) {
     button.type = "button";
     button.className = "primary-button";
     button.dataset.url = String(item.url || "");
-    button.textContent = "点歌";
+    button.textContent = t("search.add");
 
     meta.append(title, url);
     row.append(meta, button);
@@ -1317,7 +1469,7 @@ function renderFollowSongResults(items, emptyText) {
     button.type = "button";
     button.className = "primary-button";
     button.dataset.url = String(item.url || "");
-    button.textContent = "点歌";
+    button.textContent = t("search.add");
 
     meta.append(title, url);
     row.append(meta, button);
@@ -1334,18 +1486,18 @@ function renderFollowBrowse() {
   const showLark = Boolean(state.larkSearchVisible);
   setRemoteSearchStageView(showFollow ? "browse" : showLark ? "lark" : "search");
   if (elements.followBrowseToggle) {
-    elements.followBrowseToggle.textContent = showFollow ? "返回搜索" : "关注浏览";
+    elements.followBrowseToggle.textContent = showFollow ? t("search.followBrowseBack") : t("search.followBrowse");
     elements.followBrowseToggle.setAttribute("aria-pressed", String(showFollow));
   }
   if (elements.larkSearchToggle) {
-    elements.larkSearchToggle.textContent = showLark ? "返回搜索" : "bilikara 搜索";
+    elements.larkSearchToggle.textContent = showLark ? t("search.larkBack") : t("search.larkSearch");
     elements.larkSearchToggle.setAttribute("aria-pressed", String(showLark));
   }
   if (elements.searchTag) {
-    elements.searchTag.textContent = showLark ? "bilikara Search" : showFollow ? "Follow Browse" : "Local Search";
+    elements.searchTag.textContent = showLark ? t("search.larkTag") : showFollow ? t("search.followTag") : t("search.localTag");
   }
   if (elements.searchTitle) {
-    elements.searchTitle.textContent = showLark ? "bilikara 搜索" : showFollow ? "关注列表" : "搜索";
+    elements.searchTitle.textContent = showLark ? t("search.larkSearch") : showFollow ? t("follow.title") : t("search.title");
   }
   if (!state.followBrowseVisible) {
     return;
@@ -1354,6 +1506,7 @@ function renderFollowBrowse() {
   const owners = Array.isArray(state.followBrowseData?.owners) ? state.followBrowseData.owners : [];
   const items = Array.isArray(state.followBrowseData?.items) ? state.followBrowseData.items : [];
   const signature = JSON.stringify({
+    language: state.language,
     loading: state.followBrowseLoading,
     selected: state.followBrowseSelectedUid,
     owners,
@@ -1373,7 +1526,7 @@ function renderFollowBrowse() {
     if (!owners.length) {
       const empty = document.createElement("div");
       empty.className = "search-empty";
-      empty.textContent = state.followBrowseLoading ? "正在读取关注列表..." : "还没有可浏览的关注 UID。";
+      empty.textContent = state.followBrowseLoading ? t("follow.loadingOwners") : t("follow.noOwners");
       elements.followUpGrid.appendChild(empty);
     } else {
       owners.forEach((owner) => {
@@ -1390,13 +1543,13 @@ function renderFollowBrowse() {
 
         const count = document.createElement("span");
         count.className = "follow-up-count";
-        count.textContent = `${Number(owner.count || 0)} 首`;
+        count.textContent = t("follow.countSongs", { count: Number(owner.count || 0) });
 
         button.append(name, count);
         elements.followUpGrid.appendChild(button);
       });
     }
-    setFollowBrowseMessage(state.followBrowseLoading ? "正在读取关注列表..." : "");
+    setFollowBrowseMessage(state.followBrowseLoading ? t("follow.loadingOwners") : "");
     return;
   }
 
@@ -1406,13 +1559,13 @@ function renderFollowBrowse() {
   }
   if (elements.followBrowseCount) {
     const totalCount = Number(owner?.count || items.length || 0);
-    elements.followBrowseCount.textContent = `${items.length}/${totalCount} 首`;
+    elements.followBrowseCount.textContent = t("follow.itemCount", { shown: items.length, total: totalCount });
   }
   renderFollowSongResults(
     items,
-    state.followBrowseLoading ? "正在读取稿件..." : "这个 UP 的缓存稿件里没有匹配结果。",
+    state.followBrowseLoading ? t("follow.loadingItems") : t("follow.noItems"),
   );
-  setFollowBrowseMessage(state.followBrowseLoading ? "正在读取稿件..." : "");
+  setFollowBrowseMessage(state.followBrowseLoading ? t("follow.loadingItems") : "");
 }
 
 async function loadFollowBrowse({ uid = state.followBrowseSelectedUid, query = "", keepQuery = false } = {}) {
@@ -1444,12 +1597,12 @@ async function refreshFollowBrowseAfterGatchaUidAdd(uid = "") {
 async function handleGatchaDraw() {
   state.gatchaUidVisible = false;
   renderGatchaUidView();
-  setGatchaMessage("正在随机抽取一首歌曲...");
+  setGatchaMessage(t("gatcha.drawing"));
   try {
     const response = await fetch("/api/gatcha/candidate", { headers: clientHeaders() });
     const payload = await response.json();
     if (!response.ok || !payload.ok) {
-      throw new Error(payload.error || "试试运气失败");
+      throw new Error(payload.error || t("gatcha.drawFailed"));
     }
 
     state.gatchaCandidate = payload.data;
@@ -1496,44 +1649,44 @@ function renderGatchaUidView() {
     syncGatchaMainContent(showUid, hasCandidate);
   });
   if (elements.gatchaUidToggle) {
-    elements.gatchaUidToggle.textContent = showUid ? "返回抽卡" : "添加 UID";
+    elements.gatchaUidToggle.textContent = showUid ? t("gatcha.backToDraw") : t("gatcha.addUid");
     elements.gatchaUidToggle.setAttribute("aria-pressed", String(showUid));
   }
   if (elements.gatchaTag) {
-    elements.gatchaTag.textContent = showUid ? "Follow UID" : "Gatcha Draw";
+    elements.gatchaTag.textContent = showUid ? t("gatcha.uidTag") : t("gatcha.tag");
   }
   if (elements.gatchaTitle) {
-    elements.gatchaTitle.textContent = showUid ? "关注 UID" : "试试运气";
+    elements.gatchaTitle.textContent = showUid ? t("gatcha.uidTitle") : t("gatcha.title");
   }
   if (elements.gatchaButton) {
     elements.gatchaButton.disabled = false;
-    elements.gatchaButton.textContent = "试试运气";
+    elements.gatchaButton.textContent = t("gatcha.title");
   }
   if (elements.gatchaRetryButton) {
     elements.gatchaRetryButton.disabled = false;
-    elements.gatchaRetryButton.textContent = "重新再来";
+    elements.gatchaRetryButton.textContent = t("gatcha.retry");
   }
   if (elements.gatchaUidInput) {
     elements.gatchaUidInput.disabled = state.gatchaUidSaving;
   }
   if (elements.addGatchaUidButton) {
     elements.addGatchaUidButton.disabled = state.gatchaUidSaving || taskBusy;
-    elements.addGatchaUidButton.textContent = state.gatchaUidSaving ? "处理中" : "添加";
+    elements.addGatchaUidButton.textContent = state.gatchaUidSaving ? t("gatcha.adding") : t("gatcha.add");
   }
   if (elements.refreshGatchaCacheButton) {
     elements.refreshGatchaCacheButton.disabled = state.gatchaRefreshSaving || taskBusy;
-    elements.refreshGatchaCacheButton.textContent = state.gatchaRefreshSaving ? "更新中" : "手动更新";
+    elements.refreshGatchaCacheButton.textContent = state.gatchaRefreshSaving ? t("gatcha.refreshing") : t("gatcha.refresh");
   }
   if (elements.pullGatchaFavlistButton) {
     elements.pullGatchaFavlistButton.disabled = state.gatchaFavlistSaving || taskBusy;
-    elements.pullGatchaFavlistButton.textContent = state.gatchaFavlistSaving ? "拉取中" : "拉取收藏";
+    elements.pullGatchaFavlistButton.textContent = state.gatchaFavlistSaving ? t("gatcha.pulling") : t("gatcha.pullFavlist");
   }
   if (taskBusy) {
     if (elements.refreshGatchaCacheButton) {
-      elements.refreshGatchaCacheButton.textContent = "全局冷却中";
+      elements.refreshGatchaCacheButton.textContent = t("gatcha.globalCooldown");
     }
     if (elements.pullGatchaFavlistButton) {
-      elements.pullGatchaFavlistButton.textContent = "全局冷却中";
+      elements.pullGatchaFavlistButton.textContent = t("gatcha.globalCooldown");
     }
   }
 }
@@ -1542,7 +1695,7 @@ async function handleGatchaUidSubmit(event) {
   event.preventDefault();
   const uid = String(elements.gatchaUidInput?.value || "").trim();
   if (!uid) {
-    setGatchaUidMessage("请输入 UID", true);
+    setGatchaUidMessage(t("gatcha.uidRequired"), true);
     return;
   }
   if (state.gatchaUidSaving) {
@@ -1556,16 +1709,16 @@ async function handleGatchaUidSubmit(event) {
 
   state.gatchaUidSaving = true;
   renderGatchaUidView();
-  setGatchaUidMessage("正在检测 UID...");
+  setGatchaUidMessage(t("gatcha.checkingUid"));
   try {
     const preview = await previewGatchaUid(uid);
     const ownerName = preview?.name || `UID ${preview?.uid || uid}`;
-    const modeLabel = preview?.cache_mode_label || (preview?.cache_mode === "incremental" ? "最新" : "所有");
-    const followedPrefix = preview?.already_followed ? "已在关注列表中，" : "";
-    setGatchaUidMessage(`${followedPrefix}检测到 UP 主：${ownerName}`);
+    const modeLabel = preview?.cache_mode_label || (preview?.cache_mode === "incremental" ? t("gatcha.latestMode") : t("gatcha.allMode"));
+    const followedPrefix = preview?.already_followed ? t("gatcha.alreadyFollowedPrefix") : "";
+    setGatchaUidMessage(t("gatcha.detectedOwner", { prefix: followedPrefix, owner: ownerName }));
 
-    if (!window.confirm(`确认拉取 UP 主：${ownerName} 的${modeLabel}稿件？`)) {
-      setGatchaUidMessage("已取消添加 UID。");
+    if (!window.confirm(t("gatcha.confirmPullOwner", { owner: ownerName, mode: modeLabel }))) {
+      setGatchaUidMessage(t("remote.uidAddCancelled"));
       return;
     }
 
@@ -1575,7 +1728,7 @@ async function handleGatchaUidSubmit(event) {
       renderGatchaUidView();
       return;
     }
-    setGatchaUidMessage(`正在拉取 UP 主：${ownerName} 的稿件...(稿件较多时可能需要较长时间)`);
+    setGatchaUidMessage(t("gatcha.pullingOwnerItems", { name: ownerName }));
     const result = await addGatchaUid(normalizedUid);
     setGatchaUidMessage(gatchaUidResultMessage(result, normalizedUid));
     if (elements.gatchaUidInput) {
@@ -1619,7 +1772,7 @@ function frontendPlaybackMode(_mode) {
 
 function renderRequesterSelect(sessionUsers) {
   const users = Array.isArray(sessionUsers) ? sessionUsers : [];
-  const signature = JSON.stringify(users);
+  const signature = JSON.stringify({ language: state.language, users });
   if (signature === state.requesterSelectRenderSignature) {
     return;
   }
@@ -1630,7 +1783,7 @@ function renderRequesterSelect(sessionUsers) {
 
   const placeholder = document.createElement("option");
   placeholder.value = "";
-  placeholder.textContent = users.length ? "选择点歌人" : "请先让服务端添加用户";
+  placeholder.textContent = users.length ? t("session.selectRequester") : t("remote.addUserFirst");
   elements.requesterSelect.appendChild(placeholder);
 
   users.forEach((userName) => {
@@ -1675,13 +1828,13 @@ function renderCurrentItem(current, playbackMode) {
     return;
   }
 
-  elements.currentTitle.textContent = "当前还没有正在播放的歌曲";
+  elements.currentTitle.textContent = t("remote.noCurrentSong");
   elements.currentRequester.textContent = "";
   elements.currentRequester.classList.add("hidden");
   elements.currentCacheState.textContent = "";
   elements.currentCacheState.classList.add("hidden");
   elements.currentCacheState.classList.remove("ready", "failed");
-  elements.currentMeta.textContent = "点歌后会进入点歌列表，轮到时由服务端页面播放。";
+  elements.currentMeta.textContent = t("remote.noCurrentHint");
 }
 
 function audioVariantsForItem(item) {
@@ -1838,7 +1991,7 @@ function renderAudioVariantBar(currentItem, playbackMode) {
   toggleButton.className = "audio-variant-toggle";
   toggleButton.dataset.action = "toggle-audio-variants";
   toggleButton.setAttribute("aria-expanded", String(state.audioVariantBarExpanded));
-  toggleButton.setAttribute("aria-label", state.audioVariantBarExpanded ? "收起分P列表" : "展开分P列表");
+  toggleButton.setAttribute("aria-label", state.audioVariantBarExpanded ? t("player.collapseParts") : t("player.expandParts"));
   toggleButton.innerHTML = '<span aria-hidden="true">▾</span>';
 
   elements.audioVariantBar.append(list, toggleButton);
@@ -1970,7 +2123,7 @@ function renderRemoteVolumeControls(playbackMode, playerSettings) {
   elements.remoteVolumeSlider.value = String(volumePercent);
   setRangeFillPercent(elements.remoteVolumeSlider, volumePercent);
   elements.remoteVolumeValue.textContent = `${Math.round(volumePercent)}%`;
-  const muteLabel = isMuted ? "取消静音" : "静音";
+  const muteLabel = isMuted ? t("player.unmute") : t("player.mute");
   elements.remoteVolumeMuteButton.textContent = muteIcon(isMuted);
   elements.remoteVolumeMuteButton.setAttribute("aria-label", muteLabel);
   elements.remoteVolumeMuteButton.setAttribute("title", muteLabel);
@@ -1980,14 +2133,14 @@ function renderRemoteVolumeControls(playbackMode, playerSettings) {
 function openBindingSheet(intent, payload) {
   const pages = Array.isArray(payload?.pages) ? payload.pages : [];
   if (!pages.length) {
-    setFormMessage("无法读取分P列表", true);
+    setFormMessage(t("binding.readFailed"), true);
     return;
   }
   state.bindingIntent = {
     ...intent,
     binding: payload,
   };
-  elements.bindingSheetText.textContent = `《${payload.title || "该视频"}》包含多个分P，请选择要下载的视频画面和音频轨道。`;
+  elements.bindingSheetText.textContent = t("binding.videoHasParts", { title: payload.title || t("binding.thisVideo") });
   elements.bindingSheetVideoOptions.innerHTML = "";
   elements.bindingSheetAudioOptions.innerHTML = "";
   state.bindingAccordion.video = false;
@@ -2045,11 +2198,11 @@ function renderGatchaFavlistOption(folder) {
   const copy = document.createElement("div");
   const title = document.createElement("div");
   title.className = "binding-option-title";
-  title.textContent = folder.title || `收藏夹 ${folder.id || ""}`;
+  title.textContent = folder.title || t("favlist.folderWithId", { id: folder.id || "" });
   const meta = document.createElement("div");
   meta.className = "binding-option-meta";
   const count = Number(folder.media_count || 0);
-  meta.textContent = `${count || 0} 个稿件${folder.selected ? " · 命中默认筛选" : ""}`;
+  meta.textContent = t(folder.selected ? "favlist.mediaCountSelected" : "favlist.mediaCount", { count: count || 0 });
   copy.append(title, meta);
 
   label.append(input, copy);
@@ -2059,11 +2212,14 @@ function renderGatchaFavlistOption(folder) {
 function openGatchaFavlistSheet(uid, payload) {
   const folders = Array.isArray(payload?.folders) ? payload.folders : [];
   if (!folders.length) {
-    setGatchaUidMessage("没有读取到公开收藏夹。", true);
+    setGatchaUidMessage(t("favlist.none"), true);
     return;
   }
   state.gatchaFavlistIntent = { uid, folders };
-  elements.gatchaFavlistSheetText.textContent = `UID ${payload?.uid || uid} 共有 ${payload?.public_folder_count || folders.length} 个公开收藏夹，请选择要加入抽卡收藏池的收藏夹。`;
+  elements.gatchaFavlistSheetText.textContent = t("favlist.chooseForUid", {
+    uid: payload?.uid || uid,
+    count: payload?.public_folder_count || folders.length,
+  });
   elements.gatchaFavlistSheetOptions.innerHTML = "";
   folders.forEach((folder) => {
     elements.gatchaFavlistSheetOptions.appendChild(renderGatchaFavlistOption(folder));
@@ -2097,7 +2253,7 @@ async function confirmGatchaFavlistSheet() {
   }
   const folderIds = selectedGatchaFavlistFolderIds();
   if (!folderIds.length) {
-    setGatchaUidMessage("请选择至少一个收藏夹", true);
+    setGatchaUidMessage(t("favlist.selectAtLeastOne"), true);
     return;
   }
   if (gatchaTaskBusy()) {
@@ -2108,11 +2264,14 @@ async function confirmGatchaFavlistSheet() {
 
   state.gatchaFavlistSaving = true;
   renderGatchaUidView();
-  setGatchaUidMessage("正在拉取选中的公开收藏夹...(稿件较多时可能需要较长时间)");
+  setGatchaUidMessage(t("favlist.pullingSelected"));
   try {
     const result = await pullGatchaFavlist(intent.uid, folderIds);
     closeGatchaFavlistSheet();
-    setGatchaUidMessage(`已拉取 ${result?.matched_folder_count || 0} 个收藏夹，加入 ${result?.item_count || 0} 个稿件。`);
+    setGatchaUidMessage(t("favlist.pullResult", {
+      folders: result?.matched_folder_count || 0,
+      items: result?.item_count || 0,
+    }));
   } catch (error) {
     setGatchaUidMessage(error.message, true);
   } finally {
@@ -2160,7 +2319,7 @@ function renderBindingOption(inputType, name, entry, checked) {
   title.textContent = `P${entry.page} · ${entry.part}`;
   const meta = document.createElement("div");
   meta.className = "binding-option-meta";
-  meta.textContent = entry.duration > 0 ? `${entry.duration}s` : "时长未知";
+  meta.textContent = entry.duration > 0 ? t("player.durationSeconds", { seconds: entry.duration }) : t("player.durationUnknown");
   copy.append(title, meta);
 
   label.append(input, copy);
@@ -2186,16 +2345,16 @@ async function confirmBindingSheet() {
   const source = intent.source || "request-form";
   const { selectedVideoPage, selectedAudioPages } = currentBindingSelection();
   if (!selectedVideoPage) {
-    setMessageForSource(source, "请先选择一个视频分P", true);
+    setMessageForSource(source, t("binding.selectVideoPart"), true);
     return;
   }
   if (!selectedAudioPages.length) {
-    setMessageForSource(source, "请至少选择一个音频分P", true);
+    setMessageForSource(source, t("binding.selectAudioPart"), true);
     return;
   }
 
   state.submitting = true;
-  setMessageForSource(source, intent.position === "next" ? "正在按绑定关系顶歌..." : "正在按绑定关系加入点歌列表...");
+  setMessageForSource(source, intent.position === "next" ? t("remote.bindingAddingNext") : t("remote.bindingAddingTail"));
   try {
     const result = await submitAddRequestWithDuplicateConfirm(
       intent.url,
@@ -2207,7 +2366,7 @@ async function confirmBindingSheet() {
       },
     );
     if (result.cancelled) {
-      setMessageForSource(source, "已取消重复添加");
+      setMessageForSource(source, t("remote.cancelledDuplicate"));
       return;
     }
     applyStateSnapshot(result.data, { forceRender: true });
@@ -2232,7 +2391,7 @@ async function confirmBindingSheet() {
       state.gatchaCandidate = null;
       renderGatchaUidView();
     }
-    setMessageForSource(source, intent.position === "next" ? "已按绑定关系顶歌到下一首" : "已按绑定关系加入点歌列表");
+    setMessageForSource(source, intent.position === "next" ? t("binding.addedNext") : t("binding.addedTail"));
   } catch (error) {
     if (error.code === "manual_binding_required") {
       openBindingSheet(intent, error.payload?.binding);
@@ -2385,35 +2544,37 @@ function renderPlayerControls(currentItem, playbackMode) {
   });
 
   if (toggleButton) {
-    toggleButton.textContent = isPaused ? "播放" : "暂停";
+    toggleButton.textContent = isPaused ? t("remote.play") : t("remote.pause");
     toggleButton.classList.toggle("is-paused", isPaused);
     toggleButton.classList.toggle("is-playing", !isPaused);
   }
 
   if (playbackMode !== "local") {
-    elements.playerControlHint.textContent = "当前模式暂不支持远程控制播放。";
+    elements.playerControlHint.textContent = t("remote.controlUnsupported");
     return;
   }
   if (!hasLocalSplitMedia(currentItem)) {
-    elements.playerControlHint.textContent = "当前歌曲还没有完成本地缓存，暂时无法远程控制。";
+    elements.playerControlHint.textContent = t("remote.controlCachePending");
     return;
   }
   elements.playerControlHint.textContent = isPaused
-    ? "当前已暂停，可以恢复播放、前后跳转，或直接切歌。"
-    : "当前正在播放，可以暂停、前后跳转，或直接切歌。";
+    ? t("remote.controlPausedHint")
+    : t("remote.controlPlayingHint");
 }
 
 function renderListHeader(playlist, history) {
   const isHistoryView = state.listView === "history";
-  elements.listTag.textContent = isHistoryView ? "History" : "Requests";
-  elements.listTitle.textContent = isHistoryView ? "历史记录" : "点歌列表";
-  elements.listCount.textContent = `${isHistoryView ? history.length : playlist.length} 首`;
+  elements.listTag.textContent = isHistoryView ? t("history.tag") : t("list.tag");
+  elements.listTitle.textContent = isHistoryView ? t("history.title") : t("list.title");
+  elements.listCount.textContent = t("follow.countSongs", { count: isHistoryView ? history.length : playlist.length });
 
   elements.queueViewButton.classList.toggle("active", !isHistoryView);
   elements.queueViewButton.setAttribute("aria-selected", String(!isHistoryView));
   elements.historyViewButton.classList.toggle("active", isHistoryView);
   elements.historyViewButton.setAttribute("aria-selected", String(isHistoryView));
   elements.historyExportRow?.classList.toggle("hidden", !isHistoryView);
+  setTextContent(elements.queueViewButton, "list.title");
+  setTextContent(elements.historyViewButton, "history.title");
 }
 
 function syncListView() {
@@ -2425,7 +2586,7 @@ function syncListView() {
 function renderQueue(playlist) {
   elements.queueList.innerHTML = "";
   if (!playlist.length) {
-    elements.queueList.innerHTML = '<div class="queue-empty">点歌列表暂时是空的，可以继续点下一首歌。</div>';
+    elements.queueList.innerHTML = `<div class="queue-empty">${htmlT("remote.queueEmpty")}</div>`;
     return;
   }
 
@@ -2470,18 +2631,18 @@ function queueNoteText(item) {
 
 function queueStateLabel(item) {
   if (item.cache_status === "ready") {
-    return "已缓存";
+    return t("status.ready");
   }
   if (item.cache_status === "downloading") {
-    return "缓存中";
+    return t("status.caching");
   }
   if (item.cache_status === "failed") {
-    return "失败";
+    return t("status.failed");
   }
   if (item.cache_status === "queued") {
-    return "排队中";
+    return t("status.queued");
   }
-  return "等待中";
+  return t("status.waiting");
 }
 
 function currentCacheStateLabel(item) {
@@ -2490,7 +2651,7 @@ function currentCacheStateLabel(item) {
   }
   if (item.cache_status === "downloading") {
     const size = Number(item.cache_size_bytes || 0);
-    return size > 0 ? `缓存中 · ${formatBytes(size)}` : "缓存中";
+    return size > 0 ? t("status.cachingWithSize", { size: formatBytes(size) }) : t("status.caching");
   }
   return queueStateLabel(item);
 }
@@ -2516,7 +2677,7 @@ function renderHistory(history) {
 
   if (!history.length) {
     elements.historyList.innerHTML =
-      '<div class="queue-empty"><p>还没有点歌历史。</p><p>点过的歌曲会自动出现在这里。</p></div>';
+      `<div class="queue-empty"><p>${htmlT("history.emptyTitle")}</p><p>${htmlT("history.emptyHint")}</p></div>`;
     return;
   }
 
@@ -2528,7 +2689,7 @@ function renderHistory(history) {
     requesterNode.textContent = requesterText;
     requesterNode.classList.toggle("hidden", !requesterText);
     node.querySelector(".history-time").textContent = formatHistoryTime(entry.requested_at);
-    node.querySelector(".history-count").textContent = `点歌 ${entry.request_count} 次`;
+    node.querySelector(".history-count").textContent = t("history.requestCount", { count: entry.request_count });
     node.querySelectorAll("button").forEach((button) => {
       button.dataset.url = entry.original_url || entry.resolved_url || "";
     });
@@ -2545,9 +2706,9 @@ function renderHistory(history) {
 
 function formatHistoryTime(timestamp) {
   if (!timestamp) {
-    return "刚刚点过";
+    return t("history.justNow");
   }
-  return new Date(timestamp * 1000).toLocaleString("zh-CN", {
+  return new Date(timestamp * 1000).toLocaleString(activeLocale(), {
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
@@ -2560,26 +2721,26 @@ async function submitRequest(position) {
   const requesterName = selectedRequesterName();
   if (!url || state.submitting) {
     if (!url) {
-      setFormMessage("请输入 bilibili 链接、BV 号或 av 号。", true);
+      setFormMessage(t("request.urlRequired"), true);
     }
     return;
   }
   if (!requesterName) {
-    setFormMessage("请先选择点歌人。", true);
+    setFormMessage(t("session.requireRequester"), true);
     return;
   }
 
   state.submitting = true;
-  setFormMessage(position === "next" ? "正在顶歌..." : "正在加入点歌列表...");
+  setFormMessage(position === "next" ? t("remote.addingNext") : t("remote.addingTail"));
   try {
     const result = await submitAddRequestWithDuplicateConfirm(url, position, requesterName);
     if (result.cancelled) {
-      setFormMessage("已取消重复点歌。");
+      setFormMessage(t("remote.cancelledDuplicate"));
       return;
     }
     applyStateSnapshot(result.data, { forceRender: true });
     elements.urlInput.value = "";
-    setFormMessage(position === "next" ? "已经顶歌到下一首。" : "已经加入点歌列表。");
+    setFormMessage(position === "next" ? t("request.addedNext") : t("request.addedTail"));
   } catch (error) {
     if (error.code === "manual_binding_required") {
       openBindingSheet(
@@ -2606,20 +2767,20 @@ async function handleAddByHistory(url, position) {
     return;
   }
   if (!requesterName) {
-    setFormMessage("请先选择点歌人。", true);
+    setFormMessage(t("session.requireRequester"), true);
     return;
   }
 
   state.submitting = true;
-  setFormMessage(position === "next" ? "正在从历史记录顶歌..." : "正在从历史记录加入点歌列表...");
+  setFormMessage(position === "next" ? t("remote.historyAddingNext") : t("history.addingFromHistory"));
   try {
     const result = await submitAddRequestWithDuplicateConfirm(url, position, requesterName);
     if (result.cancelled) {
-      setFormMessage("已取消重复点歌。");
+      setFormMessage(t("remote.cancelledDuplicate"));
       return;
     }
     applyStateSnapshot(result.data, { forceRender: true });
-    setFormMessage(position === "next" ? "已从历史记录顶歌到下一首。" : "已从历史记录加入点歌列表。");
+    setFormMessage(position === "next" ? t("history.addedNext") : t("history.addedTail"));
   } catch (error) {
     if (error.code === "manual_binding_required") {
       openBindingSheet(
@@ -2643,7 +2804,7 @@ async function handleAddByHistory(url, position) {
 async function resortPlaylistByCycle() {
   state.data = await apiPost("/api/playlist/resort");
   applyStateSnapshot(state.data, { forceRender: true });
-  setFormMessage("已按本场用户座次重新排序点歌列表。");
+  setFormMessage(t("list.resorted"));
 }
 
 async function addByUrl(url, position = "tail", source = "search") {
@@ -2652,16 +2813,16 @@ async function addByUrl(url, position = "tail", source = "search") {
     return;
   }
   if (!requesterName) {
-    setMessageForSource(source, "请先选择点歌人。", true);
+    setMessageForSource(source, t("session.requireRequester"), true);
     return;
   }
 
   state.submitting = true;
-  setMessageForSource(source, "正在添加已选歌曲...");
+  setMessageForSource(source, t("remote.addingSelected"));
   try {
     const result = await submitAddRequestWithDuplicateConfirm(url, position, requesterName);
     if (result.cancelled) {
-      setMessageForSource(source, "已取消重复点歌。");
+      setMessageForSource(source, t("remote.cancelledDuplicate"));
       return;
     }
     applyStateSnapshot(result.data, { forceRender: true });
@@ -2679,7 +2840,7 @@ async function addByUrl(url, position = "tail", source = "search") {
       state.gatchaCandidate = null;
       renderGatchaUidView();
     }
-    setMessageForSource(source, "点歌成功。");
+    setMessageForSource(source, t("request.success"));
   } catch (error) {
     if (error.code === "manual_binding_required") {
       openBindingSheet(
@@ -2708,10 +2869,10 @@ async function sendPlayerControl(action, deltaSeconds = 0) {
   }
 
   const message = action === "toggle-play"
-    ? "已发送播放 / 暂停指令。"
+    ? t("remote.controlSentToggle")
     : deltaSeconds > 0
-      ? "已发送快进 15 秒指令。"
-      : "已发送后退 15 秒指令。";
+      ? t("remote.controlSentForward")
+      : t("remote.controlSentBack");
 
   try {
     state.playerControlPendingAction = action;
@@ -2748,7 +2909,7 @@ async function sendPlayerNext() {
     state.playerControlPendingAction = "next-track";
     renderPlayerControls(state.data?.current_item, frontendPlaybackMode(state.data?.playback_mode));
     applyStateSnapshot(await apiPost("/api/player/next"));
-    setFormMessage("已切到下一首。");
+    setFormMessage(t("remote.nextSent"));
   } catch (error) {
     setFormMessage(error.message, true);
     await fetchState().catch(() => {});
@@ -2790,16 +2951,16 @@ elements.searchForm.addEventListener("submit", async (event) => {
   const query = String(elements.searchQuery.value || "").trim();
   if (!query) {
     hideSearchResults();
-    setSearchMessage("请输入搜索关键词。", true);
+    setSearchMessage(t("search.keywordRequired"), true);
     return;
   }
 
   elements.searchButton.disabled = true;
-  setSearchMessage("正在搜索本地目录...");
+  setSearchMessage(t("search.localSearching"));
   try {
     const items = await searchGatchaCache(query);
     renderSearchResults(items);
-    setSearchMessage(items.length ? `找到 ${items.length} 条缓存结果。` : "未找到缓存结果。");
+    setSearchMessage(items.length ? t("search.localFound", { count: items.length }) : t("search.localNotFound"));
   } catch (error) {
     hideSearchResults();
     setSearchMessage(error.message, true);
@@ -2827,7 +2988,7 @@ elements.larkSearchForm?.addEventListener("submit", async (event) => {
   const query = String(elements.larkSearchQuery?.value || "").trim();
   if (!query) {
     hideLarkSearchResults();
-    setLarkSearchMessage("请输入搜索关键词。", true);
+    setLarkSearchMessage(t("search.keywordRequired"), true);
     return;
   }
 
@@ -2844,7 +3005,7 @@ elements.larkSearchForm?.addEventListener("submit", async (event) => {
     elements.larkSearchResults.innerHTML = "";
     elements.larkSearchResults.classList.remove("hidden");
   }
-  setLarkSearchMessage("正在搜索 bilikara 数据库...(联网搜索需要3-15s不等)");
+  setLarkSearchMessage(t("search.larkSearching"));
   try {
     const poolItems = await searchLarkPool(query);
     if (state.larkSearchSeq !== searchSeq) {
@@ -2870,10 +3031,12 @@ elements.larkSearchForm?.addEventListener("submit", async (event) => {
     }
     setLarkSearchMessage(
       collectedItems.length
-        ? `找到 ${collectedItems.length} 条共享结果${partialFailure ? "，部分表搜索失败" : ""}。`
+        ? partialFailure
+          ? t("search.larkFoundPartial", { count: collectedItems.length })
+          : t("search.larkFound", { count: collectedItems.length })
         : partialFailure
-          ? "部分表搜索失败，bilikara 数据库里暂时没有匹配结果。"
-          : "bilikara 数据库里没有匹配结果。",
+          ? t("search.larkPartialNoResults")
+          : t("search.larkNoResults"),
       partialFailure && !collectedItems.length,
     );
   } catch (error) {
@@ -2981,6 +3144,14 @@ elements.layoutModeSwitch?.addEventListener("click", (event) => {
   setLayoutMode(button.dataset.layoutMode);
 });
 
+elements.languageSwitch?.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-language]");
+  if (!button) {
+    return;
+  }
+  setLanguage(button.dataset.language);
+});
+
 elements.remoteQrToggle?.addEventListener("click", () => {
   setRemoteQrPopoverOpen(!state.remoteQrPopoverOpen);
 });
@@ -3008,7 +3179,7 @@ document.addEventListener("keydown", (event) => {
 elements.refreshButton.addEventListener("click", async () => {
   try {
     await fetchState({ force: true });
-    setFormMessage("点歌列表已刷新。");
+    setFormMessage(t("remote.refreshed"));
   } catch (error) {
     setFormMessage(error.message, true);
   } finally {
@@ -3081,7 +3252,7 @@ elements.refreshGatchaCacheButton?.addEventListener("click", async () => {
   }
   state.gatchaRefreshSaving = true;
   renderGatchaUidView();
-  setGatchaUidMessage("正在后台更新抽卡缓存...");
+  setGatchaUidMessage(t("gatcha.refreshingBackground"));
   try {
     const result = await refreshGatchaCache();
     if (result?.started !== false && state.data) {
@@ -3092,7 +3263,7 @@ elements.refreshGatchaCacheButton?.addEventListener("click", async () => {
         last_status: "running",
       };
     }
-    setGatchaUidMessage(result?.started === false ? "拉取任务执行中，请等待任务结束" : "已开始后台更新抽卡缓存。");
+    setGatchaUidMessage(result?.started === false ? t("gatcha.busyFallback") : t("gatcha.refreshStarted"));
   } catch (error) {
     setGatchaUidMessage(error.message, true);
   } finally {
@@ -3104,7 +3275,7 @@ elements.refreshGatchaCacheButton?.addEventListener("click", async () => {
 elements.pullGatchaFavlistButton?.addEventListener("click", async () => {
   const uid = String(elements.gatchaUidInput?.value || "").trim();
   if (!uid) {
-    setGatchaUidMessage("请输入 UID", true);
+    setGatchaUidMessage(t("gatcha.uidRequired"), true);
     return;
   }
   if (gatchaTaskBusy()) {
@@ -3114,11 +3285,11 @@ elements.pullGatchaFavlistButton?.addEventListener("click", async () => {
   }
   state.gatchaFavlistSaving = true;
   renderGatchaUidView();
-  setGatchaUidMessage("正在读取公开收藏夹...");
+  setGatchaUidMessage(t("gatcha.readingFavlists"));
   try {
     const result = await previewGatchaFavlist(uid);
     openGatchaFavlistSheet(result?.uid || uid, result);
-    setGatchaUidMessage("请选择要拉取的收藏夹。");
+    setGatchaUidMessage(t("gatcha.chooseFavlists"));
   } catch (error) {
     setGatchaUidMessage(error.message, true);
   } finally {
@@ -3202,7 +3373,7 @@ elements.audioVariantBar.addEventListener("click", async (event) => {
       return;
     }
     if (!requesterName) {
-      setFormMessage("请先选择点歌人", true);
+      setFormMessage(t("session.requireRequester"), true);
       return;
     }
     try {
@@ -3217,11 +3388,11 @@ elements.audioVariantBar.addEventListener("click", async (event) => {
         },
       );
       if (result.cancelled) {
-        setFormMessage("已取消重复添加");
+        setFormMessage(t("remote.cancelledDuplicate"));
         return;
       }
       applyStateSnapshot(result.data, { forceRender: true });
-      setFormMessage("已将分P加入缓存任务");
+      setFormMessage(t("player.partAddedToCache"));
     } catch (error) {
       setFormMessage(error.message, true);
     } finally {
@@ -3250,7 +3421,7 @@ elements.audioVariantBar.addEventListener("click", async (event) => {
     }));
     const activeItem = state.data?.current_item;
     const activeVariant = activeItem ? selectedAudioVariantForItem(activeItem) : null;
-    setFormMessage(`已切换到 ${activeVariant?.label || nextVariantId}`);
+    setFormMessage(t("player.switchedPart", { part: activeVariant?.label || nextVariantId }));
   } catch (error) {
     setFormMessage(error.message, true);
   } finally {
@@ -3375,6 +3546,7 @@ window.addEventListener("beforeunload", disconnectClient);
 async function startRemoteSession() {
   setupRemoteFlipStages();
   hydrateLocalPreferences();
+  await loadTranslations();
   renderLayoutMode();
   try {
     await fetchState();
