@@ -1697,9 +1697,9 @@ select:disabled {
 }
 
 .queue-meta-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
   gap: 10px;
 }
 
@@ -1731,9 +1731,9 @@ select:disabled {
 
 .history-meta {
   margin-top: 4px;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
   gap: 10px;
 }
 
@@ -1750,6 +1750,7 @@ select:disabled {
 .queue-actions-wrap,
 .history-actions-wrap {
   flex-shrink: 0;
+  align-self: end;
 }
 
 
