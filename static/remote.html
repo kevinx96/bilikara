@@ -60,6 +60,7 @@
         </div>
         <h2 id="current-title">正在读取状态...</h2>
         <p id="current-requester" class="requester-line hidden"></p>
+        <p id="current-owner" class="current-owner-line hidden"></p>
         <p id="current-cache-state" class="queue-state current-cache-state hidden"></p>
         <p id="current-meta" class="muted"></p>
         <div id="audio-variant-bar" class="audio-variant-bar hidden"></div>
@@ -173,6 +174,15 @@
             <option value="played">导出本场</option>
             <option value="history">全部历史</option>
           </select>
+          <select id="history-export-page-size" class="history-export-page-size" aria-label="图片每页歌曲数">
+            <option value="200" selected>图片每页 200 首</option>
+            <option value="150">图片每页 150 首</option>
+            <option value="100">图片每页 100 首</option>
+            <option value="80">图片每页 80 首</option>
+            <option value="60">图片每页 60 首</option>
+            <option value="50">图片每页 50 首</option>
+          </select>
+          <p class="history-export-note">仅影响图片分页；CSV 会导出完整列表。</p>
           <button type="button" id="history-export-image-button" class="primary-button">导出图片</button>
           <button type="button" id="history-export-csv-button" class="ghost-button">导出 CSV</button>
         </div>

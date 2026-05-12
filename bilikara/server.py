@@ -618,6 +618,11 @@ class BilikaraHandler(BaseHTTPRequestHandler):
             query = parse_qs(urlparse(self.path).query)
             export_format = str(query.get("format", ["csv"])[0] or "csv").strip().lower()
             export_source = str(query.get("source", ["history"])[0] or "history").strip().lower()
+            try:
+                export_page_size = int(query.get("page_size", ["200"])[0] or "200")
+            except (TypeError, ValueError):
+                export_page_size = 200
+            export_page_size = export_page_size if export_page_size in {200, 150, 100, 80, 60, 50} else 200
             source_settings = {
                 "history": {
                     "items": lambda: CONTEXT.history_snapshot(),
@@ -651,6 +656,7 @@ class BilikaraHandler(BaseHTTPRequestHandler):
                         history,
                         logo_path=_playlist_export_logo_path(),
                         title=str(settings["title"]),
+                        page_size=export_page_size,
                     )
                     suffix = Path(default_filename).suffix or ".png"
                     filename = f"bilikara-{settings['filename']}-{timestamp}{suffix}"

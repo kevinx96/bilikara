@@ -376,11 +376,19 @@ h1 {
   line-height: 1.5;
 }
 
-.requester-line {
+.requester-line,
+.current-owner-line {
   margin-top: 4px;
   font-size: 13px;
   line-height: 1.4;
+}
+
+.requester-line {
   color: var(--accent-deep);
+}
+
+.current-owner-line {
+  color: var(--muted);
 }
 
 .current-cache-state {
@@ -1172,13 +1180,21 @@ select:disabled {
 
 .history-export-row {
   display: grid;
-  grid-template-columns: 1.1fr 1fr 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
   margin: -4px 0 14px;
 }
 
-.history-export-source {
+.history-export-source,
+.history-export-page-size {
   min-width: 0;
+}
+
+.history-export-note {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
 }
 
 .list {
@@ -1775,10 +1791,6 @@ select:disabled {
 
   .history-export-row {
     grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .history-export-source {
-    grid-column: 1 / -1;
   }
 
   .player-control-row {

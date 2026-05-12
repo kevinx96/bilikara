@@ -125,7 +125,7 @@ p {
 }
 
 .confirm-popover.confirm-popover-wide {
-  width: min(340px, calc(100vw - 24px));
+  width: min(420px, calc(100vw - 24px));
 }
 
 .confirm-popover.hidden {
@@ -258,10 +258,30 @@ p {
   color: var(--ink);
 }
 
-.confirm-source {
+.confirm-source,
+.confirm-page-size {
   width: 100%;
   min-height: 42px;
   margin-top: 2px;
+}
+
+.confirm-export-controls {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.confirm-export-controls .confirm-source,
+.confirm-export-controls .confirm-page-size {
+  margin-top: 0;
+}
+
+.confirm-page-size-note {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
 }
 
 .confirm-actions {

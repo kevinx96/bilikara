@@ -231,6 +231,8 @@ const elements = {
   confirmPopover: document.getElementById("confirm-popover"),
   confirmText: document.getElementById("confirm-text"),
   confirmSource: document.getElementById("confirm-source"),
+  confirmPageSize: document.getElementById("confirm-page-size"),
+  confirmPageSizeNote: document.getElementById("confirm-page-size-note"),
   confirmCancel: document.getElementById("confirm-cancel"),
   confirmSecondary: document.getElementById("confirm-secondary"),
   confirmOk: document.getElementById("confirm-ok"),
@@ -4474,7 +4476,7 @@ function ownerTooltipForEntry(entry) {
   if (!ownerName) {
     return "";
   }
-  return `UP 主: ${ownerName}`;
+  return `UP 主：${ownerName}`;
 }
 
 function formatBBDownHint(bbdown) {
@@ -4696,10 +4698,11 @@ function renderConfirmPopover() {
 
   const hasSecondaryAction = Boolean(intent.secondaryLabel);
   const hasSourceSelect = Boolean(intent.sourceSelect);
+  const hasPageSizeSelect = Boolean(intent.pageSizeSelect);
   const hideMessage = Boolean(intent.hideMessage);
-  const width = hasSourceSelect ? 340 : 260;
+  const width = hasSourceSelect || hasPageSizeSelect ? 420 : 260;
   const popoverHeight = (hasSecondaryAction ? 126 : 112)
-    + (hasSourceSelect ? 48 : 0)
+    + (hasSourceSelect || hasPageSizeSelect ? 76 : 0)
     - (hideMessage ? 34 : 0);
   const margin = 12;
   const left = Math.min(
@@ -4719,6 +4722,30 @@ function renderConfirmPopover() {
       elements.confirmSource.value = normalizedHistoryExportSource(intent.source);
     }
   }
+  if (elements.confirmPageSize) {
+    elements.confirmPageSize.classList.toggle("hidden", !hasPageSizeSelect);
+    if (hasPageSizeSelect) {
+      elements.confirmPageSize.value = String(selectedConfirmHistoryExportPageSize(intent));
+    }
+  }
+  elements.confirmPageSizeNote?.classList.toggle("hidden", !hasPageSizeSelect);
+  const shouldGroupExportControls = hasSourceSelect && hasPageSizeSelect && elements.confirmSource && elements.confirmPageSize;
+  if (shouldGroupExportControls) {
+    let controls = elements.confirmPopover.querySelector(".confirm-export-controls");
+    if (!controls) {
+      controls = document.createElement("div");
+      controls.className = "confirm-export-controls";
+      elements.confirmSource.before(controls);
+    }
+    controls.append(elements.confirmSource, elements.confirmPageSize);
+  } else {
+    const controls = elements.confirmPopover.querySelector(".confirm-export-controls");
+    if (controls) {
+      controls.before(elements.confirmSource);
+      elements.confirmSource.after(elements.confirmPageSize);
+      controls.remove();
+    }
+  }
   elements.confirmOk.textContent = intent.primaryLabel || "确认";
   if (elements.confirmSecondary) {
     elements.confirmSecondary.textContent = intent.secondaryLabel || "";
@@ -4726,7 +4753,7 @@ function renderConfirmPopover() {
   }
   elements.confirmPopover.style.left = `${left}px`;
   elements.confirmPopover.style.top = `${top}px`;
-  elements.confirmPopover.classList.toggle("confirm-popover-wide", hasSourceSelect);
+  elements.confirmPopover.classList.toggle("confirm-popover-wide", hasSourceSelect || hasPageSizeSelect);
   elements.confirmPopover.classList.remove("hidden");
 }
 
@@ -5220,15 +5247,26 @@ function selectedConfirmHistoryExportSource(intent) {
   return normalizedHistoryExportSource(elements.confirmSource?.value || intent?.source);
 }
 
-async function downloadHistoryExport(format, source = "played") {
+function normalizedHistoryExportPageSize(pageSize) {
+  const normalizedPageSize = Number.parseInt(String(pageSize || "200"), 10);
+  return [200, 150, 100, 80, 60, 50].includes(normalizedPageSize) ? normalizedPageSize : 200;
+}
+
+function selectedConfirmHistoryExportPageSize(intent) {
+  return normalizedHistoryExportPageSize(elements.confirmPageSize?.value || intent?.pageSize);
+}
+
+async function downloadHistoryExport(format, source = "played", pageSize = 200) {
   const normalizedFormat = String(format || "").trim().toLowerCase();
   const normalizedSource = normalizedHistoryExportSource(source);
+  const normalizedPageSize = normalizedHistoryExportPageSize(pageSize);
   if (!["csv", "image"].includes(normalizedFormat)) {
     return;
   }
   const params = new URLSearchParams({
     format: normalizedFormat,
     source: normalizedSource,
+    page_size: String(normalizedPageSize),
   });
   const response = await fetch(`/api/playlist/export?${params.toString()}`, {
     cache: "no-store",
@@ -5260,11 +5298,12 @@ async function downloadHistoryExport(format, source = "played") {
   window.setTimeout(() => URL.revokeObjectURL(downloadUrl), 1000);
 }
 
-async function exportHistory(format, source = "played") {
+async function exportHistory(format, source = "played", pageSize = 200) {
   const normalizedSource = normalizedHistoryExportSource(source);
+  const normalizedPageSize = normalizedHistoryExportPageSize(pageSize);
   const sourceLabel = historyExportSourceLabel(normalizedSource);
   try {
-    await downloadHistoryExport(format, normalizedSource);
+    await downloadHistoryExport(format, normalizedSource, normalizedPageSize);
     closeConfirm();
     setAppMessage(format === "csv" ? `${sourceLabel} CSV 已开始下载。` : `${sourceLabel}图片已开始下载。`);
   } catch (error) {
@@ -6044,8 +6083,10 @@ elements.historyExportButton?.addEventListener("click", (event) => {
   openConfirm({
     type: "export-history",
     source: "played",
+    pageSize: 200,
     sourceSelect: true,
-    message: "选择导出范围和格式。本场记录是本次启动后已播放的歌曲，全部历史是累计点歌历史。",
+    pageSizeSelect: true,
+    message: "选择导出范围、图片每页歌曲数和格式。本场记录是本次启动后已播放的歌曲，全部历史是累计点歌历史。",
     primaryLabel: "导出图片",
     secondaryLabel: "导出 CSV",
     x: point.x,
@@ -6314,7 +6355,7 @@ elements.confirmSecondary?.addEventListener("click", async () => {
     return;
   }
   if (intent.type === "export-history") {
-    await exportHistory("csv", selectedConfirmHistoryExportSource(intent));
+    await exportHistory("csv", selectedConfirmHistoryExportSource(intent), selectedConfirmHistoryExportPageSize(intent));
     return;
   }
 });
@@ -6367,7 +6408,7 @@ elements.confirmOk.addEventListener("click", async () => {
       return;
     }
     if (intent.type === "export-history") {
-      await exportHistory("image", selectedConfirmHistoryExportSource(intent));
+      await exportHistory("image", selectedConfirmHistoryExportSource(intent), selectedConfirmHistoryExportPageSize(intent));
       return;
     }
     if (intent.type === "reset-data") {

@@ -69,6 +69,7 @@ const state = {
   followBrowseLoading: false,
   followBrowseRenderSignature: "",
   requesterSelectRenderSignature: "",
+  currentNowPlayingSignature: "",
   layoutMode: "full",
   remoteAccessRenderSignature: "",
   viewportScaleResetTimers: [],
@@ -91,6 +92,7 @@ const elements = {
   remotePopoverUrlHint: document.getElementById("remote-popover-url-hint"),
   currentTitle: document.getElementById("current-title"),
   currentRequester: document.getElementById("current-requester"),
+  currentOwner: document.getElementById("current-owner"),
   currentCacheState: document.getElementById("current-cache-state"),
   currentMeta: document.getElementById("current-meta"),
   audioVariantBar: document.getElementById("audio-variant-bar"),
@@ -182,6 +184,7 @@ const elements = {
   historyViewButton: document.getElementById("history-view-button"),
   historyExportRow: document.getElementById("history-export-row"),
   historyExportSource: document.getElementById("history-export-source"),
+  historyExportPageSize: document.getElementById("history-export-page-size"),
   historyExportImageButton: document.getElementById("history-export-image-button"),
   historyExportCsvButton: document.getElementById("history-export-csv-button"),
   appToast: document.getElementById("app-toast"),
@@ -210,6 +213,11 @@ function clientHeaders(extraHeaders = {}) {
 function requesterBadgeText(requesterName) {
   const normalized = String(requesterName || "").trim();
   return normalized ? `点歌人 ${normalized}` : "";
+}
+
+function ownerLineText(ownerName) {
+  const normalized = String(ownerName || "").trim();
+  return normalized ? `UP 主：${normalized}` : "";
 }
 
 function selectedRequesterName() {
@@ -751,15 +759,23 @@ function selectedHistoryExportSource() {
   return source === "history" ? "history" : "played";
 }
 
-async function downloadHistoryExport(format, source = selectedHistoryExportSource()) {
+function selectedHistoryExportPageSize() {
+  const pageSize = Number.parseInt(String(elements.historyExportPageSize?.value || "200"), 10);
+  return [200, 150, 100, 80, 60, 50].includes(pageSize) ? pageSize : 200;
+}
+
+async function downloadHistoryExport(format, source = selectedHistoryExportSource(), pageSize = selectedHistoryExportPageSize()) {
   const normalizedFormat = String(format || "").trim().toLowerCase();
   const normalizedSource = source === "history" ? "history" : "played";
+  const requestedPageSize = Number.parseInt(String(pageSize || "200"), 10);
+  const normalizedPageSize = [200, 150, 100, 80, 60, 50].includes(requestedPageSize) ? requestedPageSize : 200;
   if (!["csv", "image"].includes(normalizedFormat)) {
     return;
   }
   const params = new URLSearchParams({
     format: normalizedFormat,
     source: normalizedSource,
+    page_size: String(normalizedPageSize),
   });
   const response = await fetch(`/api/playlist/export?${params.toString()}`, {
     cache: "no-store",
@@ -792,10 +808,11 @@ async function downloadHistoryExport(format, source = selectedHistoryExportSourc
 
 async function exportHistory(format) {
   const source = selectedHistoryExportSource();
+  const pageSize = selectedHistoryExportPageSize();
   const sourceLabel = source === "played" ? "本场记录" : "全部历史";
-  setAppMessage(format === "csv" ? `正在导出${sourceLabel} CSV...` : `正在导出${sourceLabel}图片...`);
+  setAppMessage(format === "csv" ? `正在导出${sourceLabel} CSV...` : `正在导出${sourceLabel}图片（每页 ${pageSize} 首）...`);
   try {
-    await downloadHistoryExport(format, source);
+    await downloadHistoryExport(format, source, pageSize);
     setAppMessage(format === "csv" ? `${sourceLabel} CSV 已开始下载。` : `${sourceLabel}图片已开始下载。`);
   } catch (error) {
     setAppMessage(error.message, true);
@@ -1652,10 +1669,23 @@ function renderRequesterSelect(sessionUsers) {
 
 function renderCurrentItem(current, playbackMode) {
   if (current) {
-    elements.currentTitle.textContent = current.display_title;
     const requesterText = requesterBadgeText(current.requester_name);
-    elements.currentRequester.textContent = requesterText;
-    elements.currentRequester.classList.toggle("hidden", !requesterText);
+    const ownerText = ownerLineText(current.owner_name);
+    const nowPlayingSignature = JSON.stringify([
+      current.id || "",
+      current.display_title || "",
+      requesterText,
+      ownerText,
+    ]);
+    if (nowPlayingSignature !== state.currentNowPlayingSignature) {
+      state.currentNowPlayingSignature = nowPlayingSignature;
+      elements.currentTitle.textContent = current.display_title;
+      elements.currentRequester.textContent = requesterText;
+      elements.currentRequester.classList.toggle("hidden", !requesterText);
+      elements.currentOwner.textContent = ownerText;
+      elements.currentOwner.classList.toggle("hidden", !ownerText);
+      elements.currentMeta.textContent = ""; // 不显示 log 避免高度抖动
+    }
     
     elements.currentCacheState.textContent = currentCacheStateLabel(current);
     elements.currentCacheState.classList.remove("hidden");
@@ -1671,17 +1701,21 @@ function renderCurrentItem(current, playbackMode) {
     
     elements.currentCacheState.classList.toggle("ready", current.cache_status === "ready");
     elements.currentCacheState.classList.toggle("failed", current.cache_status === "failed");
-    elements.currentMeta.textContent = ""; // 不显示 log 避免高度抖动
     return;
   }
 
-  elements.currentTitle.textContent = "当前还没有正在播放的歌曲";
-  elements.currentRequester.textContent = "";
-  elements.currentRequester.classList.add("hidden");
-  elements.currentCacheState.textContent = "";
-  elements.currentCacheState.classList.add("hidden");
-  elements.currentCacheState.classList.remove("ready", "failed");
-  elements.currentMeta.textContent = "点歌后会进入点歌列表，轮到时由服务端页面播放。";
+  if (state.currentNowPlayingSignature !== "__empty__") {
+    state.currentNowPlayingSignature = "__empty__";
+    elements.currentTitle.textContent = "当前还没有正在播放的歌曲";
+    elements.currentRequester.textContent = "";
+    elements.currentRequester.classList.add("hidden");
+    elements.currentOwner.textContent = "";
+    elements.currentOwner.classList.add("hidden");
+    elements.currentCacheState.textContent = "";
+    elements.currentCacheState.classList.add("hidden");
+    elements.currentCacheState.classList.remove("ready", "failed");
+    elements.currentMeta.textContent = "点歌后会进入点歌列表，轮到时由服务端页面播放。";
+  }
 }
 
 function audioVariantsForItem(item) {
