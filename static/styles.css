@@ -2226,6 +2226,10 @@ select:disabled {
 .session-user-list {
   display: grid;
   gap: 10px;
+  max-height: 340px;
+  overflow-y: auto;
+  padding-right: 6px;
+  overscroll-behavior: contain;
 }
 
 .session-user-empty {
@@ -3953,12 +3957,14 @@ select:disabled {
 
 .history-list::-webkit-scrollbar,
 .search-results::-webkit-scrollbar,
+.session-user-list::-webkit-scrollbar,
 .follow-up-grid::-webkit-scrollbar {
   width: 8px;
 }
 
 .history-list::-webkit-scrollbar-track,
 .search-results::-webkit-scrollbar-track,
+.session-user-list::-webkit-scrollbar-track,
 .follow-up-grid::-webkit-scrollbar-track {
   background: rgba(67, 53, 41, 0.05);
   border-radius: 999px;
@@ -3966,6 +3972,7 @@ select:disabled {
 
 .history-list::-webkit-scrollbar-thumb,
 .search-results::-webkit-scrollbar-thumb,
+.session-user-list::-webkit-scrollbar-thumb,
 .follow-up-grid::-webkit-scrollbar-thumb {
   background: rgba(143, 49, 29, 0.24);
   border-radius: 999px;
@@ -3973,6 +3980,7 @@ select:disabled {
 
 .history-list::-webkit-scrollbar-thumb:hover,
 .search-results::-webkit-scrollbar-thumb:hover,
+.session-user-list::-webkit-scrollbar-thumb:hover,
 .follow-up-grid::-webkit-scrollbar-thumb:hover {
   background: rgba(143, 49, 29, 0.36);
 }

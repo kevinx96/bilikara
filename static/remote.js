@@ -53,11 +53,22 @@ const state = {
   larkSearchVisible: false,
   larkSearchLoading: false,
   larkSearchSeq: 0,
+  remoteSearchStageView: "",
+  remoteSearchStageAngle: 0,
   remoteSearchFlipTimer: null,
+  remoteSearchFlipFrame: null,
+  remoteSearchPruneTimer: null,
+  gatchaStageView: "",
+  gatchaStageAngle: 0,
+  gatchaFlipTimer: null,
+  gatchaFlipFrame: null,
+  gatchaPruneTimer: null,
+  gatchaMidpointCallback: null,
   followBrowseData: null,
   followBrowseSelectedUid: "",
   followBrowseLoading: false,
   followBrowseRenderSignature: "",
+  requesterSelectRenderSignature: "",
   layoutMode: "full",
   remoteAccessRenderSignature: "",
   viewportScaleResetTimers: [],
@@ -121,6 +132,7 @@ const elements = {
   searchMessage: document.getElementById("search-message"),
   searchResults: document.getElementById("search-results"),
   remoteSearchStage: document.getElementById("remote-search-stage"),
+  remoteSearchStageInner: document.getElementById("remote-search-stage-inner"),
   searchTag: document.querySelector(".search-panel .panel-tag"),
   searchTitle: document.querySelector(".search-panel .panel-title"),
   larkSearchToggle: document.getElementById("lark-search-toggle"),
@@ -154,6 +166,8 @@ const elements = {
   gatchaInitView: document.getElementById("gatcha-init-view"),
   gatchaResultView: document.getElementById("gatcha-result-view"),
   gatchaCandidateTitle: document.getElementById("gatcha-candidate-title"),
+  gatchaStage: document.getElementById("gatcha-stage"),
+  gatchaStageInner: document.getElementById("gatcha-stage-inner"),
   gatchaUidView: document.getElementById("gatcha-uid-view"),
   gatchaUidForm: document.getElementById("gatcha-uid-form"),
   gatchaUidInput: document.getElementById("gatcha-uid-input"),
@@ -470,23 +484,227 @@ function setMessageForSource(source, message, isError = false) {
   setFormMessage(message, isError);
 }
 
-function setRemoteSearchStageView(showLark) {
+function setRemoteSearchStageView(view) {
   if (!elements.remoteSearchStage) {
     return;
   }
-  const next = Boolean(showLark);
-  const previous = elements.remoteSearchStage.classList.contains("is-lark-view");
-  if (previous !== next) {
-    elements.remoteSearchStage.classList.add("is-flipping");
-    if (state.remoteSearchFlipTimer) {
-      window.clearTimeout(state.remoteSearchFlipTimer);
-    }
-    state.remoteSearchFlipTimer = window.setTimeout(() => {
-      elements.remoteSearchStage?.classList.remove("is-flipping");
-      state.remoteSearchFlipTimer = null;
-    }, 380);
+  const nextView = ["search", "browse", "lark"].includes(view) ? view : "search";
+  const previousView = state.remoteSearchStageView || "search";
+  const isInitialRender = !state.remoteSearchStageView;
+  if (state.remoteSearchStageView === nextView) {
+    return;
   }
-  elements.remoteSearchStage.classList.toggle("is-lark-view", next);
+  state.remoteSearchStageView = nextView;
+
+  if (state.remoteSearchFlipTimer) {
+    window.clearTimeout(state.remoteSearchFlipTimer);
+    state.remoteSearchFlipTimer = null;
+  }
+  if (state.remoteSearchPruneTimer) {
+    window.clearTimeout(state.remoteSearchPruneTimer);
+    state.remoteSearchPruneTimer = null;
+  }
+  elements.remoteSearchStage.classList.remove("is-flip-pruned");
+  if (state.remoteSearchFlipFrame) {
+    window.cancelAnimationFrame(state.remoteSearchFlipFrame);
+    state.remoteSearchFlipFrame = null;
+    elements.remoteSearchStage.classList.remove("is-preparing-flip", "is-flip-pruned");
+  }
+
+  const applySearchStageClass = (activeView) => {
+    elements.remoteSearchStage.classList.toggle("is-browse-view", activeView === "browse");
+    elements.remoteSearchStage.classList.toggle("is-lark-view", activeView === "lark");
+  };
+  const clearFlip = () => {
+    elements.remoteSearchStage?.classList.remove("is-flipping", "is-preparing-flip", "is-flip-pruned");
+    elements.remoteSearchStage?.removeAttribute("data-previous-view");
+    elements.remoteSearchStage?.removeAttribute("data-next-view");
+    elements.remoteSearchStage?.removeAttribute("data-skipped-view");
+    state.remoteSearchFlipTimer = null;
+  };
+
+  if (isInitialRender) {
+    const initialAngles = { search: 0, browse: -120, lark: 120 };
+    state.remoteSearchStageAngle = initialAngles[nextView] ?? 0;
+    if (elements.remoteSearchStageInner) {
+      elements.remoteSearchStageInner.style.transform = `rotateY(${state.remoteSearchStageAngle}deg)`;
+    }
+    applySearchStageClass(nextView);
+    elements.remoteSearchStage.classList.remove("is-flipping", "is-preparing-flip", "is-flip-pruned");
+    elements.remoteSearchStage.removeAttribute("data-previous-view");
+    elements.remoteSearchStage.removeAttribute("data-next-view");
+    elements.remoteSearchStage.removeAttribute("data-skipped-view");
+    return;
+  }
+
+  const searchViewOrder = ["search", "browse", "lark"];
+  const previousIndex = searchViewOrder.indexOf(previousView);
+  const nextIndex = searchViewOrder.indexOf(nextView);
+  const forwardSteps = (nextIndex - previousIndex + searchViewOrder.length) % searchViewOrder.length;
+  const skippedView = searchViewOrder.find((candidate) => candidate !== previousView && candidate !== nextView) || "";
+  const startAngle = state.remoteSearchStageAngle;
+  if (forwardSteps === 1) {
+    state.remoteSearchStageAngle -= 120;
+  } else if (forwardSteps === 2) {
+    state.remoteSearchStageAngle += 120;
+  }
+
+  elements.remoteSearchStage.dataset.previousView = previousView;
+  elements.remoteSearchStage.dataset.nextView = nextView;
+  if (skippedView) {
+    elements.remoteSearchStage.dataset.skippedView = skippedView;
+  } else {
+    elements.remoteSearchStage.removeAttribute("data-skipped-view");
+  }
+  elements.remoteSearchStage.classList.add("is-preparing-flip", "is-flipping");
+  if (elements.remoteSearchStageInner) {
+    elements.remoteSearchStageInner.style.transform = `rotateY(${startAngle}deg)`;
+    elements.remoteSearchStageInner.getBoundingClientRect();
+  }
+  state.remoteSearchFlipFrame = window.requestAnimationFrame(() => {
+    state.remoteSearchFlipFrame = null;
+    elements.remoteSearchStage?.classList.remove("is-preparing-flip");
+    if (elements.remoteSearchStageInner) {
+      elements.remoteSearchStageInner.style.transform = `rotateY(${state.remoteSearchStageAngle}deg)`;
+    }
+  });
+  state.remoteSearchPruneTimer = window.setTimeout(() => {
+    state.remoteSearchPruneTimer = null;
+    elements.remoteSearchStage?.classList.add("is-flip-pruned");
+    applySearchStageClass(nextView);
+  }, 150);
+  state.remoteSearchFlipTimer = window.setTimeout(clearFlip, 420);
+}
+
+function setGatchaStageView(showUid, onMidpoint) {
+  if (!elements.gatchaStage) {
+    if (typeof onMidpoint === "function") {
+      onMidpoint();
+    }
+    return;
+  }
+  const nextView = showUid ? "uid" : "draw";
+  const previousView = state.gatchaStageView || "draw";
+  const isInitialRender = !state.gatchaStageView;
+  if (state.gatchaStageView === nextView) {
+    if (elements.gatchaStage.classList.contains("is-flipping") && !elements.gatchaStage.classList.contains("is-flip-pruned")) {
+      state.gatchaMidpointCallback = onMidpoint;
+      return;
+    }
+    if (typeof onMidpoint === "function") {
+      onMidpoint();
+    }
+    return;
+  }
+  state.gatchaStageView = nextView;
+
+  if (state.gatchaFlipTimer) {
+    window.clearTimeout(state.gatchaFlipTimer);
+    state.gatchaFlipTimer = null;
+  }
+  if (state.gatchaPruneTimer) {
+    window.clearTimeout(state.gatchaPruneTimer);
+    state.gatchaPruneTimer = null;
+  }
+  elements.gatchaStage.classList.remove("is-flip-pruned");
+  if (state.gatchaFlipFrame) {
+    window.cancelAnimationFrame(state.gatchaFlipFrame);
+    state.gatchaFlipFrame = null;
+    elements.gatchaStage.classList.remove("is-preparing-flip", "is-flip-pruned");
+  }
+
+  const applyGatchaStageClass = (activeView) => {
+    elements.gatchaStage.classList.toggle("is-uid-view", activeView === "uid");
+  };
+  const clearFlip = () => {
+    elements.gatchaStage?.classList.remove("is-flipping", "is-preparing-flip", "is-flip-pruned");
+    elements.gatchaStage?.removeAttribute("data-previous-view");
+    state.gatchaFlipTimer = null;
+  };
+
+  if (isInitialRender) {
+    state.gatchaStageAngle = nextView === "uid" ? 180 : 0;
+    if (elements.gatchaStageInner) {
+      elements.gatchaStageInner.style.transform = `rotateY(${state.gatchaStageAngle}deg)`;
+    }
+    applyGatchaStageClass(nextView);
+    elements.gatchaStage.classList.remove("is-flipping", "is-preparing-flip", "is-flip-pruned");
+    elements.gatchaStage.removeAttribute("data-previous-view");
+    if (typeof onMidpoint === "function") {
+      onMidpoint();
+    }
+    return;
+  }
+
+  const startAngle = state.gatchaStageAngle;
+  state.gatchaStageAngle += nextView === "uid" ? 180 : -180;
+  state.gatchaMidpointCallback = onMidpoint;
+  elements.gatchaStage.dataset.previousView = previousView;
+  elements.gatchaStage.classList.add("is-preparing-flip", "is-flipping");
+  if (elements.gatchaStageInner) {
+    elements.gatchaStageInner.style.transform = `rotateY(${startAngle}deg)`;
+    elements.gatchaStageInner.getBoundingClientRect();
+  }
+  state.gatchaFlipFrame = window.requestAnimationFrame(() => {
+    state.gatchaFlipFrame = null;
+    elements.gatchaStage?.classList.remove("is-preparing-flip");
+    if (elements.gatchaStageInner) {
+      elements.gatchaStageInner.style.transform = `rotateY(${state.gatchaStageAngle}deg)`;
+    }
+  });
+  state.gatchaPruneTimer = window.setTimeout(() => {
+    state.gatchaPruneTimer = null;
+    elements.gatchaStage?.classList.add("is-flip-pruned");
+    applyGatchaStageClass(nextView);
+    const midpointCallback = state.gatchaMidpointCallback;
+    state.gatchaMidpointCallback = null;
+    if (typeof midpointCallback === "function") {
+      midpointCallback();
+    }
+  }, 150);
+  state.gatchaFlipTimer = window.setTimeout(clearFlip, 420);
+}
+
+function setupRemoteFlipStages() {
+  const searchInner = elements.remoteSearchStage?.querySelector(".remote-search-stage-inner");
+  if (searchInner) {
+    elements.remoteSearchStageInner = searchInner;
+    elements.followBrowseView?.classList.remove("hidden");
+    elements.followBrowseView?.classList.add("remote-search-face", "remote-search-face-back", "follow-browser");
+    elements.larkSearchView?.classList.add("remote-search-face", "remote-search-face-lark");
+    if (elements.followBrowseView && elements.followBrowseView.parentElement !== searchInner) {
+      searchInner.insertBefore(elements.followBrowseView, elements.larkSearchView || null);
+    }
+  }
+
+  if (elements.gatchaStage || !elements.gatchaInitView || !elements.gatchaResultView || !elements.gatchaUidView) {
+    return;
+  }
+  const gatchaPanel = elements.gatchaInitView.closest(".gatcha-panel");
+  if (!gatchaPanel) {
+    return;
+  }
+
+  const stage = document.createElement("div");
+  stage.id = "gatcha-stage";
+  stage.className = "gatcha-stage";
+  const inner = document.createElement("div");
+  inner.id = "gatcha-stage-inner";
+  inner.className = "gatcha-stage-inner";
+  const mainFace = document.createElement("div");
+  mainFace.id = "gatcha-main-view";
+  mainFace.className = "gatcha-face gatcha-face-front";
+
+  gatchaPanel.insertBefore(stage, elements.gatchaInitView);
+  stage.appendChild(inner);
+  inner.appendChild(mainFace);
+  mainFace.append(elements.gatchaInitView, elements.gatchaResultView);
+  elements.gatchaUidView.classList.remove("hidden");
+  elements.gatchaUidView.classList.add("gatcha-face", "gatcha-face-back");
+  inner.appendChild(elements.gatchaUidView);
+
+  elements.gatchaStage = stage;
+  elements.gatchaStageInner = inner;
 }
 
 function duplicateConfirmMessage(duplicateItem, sessionEntry, activeItem) {
@@ -922,6 +1140,7 @@ function renderSearchResults(items) {
     row.className = "search-result-item";
 
     const meta = document.createElement("div");
+    meta.className = "search-result-meta";
 
     const title = document.createElement("div");
     title.className = "search-result-title";
@@ -963,6 +1182,7 @@ function renderLarkSearchResults(items) {
     row.className = "search-result-item";
 
     const meta = document.createElement("div");
+    meta.className = "search-result-meta";
     const title = document.createElement("div");
     title.className = "search-result-title";
     title.textContent = String(item.title || "");
@@ -997,6 +1217,7 @@ function appendLarkSearchResults(items) {
     row.className = "search-result-item";
 
     const meta = document.createElement("div");
+    meta.className = "search-result-meta";
     const title = document.createElement("div");
     title.className = "search-result-title";
     title.textContent = String(item.title || "");
@@ -1083,6 +1304,7 @@ function renderFollowSongResults(items, emptyText) {
     row.className = "search-result-item";
 
     const meta = document.createElement("div");
+    meta.className = "search-result-meta";
     const title = document.createElement("div");
     title.className = "search-result-title";
     title.textContent = String(item.title || "");
@@ -1110,9 +1332,7 @@ function renderFollowBrowse() {
 
   const showFollow = Boolean(state.followBrowseVisible);
   const showLark = Boolean(state.larkSearchVisible);
-  elements.remoteSearchStage?.classList.toggle("hidden", showFollow);
-  setRemoteSearchStageView(showLark && !showFollow);
-  elements.followBrowseView.classList.toggle("hidden", !showFollow);
+  setRemoteSearchStageView(showFollow ? "browse" : showLark ? "lark" : "search");
   if (elements.followBrowseToggle) {
     elements.followBrowseToggle.textContent = showFollow ? "返回搜索" : "关注浏览";
     elements.followBrowseToggle.setAttribute("aria-pressed", String(showFollow));
@@ -1259,6 +1479,11 @@ function setGatchaUidMessage(message, isError = false) {
   elements.gatchaUidMessage.classList.toggle("hidden", !message);
 }
 
+function syncGatchaMainContent(showUid, hasCandidate) {
+  elements.gatchaInitView?.classList.toggle("hidden", showUid || hasCandidate);
+  elements.gatchaResultView?.classList.toggle("hidden", showUid || !hasCandidate);
+}
+
 function renderGatchaUidView() {
   syncGatchaTaskTerminalMessage();
   const showUid = Boolean(state.gatchaUidVisible);
@@ -1267,9 +1492,9 @@ function renderGatchaUidView() {
   if (elements.gatchaCandidateTitle && state.gatchaCandidate?.title) {
     elements.gatchaCandidateTitle.textContent = state.gatchaCandidate.title;
   }
-  elements.gatchaUidView?.classList.toggle("hidden", !showUid);
-  elements.gatchaInitView?.classList.toggle("hidden", showUid || hasCandidate);
-  elements.gatchaResultView?.classList.toggle("hidden", showUid || !hasCandidate);
+  setGatchaStageView(showUid, () => {
+    syncGatchaMainContent(showUid, hasCandidate);
+  });
   if (elements.gatchaUidToggle) {
     elements.gatchaUidToggle.textContent = showUid ? "返回抽卡" : "添加 UID";
     elements.gatchaUidToggle.setAttribute("aria-pressed", String(showUid));
@@ -1394,6 +1619,12 @@ function frontendPlaybackMode(_mode) {
 
 function renderRequesterSelect(sessionUsers) {
   const users = Array.isArray(sessionUsers) ? sessionUsers : [];
+  const signature = JSON.stringify(users);
+  if (signature === state.requesterSelectRenderSignature) {
+    return;
+  }
+  state.requesterSelectRenderSignature = signature;
+
   const previousValue = selectedRequesterName();
   elements.requesterSelect.innerHTML = "";
 
@@ -3142,6 +3373,7 @@ window.addEventListener("pagehide", disconnectClient);
 window.addEventListener("beforeunload", disconnectClient);
 
 async function startRemoteSession() {
+  setupRemoteFlipStages();
   hydrateLocalPreferences();
   renderLayoutMode();
   try {

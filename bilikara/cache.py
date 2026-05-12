@@ -90,6 +90,7 @@ class CacheManager:
         self.pending_ids: set[str] = set()
         self.requeued_active_ids: set[str] = set()
         self.desired_ids: set[str] = set()
+        self.ordered_desired_ids: list[str] = []
         self.stop_event = threading.Event()
         self.lock = threading.RLock()
         self.binary_state = "idle"
@@ -242,7 +243,14 @@ class CacheManager:
         items = self.store.list_items()
         if not items:
             return
-        desired_ids = {item.id for item in items[: self.max_cache_items]} if self.max_cache_items > 0 else set()
+        window_ids: list[str] = []
+        if self.max_cache_items > 0:
+            for item in items:
+                if not self._item_cache_ready(item):
+                    window_ids.append(item.id)
+                    if len(window_ids) >= self.max_cache_items:
+                        break
+        desired_ids = set(window_ids)
         invalidated_ids: list[str] = []
 
         for item in items:
@@ -266,7 +274,8 @@ class CacheManager:
             return
 
         with self.lock:
-            self.desired_ids = desired_ids
+            self.desired_ids = set(window_ids)
+            self.ordered_desired_ids = window_ids
 
         fresh_items = self.store.list_items()
         fresh_by_id = {item.id: item for item in fresh_items}
@@ -400,6 +409,7 @@ class CacheManager:
             self.pending_ids.clear()
             self.requeued_active_ids.clear()
             self.desired_ids.clear()
+            self.ordered_desired_ids.clear()
         for item in self.store.list_items():
             self.store.update_item(
                 item.id,
@@ -450,6 +460,7 @@ class CacheManager:
             self.pending_ids.clear()
             self.requeued_active_ids.clear()
             self.desired_ids.clear()
+            self.ordered_desired_ids.clear()
             self.retry_requested_ids.clear()
             self.cache_interrupted_messages.clear()
             self.item_activity_at.clear()
@@ -471,7 +482,7 @@ class CacheManager:
             raise ValueError("这首歌已经缓存完成，无需重新下载")
         if item.cache_status not in {"downloading", "failed", "ready", "pending", "queued"}:
             raise ValueError("当前缓存状态不能重新下载")
-        if not self._should_cache(item_id):
+        if not self._is_in_cache_window(item_id):
             raise ValueError("当前不在自动缓存窗口中")
 
         log_path = self._item_log_path(item_id)
@@ -518,10 +529,18 @@ class CacheManager:
 
     def sync_with_playlist(self) -> None:
         items = self.store.list_items()
-        desired_ids = {item.id for item in items[: self.max_cache_items]} if self.max_cache_items > 0 else set()
+        window_ids: list[str] = []
+        if self.max_cache_items > 0:
+            for item in items:
+                if not self._item_cache_ready(item):
+                    window_ids.append(item.id)
+                    if len(window_ids) >= self.max_cache_items:
+                        break
+        desired_ids = set(window_ids)
         current_ids = {item.id for item in items}
         with self.lock:
-            self.desired_ids = desired_ids
+            self.desired_ids = set(window_ids)
+            self.ordered_desired_ids = window_ids
 
         self._cleanup_orphan_cache_dirs(current_ids)
         self._stop_active_if_not_desired(desired_ids)
@@ -645,9 +664,13 @@ class CacheManager:
             except queue.Empty:
                 continue
             try:
+                with self.lock:
+                    self.active_item_id = item_id
                 self._cache_item(item_id)
             finally:
                 with self.lock:
+                    if self.active_item_id == item_id:
+                        self.active_item_id = None
                     if item_id in self.requeued_active_ids:
                         self.requeued_active_ids.discard(item_id)
                     else:
@@ -720,8 +743,10 @@ class CacheManager:
         try:
             cache_result = self._download_selected_streams(item, binary_path, ffmpeg_path, item_dir, log_path)
             self._raise_if_retry_requested(item_id)
+            self._raise_if_priority_shift(item_id)
             self._validate_cache_result(item.id, cache_result, ffmpeg_path, log_path)
             self._raise_if_retry_requested(item_id)
+            self._raise_if_priority_shift(item_id)
         except CacheCancelledError as exc:
             if str(exc) == RETRY_REQUESTED_MESSAGE:
                 self._append_log_line(log_path, f"[{self._log_timestamp()}] restarting cache by manual request")
@@ -978,6 +1003,7 @@ class CacheManager:
         item_dir: Path,
         log_path: Path,
     ) -> dict[str, object]:
+        self._raise_if_priority_shift(item.id)
         selected_pages = self._selected_pages_for_item(item)
         video_page = item.video_page if item.video_page in selected_pages else selected_pages[0]
         download_stage_count = len(selected_pages) + 1
@@ -1131,6 +1157,7 @@ class CacheManager:
 
         label = "视频轨" if stream_kind == "video" else "音轨"
         stage_label = f"下载{label} P{page}"
+        self._raise_if_priority_shift(item.id)
         self._run_item_command(
             item.id,
             command,
@@ -2326,9 +2353,21 @@ class CacheManager:
         if self._take_retry_request(item_id):
             raise CacheCancelledError(RETRY_REQUESTED_MESSAGE)
 
-    def _should_cache(self, item_id: str) -> bool:
+    def _raise_if_priority_shift(self, item_id: str) -> None:
+        if not self._should_cache(item_id):
+            raise CacheCancelledError(self._outside_window_message())
+
+    def _is_in_cache_window(self, item_id: str) -> bool:
         with self.lock:
             return item_id in self.desired_ids and not self.stop_event.is_set()
+
+    def _should_cache(self, item_id: str) -> bool:
+        with self.lock:
+            if self.stop_event.is_set():
+                return False
+            if not self.ordered_desired_ids:
+                return item_id in self.desired_ids
+            return item_id == self.ordered_desired_ids[0]
 
     def _stop_active_if_not_desired(self, desired_ids: set[str]) -> None:
         with self.lock:
@@ -2341,11 +2380,8 @@ class CacheManager:
         if not process or process.poll() is not None:
             return
         process.terminate()
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=5)
+        # We don't block here to avoid stalling the API thread.
+        # The worker thread will detect the termination via _run_tool_process.
 
     def _bbdown_login_worker(self) -> None:
             try:
