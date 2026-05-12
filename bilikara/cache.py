@@ -682,10 +682,11 @@ class CacheManager:
                 item_id = self.tasks.get(timeout=0.5)
             except queue.Empty:
                 continue
+            should_resync = False
             try:
                 with self.lock:
                     self.active_item_id = item_id
-                self._cache_item(item_id)
+                should_resync = self._cache_item(item_id)
             finally:
                 with self.lock:
                     if self.active_item_id == item_id:
@@ -695,21 +696,23 @@ class CacheManager:
                     else:
                         self.pending_ids.discard(item_id)
                 self.tasks.task_done()
+            if should_resync and not self.stop_event.is_set():
+                self.sync_with_playlist()
 
-    def _cache_item(self, item_id: str, allow_refresh_retry: bool = True) -> None:
+    def _cache_item(self, item_id: str, allow_refresh_retry: bool = True) -> bool:
         if self.stop_event.is_set() or not self._should_cache(item_id):
-            return
+            return False
         if self._take_retry_request(item_id):
             self._remove_cache_dir(item_id)
         item = self.store.get_item(item_id)
         if not item:
             self._remove_cache_dir(item_id)
-            return
+            return False
         # Current cache flow keeps video and audio tracks separate so the host
         # can switch audio variants without remuxing a single output file.
-        self._cache_item_multi(item_id, item, allow_refresh_retry=allow_refresh_retry)
+        return self._cache_item_multi(item_id, item, allow_refresh_retry=allow_refresh_retry)
 
-    def _cache_item_multi(self, item_id: str, item, *, allow_refresh_retry: bool) -> None:
+    def _cache_item_multi(self, item_id: str, item, *, allow_refresh_retry: bool) -> bool:
         self.store.update_item(
             item_id,
             cache_status="queued",
@@ -734,7 +737,7 @@ class CacheManager:
                 cache_message=f"BBDown 不可用: {exc}",
                 persist_backup=False,
             )
-            return
+            return False
 
         try:
             ffmpeg_path = self._ensure_ffmpeg(force_refresh=False)
@@ -746,10 +749,10 @@ class CacheManager:
                 cache_message=f"FFmpeg 不可用: {exc}",
                 persist_backup=False,
             )
-            return
+            return False
 
         if not self._should_cache(item_id):
-            return
+            return False
 
         self.store.update_item(
             item_id,
@@ -772,19 +775,19 @@ class CacheManager:
                 self._remove_cache_dir(item_id)
                 fresh_item = self.store.get_item(item_id)
                 if fresh_item and self._should_cache(item_id):
-                    self._cache_item_multi(item_id, fresh_item, allow_refresh_retry=allow_refresh_retry)
-                return
+                    return self._cache_item_multi(item_id, fresh_item, allow_refresh_retry=allow_refresh_retry)
+                return False
             self._append_log_line(log_path, f"[{self._log_timestamp()}] cancelled: {exc}")
             self._drop_item_cache(item_id, str(exc))
-            return
+            return False
         except DownloadCommandError as exc:
             if self._take_retry_request(item_id):
                 self._append_log_line(log_path, f"[{self._log_timestamp()}] restarting cache by manual request")
                 self._remove_cache_dir(item_id)
                 fresh_item = self.store.get_item(item_id)
                 if fresh_item and self._should_cache(item_id):
-                    self._cache_item_multi(item_id, fresh_item, allow_refresh_retry=allow_refresh_retry)
-                return
+                    return self._cache_item_multi(item_id, fresh_item, allow_refresh_retry=allow_refresh_retry)
+                return False
             last_message = str(exc)
             if allow_refresh_retry and self._should_force_refresh_bbdown(last_message):
                 self._append_log_line(
@@ -795,8 +798,7 @@ class CacheManager:
                     self._ensure_bbdown(force_refresh=True)
                     self._safe_rmtree(item_dir)
                     item_dir.mkdir(parents=True, exist_ok=True)
-                    self._cache_item_multi(item_id, item, allow_refresh_retry=False)
-                    return
+                    return self._cache_item_multi(item_id, item, allow_refresh_retry=False)
                 except Exception as refresh_exc:  # noqa: BLE001
                     self._append_log_line(
                         log_path,
@@ -810,7 +812,7 @@ class CacheManager:
                 persist_backup=False,
             )
             self._record_item_activity(item_id)
-            return
+            return False
 
         video_file = cache_result["video_file"]
         self.store.update_item(
@@ -826,7 +828,7 @@ class CacheManager:
         )
         self._record_item_activity(item_id)
         self._append_log_line(log_path, f"[{self._log_timestamp()}] ready: {video_file.name}")
-        self.sync_with_playlist()
+        return True
 
     # LEGACY: old single-pass BBDown cache path. It produced one muxed media
     # file and populated local_relative_path/local_media_url. The current host

@@ -351,7 +351,7 @@ class CacheManagerPolicyTest(unittest.TestCase):
             finally:
                 manager.shutdown()
 
-    def test_cache_ready_resyncs_window_before_worker_moves_on(self):
+    def test_cache_ready_requests_worker_resync_after_success(self):
         with patch("bilikara.cache.CACHE_DIR", self.cache_dir), patch.object(
             CacheManager,
             "_worker_loop",
@@ -386,12 +386,42 @@ class CacheManagerPolicyTest(unittest.TestCase):
                     manager,
                     "sync_with_playlist",
                 ) as sync_mock:
-                    manager._cache_item_multi("song-a", item, allow_refresh_retry=True)
+                    should_resync = manager._cache_item_multi("song-a", item, allow_refresh_retry=True)
 
                 cached = self.store.get_item("song-a")
                 self.assertIsNotNone(cached)
                 self.assertEqual(cached.cache_status, "ready")
+                self.assertTrue(should_resync)
+                sync_mock.assert_not_called()
+            finally:
+                manager.shutdown()
+
+    def test_worker_resyncs_ready_cache_after_pending_bookkeeping(self):
+        worker_loop = CacheManager._worker_loop
+        with patch("bilikara.cache.CACHE_DIR", self.cache_dir), patch.object(
+            CacheManager,
+            "_worker_loop",
+            lambda self: None,
+        ):
+            manager = CacheManager(self.store, max_cache_items=3)
+            try:
+                manager.pending_ids = {"song-a"}
+                manager.tasks.put("song-a")
+                resync_states = []
+
+                def sync_once() -> None:
+                    resync_states.append((set(manager.pending_ids), manager.active_item_id))
+                    manager.stop_event.set()
+
+                with patch.object(manager, "_cache_item", return_value=True), patch.object(
+                    manager,
+                    "sync_with_playlist",
+                    side_effect=sync_once,
+                ) as sync_mock:
+                    worker_loop(manager)
+
                 sync_mock.assert_called_once_with()
+                self.assertEqual(resync_states, [(set(), None)])
             finally:
                 manager.shutdown()
 

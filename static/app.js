@@ -4231,6 +4231,12 @@ function reportPlayerStatus(itemId, video) {
     is_paused: video.paused,
     current_time: currentTime,
     duration,
+    client_info: {
+      user_agent: String(window.navigator?.userAgent || ""),
+      platform: String(window.navigator?.platform || ""),
+      language: String(window.navigator?.language || ""),
+      vendor: String(window.navigator?.vendor || ""),
+    },
   }).catch(() => {});
 }
 
