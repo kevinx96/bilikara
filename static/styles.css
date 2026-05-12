@@ -13,7 +13,7 @@
   --action-button-width: 96px;
   --top-controls-width: 628px;
   --status-chip-width: 164px;
-  --language-control-width: 132px;
+  --language-control-width: 176px;
   --layout-control-width: 164px;
   --remote-mini-control-width: 100px;
   --playback-control-width: 228px;
@@ -488,7 +488,7 @@ h2 {
 
 .language-switch .mode-button {
   min-width: 0;
-  padding: 8px 10px;
+  padding: 9px 10px;
 }
 
 .playback-control {
@@ -2658,7 +2658,6 @@ select:disabled {
 .queue-current-progress-badge.ready .icon-play {
   display: block;
   color: var(--accent);
-  margin-left: 2px; /* 播放三角形视觉重心微调，确保绝对居中 */
 }
 
 /* 状态：出错 -> 显示叉号 (红色) */
