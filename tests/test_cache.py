@@ -37,6 +37,20 @@ class CacheManagerOutputTest(unittest.TestCase):
     def test_display_message_compacts_progress_logs(self):
         self.assertEqual(CacheManager._display_message("[###] 42% / - 5 MB/s", 42.0), "缓存中 42%")
 
+    def test_selected_stream_size_hint_reads_selected_video_size(self):
+        line = "[视频] [1080P 高清] [1920x1080] [AVC] [30.002] [2410 kbps] [~71.78 MB]"
+        self.assertEqual(
+            CacheManager._selected_stream_size_hint_bytes(line, "video"),
+            int(71.78 * 1024 * 1024),
+        )
+        self.assertEqual(CacheManager._selected_stream_size_hint_bytes(line, "audio"), 0)
+
+    def test_structured_stage_message_prefers_tracked_bytes(self):
+        self.assertEqual(
+            CacheManager._structured_stage_message("下载视频轨 P1", 32 * 1024 * 1024, 64 * 1024 * 1024),
+            "下载视频轨 P1 50% · 32.0 MB / 64.0 MB",
+        )
+
     def test_force_refresh_hint_matches_upgrade_message(self):
         self.assertTrue(CacheManager._should_force_refresh_bbdown("请尝试升级到最新版本后重试!"))
         self.assertFalse(CacheManager._should_force_refresh_bbdown("缓存失败"))
@@ -787,6 +801,7 @@ class CacheManagerPolicyTest(unittest.TestCase):
                 item = self.make_item("song-a")
                 item.selected_pages = [1]
                 item.video_page = 1
+                manager.desired_ids.add(item.id)
                 with patch.object(manager, "_download_page_stream", side_effect=[video_file, audio_file]):
                     result = manager._download_selected_streams(
                         item,

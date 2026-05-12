@@ -114,6 +114,7 @@ const state = {
   pendingPlaybackRestore: null,
   lastAppliedPlayerControlSeq: 0,
   lastReportedPlayerStatusSignature: "",
+  lastPlayerStatusHeartbeatAt: 0,
   playerFrameClickTimer: null,
   dragItemId: "",
   dragTargetId: "",
@@ -2936,6 +2937,14 @@ function setPlayerFrameContent(html) {
   }
 }
 
+function syncPlayerFrameCacheHint(currentItem) {
+  const hint = elements.playerFrame.querySelector(".empty-state .empty-hint");
+  if (!hint || !currentItem) {
+    return;
+  }
+  setTextContent(hint, currentItem.cache_message || "正在后台缓存");
+}
+
 function teardownMountedPlayer({ preserveAdvanceDelayOverlay = false } = {}) {
   clearLocalPlayerSyncTimer();
   clearLocalPlayerControlsHideTimer();
@@ -3491,6 +3500,8 @@ function renderPlayer(currentItem, playbackMode) {
   if (signature === state.playerSignature) {
     if (hasSplitPlayback) {
       syncMountedLocalPlayer(false);
+    } else {
+      syncPlayerFrameCacheHint(currentItem);
     }
     return;
   }
@@ -3725,6 +3736,10 @@ function renderPlayer(currentItem, playbackMode) {
     syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
   });
 
+  video.addEventListener("timeupdate", () => {
+    reportPlayerStatusHeartbeat(currentItem.id, video);
+  });
+
   video.addEventListener("ratechange", () => {
     showMountedPlayerControls();
     syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
@@ -3795,6 +3810,8 @@ function renderPlayer(currentItem, playbackMode) {
   if (signature === state.playerSignature) {
     if (hasSplitPlayback) {
       syncMountedLocalPlayer(false);
+    } else {
+      syncPlayerFrameCacheHint(currentItem);
     }
     return;
   }
@@ -4028,6 +4045,10 @@ function renderPlayer(currentItem, playbackMode) {
     syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
   });
 
+  video.addEventListener("timeupdate", () => {
+    reportPlayerStatusHeartbeat(currentItem.id, video);
+  });
+
   video.addEventListener("ratechange", () => {
     showMountedPlayerControls();
     syncSplitPlayer(video, audio, currentAvOffsetSeconds(), true);
@@ -4194,6 +4215,18 @@ function reportPlayerStatus(itemId, video) {
     current_time: currentTime,
     duration,
   }).catch(() => {});
+}
+
+function reportPlayerStatusHeartbeat(itemId, video) {
+  if (!video || video.paused) {
+    return;
+  }
+  const now = Date.now();
+  if (now - Number(state.lastPlayerStatusHeartbeatAt || 0) < 5000) {
+    return;
+  }
+  state.lastPlayerStatusHeartbeatAt = now;
+  reportPlayerStatus(itemId, video);
 }
 
 function renderPlaylist(playlist, currentItem, cachePolicy) {

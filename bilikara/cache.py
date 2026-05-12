@@ -42,6 +42,7 @@ MEDIA_EXTENSIONS = {".mp4", ".mkv", ".webm", ".flv", ".m4v"}
 AUDIO_EXTENSIONS = {".m4a", ".aac", ".mp3", ".flac", ".ogg", ".opus", ".wav"}
 PROGRESS_RE = re.compile(r"(\d{1,3}(?:\.\d+)?)\s*%")
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+STREAM_SIZE_HINT_RE = re.compile(r"~?\s*(\d+(?:\.\d+)?)\s*(B|KB|MB|GB|TB)\b", re.IGNORECASE)
 CACHE_LIMIT_CHOICES = (1, 2, 3, 4, 5)
 CREATE_NO_WINDOW = 0x08000000
 STARTF_USESHOWWINDOW = 0x00000001
@@ -104,6 +105,7 @@ class CacheManager:
         self.active_process: subprocess.Popen[str] | None = None
         self.active_item_id: str | None = None
         self.item_activity_at: dict[str, float] = {}
+        self.item_stage_progress_signatures: dict[str, str] = {}
         self.retry_requested_ids: set[str] = set()
         self.cache_interrupted_messages: dict[str, str] = {}
         self.log_dir = LOG_DIR / "bbdown"
@@ -1166,6 +1168,8 @@ class CacheManager:
             stage_label=stage_label,
             stage_index=stage_index,
             stage_count=stage_count,
+            stream_kind=stream_kind,
+            target_dir=target_dir,
         )
 
         allowed_extensions = MEDIA_EXTENSIONS if stream_kind == "video" else AUDIO_EXTENSIONS
@@ -1204,10 +1208,14 @@ class CacheManager:
         stage_label: str,
         stage_index: int,
         stage_count: int,
+        stream_kind: str,
+        target_dir: Path,
     ) -> None:
         progress_start = 94.0 * stage_index / max(stage_count, 1)
         progress_span = 94.0 / max(stage_count, 1)
         self._append_log_line(log_path, f"[{self._log_timestamp()}] command: {json.dumps(command, ensure_ascii=False)}")
+        target_bytes_state = {"value": 0}
+        monitor_stop = threading.Event()
 
         process = subprocess.Popen(
             command,
@@ -1225,6 +1233,29 @@ class CacheManager:
         with self.lock:
             self.active_process = process
             self.active_item_id = item_id
+        self._update_structured_stage_progress(
+            item_id,
+            stage_label=stage_label,
+            target_dir=target_dir,
+            target_bytes=0,
+            progress_start=progress_start,
+            progress_span=progress_span,
+        )
+        monitor = threading.Thread(
+            target=self._monitor_structured_stage_progress,
+            kwargs={
+                "item_id": item_id,
+                "process": process,
+                "stop_event": monitor_stop,
+                "stage_label": stage_label,
+                "target_dir": target_dir,
+                "target_bytes_state": target_bytes_state,
+                "progress_start": progress_start,
+                "progress_span": progress_span,
+            },
+            daemon=True,
+        )
+        monitor.start()
         try:
             assert process.stdout is not None
             for raw_line in self._iter_output_messages(process.stdout):
@@ -1234,11 +1265,24 @@ class CacheManager:
                 last_message = line
                 self._append_log_line(log_path, f"[{self._log_timestamp()}] {line}")
                 self._record_item_activity(item_id)
+                target_bytes = self._selected_stream_size_hint_bytes(line, stream_kind)
+                if target_bytes:
+                    target_bytes_state["value"] = target_bytes
                 progress = self._extract_progress(line)
-                changes = {"cache_message": self._display_stage_message(stage_label, line, progress)}
                 if progress is not None:
-                    changes["cache_progress"] = progress_start + (progress / 100.0) * progress_span
-                self.store.update_item(item_id, persist_backup=False, **changes)
+                    self.store.update_item(
+                        item_id,
+                        cache_progress=progress_start + (progress / 100.0) * progress_span,
+                        persist_backup=False,
+                    )
+                self._update_structured_stage_progress(
+                    item_id,
+                    stage_label=stage_label,
+                    target_dir=target_dir,
+                    target_bytes=target_bytes_state["value"],
+                    progress_start=progress_start,
+                    progress_span=progress_span,
+                )
                 if self.stop_event.is_set():
                     self._terminate_process(process)
                     raise CacheCancelledError("缓存已停止")
@@ -1247,6 +1291,8 @@ class CacheManager:
                     raise CacheCancelledError(self._outside_window_message())
             return_code = process.wait()
         finally:
+            monitor_stop.set()
+            monitor.join(timeout=1.0)
             with self.lock:
                 if self.active_process is process:
                     self.active_process = None
@@ -1738,6 +1784,118 @@ class CacheManager:
         if line:
             return f"{stage_label}: {line}"
         return stage_label
+
+    @staticmethod
+    def _selected_stream_size_hint_bytes(line: str, stream_kind: str) -> int:
+        normalized_line = str(line or "").strip()
+        expected_prefix = "[视频]" if stream_kind == "video" else "[音频]"
+        if not normalized_line.startswith(expected_prefix):
+            return 0
+        matches = STREAM_SIZE_HINT_RE.findall(normalized_line)
+        if not matches:
+            return 0
+        amount, unit = matches[-1]
+        try:
+            value = float(amount)
+        except (TypeError, ValueError):
+            return 0
+        unit_index = {"B": 0, "KB": 1, "MB": 2, "GB": 3, "TB": 4}.get(str(unit or "").upper())
+        if unit_index is None:
+            return 0
+        return max(0, int(value * (1024 ** unit_index)))
+
+    @staticmethod
+    def _format_stage_bytes(value: object) -> str:
+        try:
+            size = max(0.0, float(value or 0.0))
+        except (TypeError, ValueError):
+            size = 0.0
+        units = ("B", "KB", "MB", "GB", "TB")
+        unit_index = 0
+        while size >= 1024 and unit_index < len(units) - 1:
+            size /= 1024
+            unit_index += 1
+        if unit_index == 0:
+            return f"{round(size)} {units[unit_index]}"
+        return f"{size:.1f} {units[unit_index]}"
+
+    @classmethod
+    def _structured_stage_message(cls, stage_label: str, current_bytes: int, target_bytes: int) -> str:
+        normalized_current = max(0, int(current_bytes or 0))
+        normalized_target = max(0, int(target_bytes or 0))
+        if normalized_target > 0 and normalized_current > 0:
+            percent = min(99, max(0, round((normalized_current / normalized_target) * 100)))
+            return (
+                f"{stage_label} {percent}% · "
+                f"{cls._format_stage_bytes(normalized_current)} / {cls._format_stage_bytes(normalized_target)}"
+            )
+        if normalized_target > 0:
+            return f"{stage_label} · 预计 {cls._format_stage_bytes(normalized_target)}"
+        if normalized_current > 0:
+            return f"{stage_label} · 已写入 {cls._format_stage_bytes(normalized_current)}"
+        return f"{stage_label} 准备中"
+
+    def _update_structured_stage_progress(
+        self,
+        item_id: str,
+        *,
+        stage_label: str,
+        target_dir: Path,
+        target_bytes: int,
+        progress_start: float,
+        progress_span: float,
+    ) -> None:
+        current_bytes = self._path_size(target_dir)
+        message = self._structured_stage_message(stage_label, current_bytes, target_bytes)
+        changes: dict[str, object] = {"cache_message": message}
+        normalized_target = max(0, int(target_bytes or 0))
+        if normalized_target > 0:
+            stage_ratio = max(0.0, min(float(current_bytes) / float(normalized_target), 0.99))
+            changes["cache_progress"] = progress_start + stage_ratio * progress_span
+        cache_progress_signature = (
+            round(float(changes["cache_progress"]), 3)
+            if "cache_progress" in changes
+            else None
+        )
+        signature = json.dumps(
+            {
+                "item_id": item_id,
+                "message": message,
+                "cache_progress": cache_progress_signature,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        with self.lock:
+            if self.item_stage_progress_signatures.get(item_id) == signature:
+                return
+            self.item_stage_progress_signatures[item_id] = signature
+        self.store.update_item(item_id, persist_backup=False, **changes)
+        self._record_item_activity(item_id)
+
+    def _monitor_structured_stage_progress(
+        self,
+        *,
+        item_id: str,
+        process: subprocess.Popen[str],
+        stop_event: threading.Event,
+        stage_label: str,
+        target_dir: Path,
+        target_bytes_state: dict[str, int],
+        progress_start: float,
+        progress_span: float,
+    ) -> None:
+        while not stop_event.wait(1.0):
+            self._update_structured_stage_progress(
+                item_id,
+                stage_label=stage_label,
+                target_dir=target_dir,
+                target_bytes=target_bytes_state.get("value", 0),
+                progress_start=progress_start,
+                progress_span=progress_span,
+            )
+            if process.poll() is not None:
+                return
 
     def _ensure_bbdown(self, force_refresh: bool = False) -> Path:
         with self.binary_prepare_lock:

@@ -70,6 +70,12 @@ const state = {
   followBrowseRenderSignature: "",
   requesterSelectRenderSignature: "",
   currentNowPlayingSignature: "",
+  currentPlaybackClockSignature: "",
+  currentPlaybackClockBaseSeconds: 0,
+  currentPlaybackClockDurationSeconds: 0,
+  currentPlaybackClockStartedAt: 0,
+  currentPlaybackClockPaused: true,
+  currentPlaybackClockTimer: null,
   layoutMode: "full",
   remoteAccessRenderSignature: "",
   viewportScaleResetTimers: [],
@@ -880,7 +886,7 @@ async function refreshCacheStatusOnly() {
       state.data = payload.data;
       const current = state.data.current_item;
       if (current) {
-        elements.currentCacheState.textContent = currentCacheStateLabel(current);
+        renderCurrentPlaybackState(current);
         if (current.cache_status === "downloading" || current.cache_status === "queued" || current.cache_status === "waiting") {
           state.autoRefreshTimer = setTimeout(refreshCacheStatusOnly, 1000);
           return;
@@ -1687,7 +1693,7 @@ function renderCurrentItem(current, playbackMode) {
       elements.currentMeta.textContent = ""; // 不显示 log 避免高度抖动
     }
     
-    elements.currentCacheState.textContent = currentCacheStateLabel(current);
+    renderCurrentPlaybackState(current);
     elements.currentCacheState.classList.remove("hidden");
     
     if (current.cache_status === "downloading" || current.cache_status === "queued" || current.cache_status === "waiting") {
@@ -1706,6 +1712,7 @@ function renderCurrentItem(current, playbackMode) {
 
   if (state.currentNowPlayingSignature !== "__empty__") {
     state.currentNowPlayingSignature = "__empty__";
+    clearCurrentPlaybackClock();
     elements.currentTitle.textContent = "当前还没有正在播放的歌曲";
     elements.currentRequester.textContent = "";
     elements.currentRequester.classList.add("hidden");
@@ -2523,10 +2530,104 @@ function currentCacheStateLabel(item) {
     return "";
   }
   if (item.cache_status === "downloading") {
+    const message = String(item.cache_message || "").trim();
+    if (message) {
+      return message;
+    }
     const size = Number(item.cache_size_bytes || 0);
     return size > 0 ? `缓存中 · ${formatBytes(size)}` : "缓存中";
   }
   return queueStateLabel(item);
+}
+
+function formatPlaybackClockSeconds(seconds) {
+  const normalizedSeconds = Math.max(0, Math.floor(Number(seconds || 0)));
+  const hours = Math.floor(normalizedSeconds / 3600);
+  const minutes = Math.floor((normalizedSeconds % 3600) / 60);
+  const restSeconds = normalizedSeconds % 60;
+  if (hours > 0) {
+    return `${hours}:${String(minutes).padStart(2, "0")}:${String(restSeconds).padStart(2, "0")}`;
+  }
+  return `${minutes}:${String(restSeconds).padStart(2, "0")}`;
+}
+
+function clearCurrentPlaybackClock() {
+  if (state.currentPlaybackClockTimer) {
+    window.clearInterval(state.currentPlaybackClockTimer);
+    state.currentPlaybackClockTimer = null;
+  }
+  state.currentPlaybackClockSignature = "";
+  state.currentPlaybackClockBaseSeconds = 0;
+  state.currentPlaybackClockDurationSeconds = 0;
+  state.currentPlaybackClockStartedAt = 0;
+  state.currentPlaybackClockPaused = true;
+}
+
+function currentPlaybackClockText() {
+  const durationSeconds = Math.max(0, Number(state.currentPlaybackClockDurationSeconds || 0));
+  if (!(durationSeconds > 0)) {
+    return "";
+  }
+  const baseSeconds = Math.max(0, Number(state.currentPlaybackClockBaseSeconds || 0));
+  const elapsedSeconds = state.currentPlaybackClockPaused
+    ? 0
+    : Math.max(0, (Date.now() - Number(state.currentPlaybackClockStartedAt || Date.now())) / 1000);
+  const currentSeconds = Math.min(durationSeconds, baseSeconds + elapsedSeconds);
+  return `${formatPlaybackClockSeconds(currentSeconds)} / ${formatPlaybackClockSeconds(durationSeconds)}`;
+}
+
+function paintCurrentPlaybackClock() {
+  const text = currentPlaybackClockText();
+  if (!text || !elements.currentCacheState) {
+    return;
+  }
+  if (elements.currentCacheState.textContent !== text) {
+    elements.currentCacheState.textContent = text;
+  }
+}
+
+function renderCurrentPlaybackState(current) {
+  if (!current || current.cache_status !== "ready") {
+    clearCurrentPlaybackClock();
+    elements.currentCacheState.textContent = currentCacheStateLabel(current);
+    return;
+  }
+
+  const playerStatus = currentPlayerStatus(current);
+  const durationSeconds = Number(playerStatus?.duration || 0);
+  const currentSeconds = Math.max(0, Number(playerStatus?.current_time || 0));
+  const isPaused = Boolean(playerStatus?.is_paused);
+  if (!(durationSeconds > 0) || (!currentSeconds && isPaused)) {
+    clearCurrentPlaybackClock();
+    elements.currentCacheState.textContent = currentCacheStateLabel(current);
+    return;
+  }
+
+  const signature = [
+    current.id || "",
+    Math.round(currentSeconds),
+    Math.round(durationSeconds),
+    isPaused ? "paused" : "playing",
+  ].join("|");
+  if (signature !== state.currentPlaybackClockSignature) {
+    state.currentPlaybackClockSignature = signature;
+    state.currentPlaybackClockBaseSeconds = currentSeconds;
+    state.currentPlaybackClockDurationSeconds = durationSeconds;
+    state.currentPlaybackClockStartedAt = Date.now();
+    state.currentPlaybackClockPaused = isPaused;
+  }
+
+  paintCurrentPlaybackClock();
+  if (isPaused) {
+    if (state.currentPlaybackClockTimer) {
+      window.clearInterval(state.currentPlaybackClockTimer);
+      state.currentPlaybackClockTimer = null;
+    }
+    return;
+  }
+  if (!state.currentPlaybackClockTimer) {
+    state.currentPlaybackClockTimer = window.setInterval(paintCurrentPlaybackClock, 1000);
+  }
 }
 
 function formatBytes(value) {
@@ -2756,6 +2857,7 @@ async function sendPlayerControl(action, deltaSeconds = 0) {
         item_id: currentItem.id,
         is_paused: !Boolean(existingStatus.is_paused),
       };
+      renderCurrentPlaybackState(currentItem);
       renderPlayerControls(currentItem, playbackMode);
     } else {
       renderPlayerControls(currentItem, playbackMode);
