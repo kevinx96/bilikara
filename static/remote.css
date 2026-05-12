@@ -952,6 +952,16 @@ h1 {
   background: #fffcf7;
 }
 
+.reorder-confirm-panel {
+  max-height: none;
+}
+
+.reorder-confirm-text {
+  margin-top: 14px;
+  font-size: 15px;
+  line-height: 1.6;
+}
+
 .request-form {
   display: grid;
   gap: 12px;

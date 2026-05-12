@@ -379,6 +379,24 @@
           </div>
         </div>
       </div>
+      <div id="reorder-confirm-sheet" class="binding-sheet hidden" aria-hidden="true">
+        <div id="reorder-confirm-sheet-backdrop" class="binding-sheet-backdrop"></div>
+        <div class="binding-sheet-panel reorder-confirm-panel">
+          <div class="binding-sheet-handle" aria-hidden="true"></div>
+          <div class="binding-sheet-head">
+            <div>
+              <p class="panel-tag">Queue Order</p>
+              <h2>确认调整顺序</h2>
+            </div>
+            <button type="button" id="reorder-confirm-sheet-close" class="ghost-button binding-sheet-close">关闭</button>
+          </div>
+          <p id="reorder-confirm-sheet-text" class="muted reorder-confirm-text"></p>
+          <div class="binding-sheet-actions">
+            <button type="button" id="reorder-confirm-sheet-cancel" class="ghost-button">取消</button>
+            <button type="button" id="reorder-confirm-sheet-confirm" class="primary-button">确认移动</button>
+          </div>
+        </div>
+      </div>
     </main>
 
     <template id="queue-item-template">

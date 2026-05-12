@@ -94,6 +94,25 @@ class CacheManagerPolicyTest(unittest.TestCase):
             embed_url="https://player.bilibili.com/player.html?aid=123",
         )
 
+    def mark_item_ready_with_files(self, item_id: str) -> None:
+        item_dir = self.cache_dir / item_id
+        item_dir.mkdir(parents=True, exist_ok=True)
+        (item_dir / "video.mp4").write_bytes(b"video")
+        (item_dir / "audio.m4a").write_bytes(b"audio")
+        self.store.update_item(
+            item_id,
+            cache_status="ready",
+            cache_progress=100.0,
+            cache_message="缓存已完成",
+            video_relative_path=f"{item_id}/video.mp4",
+            video_media_url=f"/media/{item_id}/video.mp4",
+            audio_variants=[
+                {"id": "p1", "label": "P1", "audio_url": f"/media/{item_id}/audio.m4a"}
+            ],
+            selected_audio_variant_id="p1",
+            persist_backup=False,
+        )
+
     def test_cache_metrics_reports_usage_by_item(self):
         first = self.cache_dir / "song-a"
         second = self.cache_dir / "song-b"
@@ -306,6 +325,101 @@ class CacheManagerPolicyTest(unittest.TestCase):
                     except queue.Empty:
                         break
                 self.assertEqual(queued_ids, ["song-a", "song-b", "song-c"])
+            finally:
+                manager.shutdown()
+
+    def test_sync_with_playlist_keeps_ready_current_and_targets_following_window_items(self):
+        with patch("bilikara.cache.CACHE_DIR", self.cache_dir), patch.object(
+            CacheManager,
+            "_worker_loop",
+            lambda self: None,
+        ):
+            manager = CacheManager(self.store, max_cache_items=3)
+            try:
+                for item_id in ["song-a", "song-b", "song-c", "song-d"]:
+                    self.store.add_item(self.make_item(item_id), requester_name="cache-test-user")
+                self.mark_item_ready_with_files("song-a")
+
+                manager.sync_with_playlist()
+
+                song_a = self.store.get_item("song-a")
+                self.assertIsNotNone(song_a)
+                self.assertEqual(song_a.cache_status, "ready")
+                self.assertTrue((self.cache_dir / "song-a").exists())
+                self.assertEqual(manager.desired_ids, {"song-a", "song-b", "song-c"})
+                self.assertEqual(manager.ordered_desired_ids, ["song-b", "song-c"])
+            finally:
+                manager.shutdown()
+
+    def test_cache_ready_resyncs_window_before_worker_moves_on(self):
+        with patch("bilikara.cache.CACHE_DIR", self.cache_dir), patch.object(
+            CacheManager,
+            "_worker_loop",
+            lambda self: None,
+        ):
+            manager = CacheManager(self.store, max_cache_items=3)
+            try:
+                item = self.make_item("song-a")
+                self.store.add_item(item, requester_name="cache-test-user")
+                with manager.lock:
+                    manager.desired_ids = {"song-a"}
+                    manager.ordered_desired_ids = ["song-a"]
+                cache_result = {
+                    "video_file": Path("/tmp/video.mp4"),
+                    "video_relative_path": "song-a/video.mp4",
+                    "video_media_url": "/media/song-a/video.mp4",
+                    "audio_variants": [
+                        {"id": "p1", "label": "P1", "audio_url": "/media/song-a/audio.m4a"}
+                    ],
+                    "selected_audio_variant_id": "p1",
+                    "validation_files": [],
+                }
+                with patch.object(manager, "_ensure_bbdown", return_value=Path("/tools/BBDown")), patch.object(
+                    manager,
+                    "_ensure_ffmpeg",
+                    return_value=Path("/tools/ffmpeg"),
+                ), patch.object(
+                    manager,
+                    "_download_selected_streams",
+                    return_value=cache_result,
+                ), patch.object(manager, "_validate_cache_result"), patch.object(
+                    manager,
+                    "sync_with_playlist",
+                ) as sync_mock:
+                    manager._cache_item_multi("song-a", item, allow_refresh_retry=True)
+
+                cached = self.store.get_item("song-a")
+                self.assertIsNotNone(cached)
+                self.assertEqual(cached.cache_status, "ready")
+                sync_mock.assert_called_once_with()
+            finally:
+                manager.shutdown()
+
+    def test_sync_with_playlist_keeps_three_ready_items_as_retention_buffer(self):
+        with patch("bilikara.cache.CACHE_DIR", self.cache_dir), patch.object(
+            CacheManager,
+            "_worker_loop",
+            lambda self: None,
+        ):
+            manager = CacheManager(self.store, max_cache_items=1)
+            try:
+                for item_id in ["song-a", "song-b", "song-c", "song-d", "song-e"]:
+                    self.store.add_item(self.make_item(item_id), requester_name="cache-test-user")
+                for item_id in ["song-b", "song-c", "song-d", "song-e"]:
+                    self.mark_item_ready_with_files(item_id)
+
+                manager.sync_with_playlist()
+
+                for item_id in ["song-b", "song-c", "song-d"]:
+                    cached = self.store.get_item(item_id)
+                    self.assertIsNotNone(cached)
+                    self.assertEqual(cached.cache_status, "ready")
+                    self.assertTrue((self.cache_dir / item_id).exists())
+
+                song_e = self.store.get_item("song-e")
+                self.assertIsNotNone(song_e)
+                self.assertEqual(song_e.cache_status, "pending")
+                self.assertFalse((self.cache_dir / "song-e").exists())
             finally:
                 manager.shutdown()
 

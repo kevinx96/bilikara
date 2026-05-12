@@ -35,6 +35,9 @@ const state = {
   bindingIntent: null,
   gatchaFavlistSheetOpen: false,
   gatchaFavlistIntent: null,
+  reorderConfirmSheetOpen: false,
+  reorderConfirmIntent: null,
+  reorderConfirmSaving: false,
   bindingAccordion: {
     video: false,
     audio: false,
@@ -130,6 +133,12 @@ const elements = {
   gatchaFavlistSheetClose: document.getElementById("gatcha-favlist-sheet-close"),
   gatchaFavlistSheetCancel: document.getElementById("gatcha-favlist-sheet-cancel"),
   gatchaFavlistSheetConfirm: document.getElementById("gatcha-favlist-sheet-confirm"),
+  reorderConfirmSheet: document.getElementById("reorder-confirm-sheet"),
+  reorderConfirmSheetBackdrop: document.getElementById("reorder-confirm-sheet-backdrop"),
+  reorderConfirmSheetText: document.getElementById("reorder-confirm-sheet-text"),
+  reorderConfirmSheetClose: document.getElementById("reorder-confirm-sheet-close"),
+  reorderConfirmSheetCancel: document.getElementById("reorder-confirm-sheet-cancel"),
+  reorderConfirmSheetConfirm: document.getElementById("reorder-confirm-sheet-confirm"),
   requestForm: document.getElementById("request-form"),
   requesterSelect: document.getElementById("requester-select"),
   urlInput: document.getElementById("url-input"),
@@ -2131,6 +2140,84 @@ function closeGatchaFavlistSheet() {
   }, 280);
 }
 
+function openReorderConfirmSheet(intent) {
+  if (!intent?.itemId || !Number.isInteger(intent.targetIndex) || !elements.reorderConfirmSheet) {
+    return;
+  }
+
+  const title = String(intent.title || "").trim() || "这首歌";
+  state.reorderConfirmIntent = {
+    itemId: intent.itemId,
+    targetIndex: intent.targetIndex,
+    title,
+  };
+  state.reorderConfirmSaving = false;
+  state.reorderConfirmSheetOpen = true;
+  if (elements.reorderConfirmSheetText) {
+    elements.reorderConfirmSheetText.textContent = `确认将《${title}》移动到第 ${intent.targetIndex + 1} 首吗？`;
+  }
+  if (elements.reorderConfirmSheetConfirm) {
+    elements.reorderConfirmSheetConfirm.disabled = false;
+    elements.reorderConfirmSheetConfirm.textContent = "确认移动";
+  }
+  elements.reorderConfirmSheet.classList.remove("hidden");
+  elements.reorderConfirmSheet.setAttribute("aria-hidden", "false");
+  requestAnimationFrame(() => {
+    elements.reorderConfirmSheet.classList.add("is-open");
+  });
+}
+
+function closeReorderConfirmSheet() {
+  state.reorderConfirmSheetOpen = false;
+  state.reorderConfirmIntent = null;
+  state.reorderConfirmSaving = false;
+  elements.reorderConfirmSheet?.classList.remove("is-open");
+  elements.reorderConfirmSheet?.setAttribute("aria-hidden", "true");
+  window.setTimeout(() => {
+    if (state.reorderConfirmSheetOpen) {
+      return;
+    }
+    elements.reorderConfirmSheet?.classList.add("hidden");
+    if (elements.reorderConfirmSheetText) {
+      elements.reorderConfirmSheetText.textContent = "";
+    }
+    if (elements.reorderConfirmSheetConfirm) {
+      elements.reorderConfirmSheetConfirm.disabled = false;
+      elements.reorderConfirmSheetConfirm.textContent = "确认移动";
+    }
+  }, 280);
+}
+
+async function confirmReorderConfirmSheet() {
+  const intent = state.reorderConfirmIntent;
+  if (!intent?.itemId || !Number.isInteger(intent.targetIndex) || state.reorderConfirmSaving) {
+    return;
+  }
+
+  state.reorderConfirmSaving = true;
+  if (elements.reorderConfirmSheetConfirm) {
+    elements.reorderConfirmSheetConfirm.disabled = true;
+    elements.reorderConfirmSheetConfirm.textContent = "移动中";
+  }
+
+  try {
+    state.data = await apiPost("/api/playlist/reorder", {
+      item_id: intent.itemId,
+      index: intent.targetIndex,
+    });
+    closeReorderConfirmSheet();
+    setFormMessage("已更新点歌列表顺序。");
+    render();
+  } catch (error) {
+    state.reorderConfirmSaving = false;
+    if (elements.reorderConfirmSheetConfirm) {
+      elements.reorderConfirmSheetConfirm.disabled = false;
+      elements.reorderConfirmSheetConfirm.textContent = "确认移动";
+    }
+    setFormMessage(error.message, true);
+  }
+}
+
 async function confirmGatchaFavlistSheet() {
   const intent = state.gatchaFavlistIntent;
   if (!intent?.uid) {
@@ -3302,6 +3389,22 @@ elements.gatchaFavlistSheetConfirm?.addEventListener("click", async () => {
   await confirmGatchaFavlistSheet();
 });
 
+elements.reorderConfirmSheetClose?.addEventListener("click", () => {
+  closeReorderConfirmSheet();
+});
+
+elements.reorderConfirmSheetCancel?.addEventListener("click", () => {
+  closeReorderConfirmSheet();
+});
+
+elements.reorderConfirmSheetBackdrop?.addEventListener("click", () => {
+  closeReorderConfirmSheet();
+});
+
+elements.reorderConfirmSheetConfirm?.addEventListener("click", async () => {
+  await confirmReorderConfirmSheet();
+});
+
 elements.bindingVideoToggle?.addEventListener("click", () => {
   state.bindingAccordion.video = !state.bindingAccordion.video;
   renderBindingAccordion();
@@ -3471,6 +3574,9 @@ document.addEventListener("keydown", (event) => {
   }
   if (state.gatchaFavlistSheetOpen) {
     closeGatchaFavlistSheet();
+  }
+  if (state.reorderConfirmSheetOpen) {
+    closeReorderConfirmSheet();
   }
 });
 

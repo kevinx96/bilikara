@@ -6465,6 +6465,12 @@ elements.confirmOk.addEventListener("click", async () => {
       render();
       return;
     }
+    if (intent.type === "reorder-item" && intent.itemId && Number.isInteger(intent.targetIndex)) {
+      await reorderPlaylist(intent.itemId, intent.targetIndex);
+      closeConfirm();
+      setAppMessage("已更新点歌列表顺序。");
+      return;
+    }
     if (intent.type === "gatcha-uid-add" && intent.uid) {
       await confirmGatchaUidAdd(intent);
       return;
@@ -6696,11 +6702,18 @@ elements.playlist.addEventListener("drop", async (event) => {
     return;
   }
 
-  try {
-    await reorderPlaylist(draggedId, targetIndex);
-  } catch (error) {
-    setAppMessage(error.message, true);
-  }
+  const draggedItem = playlist[sourceIndex];
+  const point = anchorPointForEvent(event, elements.playlist);
+  openConfirm({
+    type: "reorder-item",
+    itemId: draggedId,
+    targetIndex,
+    x: point.x,
+    y: point.y,
+    message: `确认将《${draggedItem?.display_title || "这首歌"}》移动到第 ${targetIndex + 1} 首吗？`,
+    primaryLabel: "确认移动",
+  });
+  render();
 });
 
 elements.listStage.addEventListener("wheel", (event) => {

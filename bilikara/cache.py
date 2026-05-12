@@ -44,6 +44,7 @@ PROGRESS_RE = re.compile(r"(\d{1,3}(?:\.\d+)?)\s*%")
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 STREAM_SIZE_HINT_RE = re.compile(r"~?\s*(\d+(?:\.\d+)?)\s*(B|KB|MB|GB|TB)\b", re.IGNORECASE)
 CACHE_LIMIT_CHOICES = (1, 2, 3, 4, 5)
+CACHE_RETENTION_BUFFER_ITEMS = 3
 CREATE_NO_WINDOW = 0x08000000
 STARTF_USESHOWWINDOW = 0x00000001
 SW_HIDE = 0
@@ -245,14 +246,7 @@ class CacheManager:
         items = self.store.list_items()
         if not items:
             return
-        window_ids: list[str] = []
-        if self.max_cache_items > 0:
-            for item in items:
-                if not self._item_cache_ready(item):
-                    window_ids.append(item.id)
-                    if len(window_ids) >= self.max_cache_items:
-                        break
-        desired_ids = set(window_ids)
+        desired_ids, ordered_desired_ids = self._cache_window_plan(items)
         invalidated_ids: list[str] = []
 
         for item in items:
@@ -276,8 +270,8 @@ class CacheManager:
             return
 
         with self.lock:
-            self.desired_ids = set(window_ids)
-            self.ordered_desired_ids = window_ids
+            self.desired_ids = set(desired_ids)
+            self.ordered_desired_ids = list(ordered_desired_ids)
 
         fresh_items = self.store.list_items()
         fresh_by_id = {item.id: item for item in fresh_items}
@@ -529,20 +523,43 @@ class CacheManager:
             return
         self.enqueue(item_id)
 
+    def _cache_window_plan(self, items: list[Any]) -> tuple[set[str], list[str]]:
+        if self.max_cache_items <= 0:
+            return set(), []
+        window_items = list(items[: self.max_cache_items])
+        desired_ids = {item.id for item in window_items}
+        ordered_desired_ids = [
+            item.id
+            for item in window_items
+            if not self._item_cache_ready(item)
+        ]
+        return desired_ids, ordered_desired_ids
+
+    def _retained_cache_ids(self, items: list[Any], desired_ids: set[str]) -> set[str]:
+        retained_ids = set(desired_ids)
+        if self.max_cache_items <= 0:
+            return retained_ids
+        buffer_remaining = CACHE_RETENTION_BUFFER_ITEMS
+        if buffer_remaining <= 0:
+            return retained_ids
+
+        for item in items:
+            if item.id in retained_ids or not self._item_cache_ready(item):
+                continue
+            retained_ids.add(item.id)
+            buffer_remaining -= 1
+            if buffer_remaining <= 0:
+                break
+        return retained_ids
+
     def sync_with_playlist(self) -> None:
         items = self.store.list_items()
-        window_ids: list[str] = []
-        if self.max_cache_items > 0:
-            for item in items:
-                if not self._item_cache_ready(item):
-                    window_ids.append(item.id)
-                    if len(window_ids) >= self.max_cache_items:
-                        break
-        desired_ids = set(window_ids)
+        desired_ids, ordered_desired_ids = self._cache_window_plan(items)
+        retained_ids = self._retained_cache_ids(items, desired_ids)
         current_ids = {item.id for item in items}
         with self.lock:
-            self.desired_ids = set(window_ids)
-            self.ordered_desired_ids = window_ids
+            self.desired_ids = set(desired_ids)
+            self.ordered_desired_ids = list(ordered_desired_ids)
 
         self._cleanup_orphan_cache_dirs(current_ids)
         self._stop_active_if_not_desired(desired_ids)
@@ -550,7 +567,7 @@ class CacheManager:
         for item in items:
             if item.id in desired_ids:
                 self._ensure_item_cached(item)
-            else:
+            elif item.id not in retained_ids:
                 self._drop_item_cache(item.id, self._outside_window_message())
         self._prioritize_cache_window(items, desired_ids)
 
@@ -809,6 +826,7 @@ class CacheManager:
         )
         self._record_item_activity(item_id)
         self._append_log_line(log_path, f"[{self._log_timestamp()}] ready: {video_file.name}")
+        self.sync_with_playlist()
 
     # LEGACY: old single-pass BBDown cache path. It produced one muxed media
     # file and populated local_relative_path/local_media_url. The current host
