@@ -299,7 +299,7 @@ class PlaylistExportRouteTest(unittest.TestCase):
         self.assertEqual(rows[0]["BV 号"], "BV1xx411c7mD")
         self.assertEqual(rows[0]["点歌人"], "Kevin")
         self.assertEqual(rows[0]["UP 主"], "μ's")
-        self.assertEqual(rows[0]["UP 主UID"], "12345")
+        self.assertEqual(rows[0]["UP 主 UID"], "12345")
         self.assertEqual(rows[0]["点歌次数"], "2")
         self.assertTrue(rows[0]["播放时间"])
         self.assertEqual(rows[0]["视频链接"], "https://www.bilibili.com/video/BV1xx411c7mD?p=1")
@@ -331,12 +331,13 @@ class PlaylistExportRouteTest(unittest.TestCase):
         ), patch(
             "bilikara.server.playlist_image_export",
             return_value=(b"zip-bytes", "application/zip", "bilikara-playlist-images.zip"),
-        ):
+        ) as image_export:
             handler.do_GET()
 
         self.assertEqual(writes[0]["payload"], b"zip-bytes")
         self.assertEqual(writes[0]["content_type"], "application/zip")
         self.assertEqual(writes[0]["filename"], "bilikara-history-20260430-123456.zip")
+        self.assertEqual(image_export.call_args.kwargs["page_size"], 200)
 
     def test_playlist_export_played_source_downloads_session_csv(self):
         handler = BilikaraHandler.__new__(BilikaraHandler)
@@ -378,6 +379,40 @@ class PlaylistExportRouteTest(unittest.TestCase):
         self.assertIn("播放时间", rows[0])
         self.assertEqual(rows[0]["标题"], "中文歌曲")
         self.assertEqual(rows[0]["点歌人"], "小明")
+
+    def test_playlist_export_image_route_applies_selected_page_size(self):
+        handler = BilikaraHandler.__new__(BilikaraHandler)
+        writes: list[dict] = []
+        history = [
+            {"display_title": f"Song {index}", "requested_at": index}
+            for index in range(160)
+        ]
+        context = SimpleNamespace(
+            touch_client=lambda client_id, is_host=True: None,
+            history_snapshot=lambda: history,
+        )
+
+        handler.path = "/api/playlist/export?format=image&page_size=150"
+        handler.headers = {}
+        handler._write_download = lambda payload, content_type, filename: writes.append(
+            {
+                "payload": payload,
+                "content_type": content_type,
+                "filename": filename,
+            }
+        )
+
+        with patch("bilikara.server.CONTEXT", context), patch(
+            "bilikara.server.time.strftime",
+            return_value="20260430-123456",
+        ), patch(
+            "bilikara.server.playlist_image_export",
+            return_value=(b"image-bytes", "image/png", "bilikara-playlist.png"),
+        ) as image_export:
+            handler.do_GET()
+
+        self.assertEqual(writes[0]["payload"], b"image-bytes")
+        self.assertEqual(image_export.call_args.kwargs["page_size"], 150)
 
     def test_history_clear_route_returns_fresh_snapshot(self):
         handler = BilikaraHandler.__new__(BilikaraHandler)

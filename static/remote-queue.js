@@ -249,6 +249,17 @@
       return;
     }
 
+    const draggedItem = playlist[sourceIndex];
+    if (typeof openReorderConfirmSheet === "function") {
+      openReorderConfirmSheet({
+        itemId: draggedId,
+        targetIndex,
+        title: draggedItem?.display_title || "",
+      });
+      render();
+      return;
+    }
+
     try {
       await reorderQueue(draggedId, targetIndex);
     } catch (error) {

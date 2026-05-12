@@ -125,7 +125,7 @@ p {
 }
 
 .confirm-popover.confirm-popover-wide {
-  width: min(340px, calc(100vw - 24px));
+  width: min(420px, calc(100vw - 24px));
 }
 
 .confirm-popover.hidden {
@@ -258,10 +258,30 @@ p {
   color: var(--ink);
 }
 
-.confirm-source {
+.confirm-source,
+.confirm-page-size {
   width: 100%;
   min-height: 42px;
   margin-top: 2px;
+}
+
+.confirm-export-controls {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.confirm-export-controls .confirm-source,
+.confirm-export-controls .confirm-page-size {
+  margin-top: 0;
+}
+
+.confirm-page-size-note {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
 }
 
 .confirm-actions {
@@ -1255,10 +1275,11 @@ h2 {
 }
 
 .player-panel > .panel-head {
+  --player-fullscreen-button-space: clamp(112px, 18ch, 190px);
   position: relative;
   display: block;
   min-height: 44px;
-  padding-right: 112px;
+  padding-right: var(--player-fullscreen-button-space);
 }
 
 .player-panel > .panel-head > div {
@@ -1269,8 +1290,12 @@ h2 {
   position: absolute;
   top: 0;
   right: 0;
-  width: 96px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: max-content;
   min-width: 96px;
+  max-width: calc(100% - 8px);
 }
 
 .player-panel:fullscreen,
@@ -1366,8 +1391,12 @@ h2 {
 
 .player-panel:fullscreen #player-fullscreen-button,
 .player-panel:-webkit-full-screen #player-fullscreen-button {
-  position: static;
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  z-index: 6;
   pointer-events: auto;
+  max-width: calc(100vw - 32px);
 }
 
 .fullscreen-request-toast {
@@ -2250,6 +2279,10 @@ select:disabled {
 .session-user-list {
   display: grid;
   gap: 10px;
+  max-height: 340px;
+  overflow-y: auto;
+  padding-right: 6px;
+  overscroll-behavior: contain;
 }
 
 .session-user-empty {
@@ -2858,9 +2891,9 @@ select:disabled {
 .song-item {
   position: relative;
   display: grid;
-  grid-template-columns: var(--queue-badge-column-width) 1fr auto;
+  grid-template-columns: var(--queue-badge-column-width) minmax(0, 1fr) auto;
   gap: 12px;
-  align-items: center;
+  align-items: stretch;
   min-height: 96px;
   padding: 12px 10px;
   border-radius: 20px;
@@ -3154,7 +3187,7 @@ select:disabled {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 14px;
-  align-items: center;
+  align-items: stretch;
   padding: 10px 14px;
   border-radius: 20px;
   border: 1px solid rgba(255, 255, 255, 0.1);
@@ -3902,6 +3935,7 @@ select:disabled {
 .history-meta-row {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 12px;
   font-size: 13px;
   color: var(--muted);
@@ -3976,12 +4010,14 @@ select:disabled {
 
 .history-list::-webkit-scrollbar,
 .search-results::-webkit-scrollbar,
+.session-user-list::-webkit-scrollbar,
 .follow-up-grid::-webkit-scrollbar {
   width: 8px;
 }
 
 .history-list::-webkit-scrollbar-track,
 .search-results::-webkit-scrollbar-track,
+.session-user-list::-webkit-scrollbar-track,
 .follow-up-grid::-webkit-scrollbar-track {
   background: rgba(255, 255, 255, 0.05);
   border-radius: 999px;
@@ -3989,6 +4025,7 @@ select:disabled {
 
 .history-list::-webkit-scrollbar-thumb,
 .search-results::-webkit-scrollbar-thumb,
+.session-user-list::-webkit-scrollbar-thumb,
 .follow-up-grid::-webkit-scrollbar-thumb {
   background: rgba(0, 210, 255, 0.24);
   border-radius: 999px;
@@ -3996,6 +4033,7 @@ select:disabled {
 
 .history-list::-webkit-scrollbar-thumb:hover,
 .search-results::-webkit-scrollbar-thumb:hover,
+.session-user-list::-webkit-scrollbar-thumb:hover,
 .follow-up-grid::-webkit-scrollbar-thumb:hover {
   background: rgba(0, 210, 255, 0.36);
 }
@@ -4255,7 +4293,7 @@ select:disabled {
   }
 
   .song-item {
-    grid-template-columns: 62px minmax(0, 1fr);
+    grid-template-columns: 62px minmax(0, 1fr) auto;
     min-height: 112px;
   }
 
@@ -4300,10 +4338,6 @@ select:disabled {
   .song-actions .icon-button {
     width: 40px;
     min-width: 40px;
-  }
-
-  .history-item {
-    grid-template-columns: 1fr;
   }
 
   .history-actions {

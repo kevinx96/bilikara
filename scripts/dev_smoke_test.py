@@ -6,6 +6,7 @@ import base64
 from dataclasses import dataclass
 import json
 import os
+import platform
 from pathlib import Path
 import queue
 import sys
@@ -38,6 +39,7 @@ DEFAULT_TRANSITION_TAIL_SECONDS = 3.0
 DEFAULT_TRANSITION_SEEK_TOLERANCE_SECONDS = 1.25
 DEFAULT_TRANSITION_END_GUARD_SECONDS = 0.75
 DEFAULT_SMOKE_VIDEO_QUALITY_PREFIX = "480P"
+SMOKE_LOG_FILE = None
 
 
 class ApiError(RuntimeError):
@@ -97,6 +99,7 @@ class SmokeRunner:
         print_info(f"Remote page: {self.base_url}/remote")
         print_info("This script does not change frontend layout or switch ports.")
         print_info("It drives the current service via API. Use dev/test data when possible.")
+        self.print_runtime_environment()
 
         self.wait_for_server_ready()
         self.open_observer_pages()
@@ -1014,6 +1017,7 @@ class SmokeRunner:
             print_ok(f"Remote seek control command: seq={command.get('seq')} delta={command.get('delta_seconds')}")
         else:
             print_skip("Player controls", "No current song")
+        self.print_player_playback_summary(current_id, label="Player status after control commands")
 
         state = self.get_state()
         if state.get("playlist") and current_id:
@@ -1041,6 +1045,7 @@ class SmokeRunner:
             new_current_id = str(new_current.get("id") or "")
             if new_current_id:
                 self.wait_for_cache(new_current_id)
+                self.print_player_playback_summary(new_current_id, label="Player status after transition")
             self.visual_checkpoint("Inspect the player after the transition. The next song should be loaded and the queue should update.", seconds=8)
         else:
             print_skip("Transition UI and next-song API", "Need a current song and at least one queued song")
@@ -1053,6 +1058,46 @@ class SmokeRunner:
             f"muted={settings.get('is_muted')} offset={settings.get('av_offset_ms')}"
         )
         self.visual_checkpoint("Confirm the player reloaded while queue/history stayed intact.", seconds=8)
+
+    def print_runtime_environment(self) -> None:
+        print_header("Runtime environment")
+        print_info(f"Smoke runner OS: {platform.platform()}")
+        print_info(f"Python: {platform.python_version()} ({sys.executable})")
+        try:
+            controller = webbrowser.get()
+        except webbrowser.Error as exc:
+            print_warn(f"Default browser controller unavailable: {exc}")
+        else:
+            print_info(f"Default browser controller: {controller!r}")
+
+    def print_player_playback_summary(self, item_id: str, *, label: str) -> None:
+        if not item_id:
+            return
+        state = self.get_state()
+        status = self.player_status_for_item(state, item_id)
+        if status is None:
+            print_warn(f"{label}: Host has not reported media playback status for {item_id}")
+            return
+        current_time = self.player_current_time_seconds(state, item_id)
+        duration = self.player_duration_seconds(state, item_id)
+        is_paused = bool(status.get("is_paused"))
+        played = (duration > 0 and current_time > 0) or not is_paused
+        age = max(0.0, time.time() - float(status.get("updated_at") or 0.0))
+        print_info(
+            f"{label}: played={played} paused={is_paused} "
+            f"time={current_time:.1f}/{duration:.1f}s status_age={age:.1f}s"
+        )
+        client_info = status.get("client_info") if isinstance(status, dict) else None
+        if isinstance(client_info, dict):
+            print_info(
+                "Host browser: "
+                f"platform={client_info.get('platform') or 'unknown'} "
+                f"language={client_info.get('language') or 'unknown'} "
+                f"vendor={client_info.get('vendor') or 'unknown'}"
+            )
+            user_agent = str(client_info.get("user_agent") or "").strip()
+            if user_agent:
+                print_info(f"Host userAgent: {user_agent}")
 
     def check_history_exports(self) -> None:
         print_header("History export downloads")
@@ -1695,6 +1740,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--non-interactive", action="store_true", help="Do not prompt for missing song URL.")
     parser.add_argument("--no-open-browser", action="store_true", help="Do not call webbrowser.open; prints URL only.")
     parser.add_argument("--no-wait-at-end", action="store_true", help="Exit immediately after checks.")
+    parser.add_argument(
+        "--log-file",
+        help="Write smoke output to this file in addition to stdout. Defaults to data/logs/dev_smoke_test.log.",
+    )
     return parser.parse_args(argv)
 
 
@@ -1703,7 +1752,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.home:
         os.environ["BILIKARA_HOME"] = str(Path(args.home).expanduser())
 
-    from bilikara.config import HOST, PORT
+    from bilikara.config import HOST, LOG_DIR, PORT
+    setup_smoke_log(Path(args.log_file).expanduser() if args.log_file else LOG_DIR / "dev_smoke_test.log")
 
     browser_host = "127.0.0.1" if HOST in {"0.0.0.0", "::"} else HOST
     base_url = f"http://{browser_host}:{PORT}"
@@ -1723,6 +1773,7 @@ def main(argv: list[str] | None = None) -> int:
         print_fail(str(exc))
         return 1
     finally:
+        close_smoke_log()
         handle.stop()
 
 
@@ -1773,32 +1824,55 @@ def console_text(value: object) -> str:
     return str(value).encode("ascii", "backslashreplace").decode("ascii")
 
 
+def setup_smoke_log(path: Path) -> None:
+    global SMOKE_LOG_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    SMOKE_LOG_FILE = path.open("a", encoding="utf-8")
+    SMOKE_LOG_FILE.write(f"\n--- dev smoke test {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
+    SMOKE_LOG_FILE.flush()
+
+
+def close_smoke_log() -> None:
+    global SMOKE_LOG_FILE
+    if SMOKE_LOG_FILE is None:
+        return
+    SMOKE_LOG_FILE.close()
+    SMOKE_LOG_FILE = None
+
+
+def print_line(message: str) -> None:
+    print(message)
+    if SMOKE_LOG_FILE is not None:
+        SMOKE_LOG_FILE.write(message + "\n")
+        SMOKE_LOG_FILE.flush()
+
+
 def print_header(title: str) -> None:
-    print(f"\n=== {console_text(title)} ===")
+    print_line(f"\n=== {console_text(title)} ===")
 
 
 def print_step(message: str) -> None:
-    print(f"[STEP] {console_text(message)}")
+    print_line(f"[STEP] {console_text(message)}")
 
 
 def print_info(message: str) -> None:
-    print(f"[INFO] {console_text(message)}")
+    print_line(f"[INFO] {console_text(message)}")
 
 
 def print_ok(message: str) -> None:
-    print(f"[ OK ] {console_text(message)}")
+    print_line(f"[ OK ] {console_text(message)}")
 
 
 def print_warn(message: str) -> None:
-    print(f"[WARN] {console_text(message)}")
+    print_line(f"[WARN] {console_text(message)}")
 
 
 def print_skip(name: str, reason: str) -> None:
-    print(f"[SKIP] {console_text(name)}: {console_text(reason)}")
+    print_line(f"[SKIP] {console_text(name)}: {console_text(reason)}")
 
 
 def print_fail(message: str) -> None:
-    print(f"[FAIL] {console_text(message)}")
+    print_line(f"[FAIL] {console_text(message)}")
 
 
 if __name__ == "__main__":

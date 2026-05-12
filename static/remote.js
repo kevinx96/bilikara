@@ -5,6 +5,8 @@ const viewportScaleResetDelaysMs = [0, 120, 360];
 const eventStreamInitialRetryMs = 1000;
 const eventStreamMaxRetryMs = 15000;
 const larkSearchTableCount = 5;
+const playerControlStatusRefreshDelaysMs = [180, 520, 1100, 1800];
+const playerControlStatusSyncTimeoutMs = 3200;
 const storageKeys = {
   language: "bilikara.ui.language",
   layoutMode: "bilikara.remote.layout.mode",
@@ -22,6 +24,8 @@ const state = {
   openQueueMenuId: null,
   openHistoryMenuId: null,
   playerControlPendingAction: "",
+  playerControlStatusSync: null,
+  playerControlStatusRefreshTimers: [],
   audioVariantSwitchInFlight: false,
   audioVariantSwitchUnlockAt: 0,
   audioVariantSwitchTimer: null,
@@ -39,6 +43,9 @@ const state = {
   bindingIntent: null,
   gatchaFavlistSheetOpen: false,
   gatchaFavlistIntent: null,
+  reorderConfirmSheetOpen: false,
+  reorderConfirmIntent: null,
+  reorderConfirmSaving: false,
   bindingAccordion: {
     video: false,
     audio: false,
@@ -73,6 +80,13 @@ const state = {
   followBrowseLoading: false,
   followBrowseRenderSignature: "",
   requesterSelectRenderSignature: "",
+  currentNowPlayingSignature: "",
+  currentPlaybackClockSignature: "",
+  currentPlaybackClockBaseSeconds: 0,
+  currentPlaybackClockDurationSeconds: 0,
+  currentPlaybackClockStartedAt: 0,
+  currentPlaybackClockPaused: true,
+  currentPlaybackClockTimer: null,
   layoutMode: "full",
   remoteAccessRenderSignature: "",
   viewportScaleResetTimers: [],
@@ -96,6 +110,7 @@ const elements = {
   remotePopoverUrlHint: document.getElementById("remote-popover-url-hint"),
   currentTitle: document.getElementById("current-title"),
   currentRequester: document.getElementById("current-requester"),
+  currentOwner: document.getElementById("current-owner"),
   currentCacheState: document.getElementById("current-cache-state"),
   currentMeta: document.getElementById("current-meta"),
   audioVariantBar: document.getElementById("audio-variant-bar"),
@@ -127,6 +142,12 @@ const elements = {
   gatchaFavlistSheetClose: document.getElementById("gatcha-favlist-sheet-close"),
   gatchaFavlistSheetCancel: document.getElementById("gatcha-favlist-sheet-cancel"),
   gatchaFavlistSheetConfirm: document.getElementById("gatcha-favlist-sheet-confirm"),
+  reorderConfirmSheet: document.getElementById("reorder-confirm-sheet"),
+  reorderConfirmSheetBackdrop: document.getElementById("reorder-confirm-sheet-backdrop"),
+  reorderConfirmSheetText: document.getElementById("reorder-confirm-sheet-text"),
+  reorderConfirmSheetClose: document.getElementById("reorder-confirm-sheet-close"),
+  reorderConfirmSheetCancel: document.getElementById("reorder-confirm-sheet-cancel"),
+  reorderConfirmSheetConfirm: document.getElementById("reorder-confirm-sheet-confirm"),
   requestForm: document.getElementById("request-form"),
   requesterSelect: document.getElementById("requester-select"),
   urlInput: document.getElementById("url-input"),
@@ -187,6 +208,7 @@ const elements = {
   historyViewButton: document.getElementById("history-view-button"),
   historyExportRow: document.getElementById("history-export-row"),
   historyExportSource: document.getElementById("history-export-source"),
+  historyExportPageSize: document.getElementById("history-export-page-size"),
   historyExportImageButton: document.getElementById("history-export-image-button"),
   historyExportCsvButton: document.getElementById("history-export-csv-button"),
   appToast: document.getElementById("app-toast"),
@@ -215,6 +237,11 @@ function clientHeaders(extraHeaders = {}) {
 function requesterBadgeText(requesterName) {
   const normalized = String(requesterName || "").trim();
   return normalized ? t("request.requesterBadge", { name: normalized }) : "";
+}
+
+function ownerLineText(ownerName) {
+  const normalized = String(ownerName || "").trim();
+  return normalized ? t("owner.upOwner", { name: normalized }) : "";
 }
 
 function selectedRequesterName() {
@@ -893,15 +920,23 @@ function selectedHistoryExportSource() {
   return source === "history" ? "history" : "played";
 }
 
-async function downloadHistoryExport(format, source = selectedHistoryExportSource()) {
+function selectedHistoryExportPageSize() {
+  const pageSize = Number.parseInt(String(elements.historyExportPageSize?.value || "200"), 10);
+  return [200, 150, 100, 80, 60, 50].includes(pageSize) ? pageSize : 200;
+}
+
+async function downloadHistoryExport(format, source = selectedHistoryExportSource(), pageSize = selectedHistoryExportPageSize()) {
   const normalizedFormat = String(format || "").trim().toLowerCase();
   const normalizedSource = source === "history" ? "history" : "played";
+  const requestedPageSize = Number.parseInt(String(pageSize || "200"), 10);
+  const normalizedPageSize = [200, 150, 100, 80, 60, 50].includes(requestedPageSize) ? requestedPageSize : 200;
   if (!["csv", "image"].includes(normalizedFormat)) {
     return;
   }
   const params = new URLSearchParams({
     format: normalizedFormat,
     source: normalizedSource,
+    page_size: String(normalizedPageSize),
   });
   const response = await fetch(`/api/playlist/export?${params.toString()}`, {
     cache: "no-store",
@@ -934,12 +969,13 @@ async function downloadHistoryExport(format, source = selectedHistoryExportSourc
 
 async function exportHistory(format) {
   const source = selectedHistoryExportSource();
+  const pageSize = selectedHistoryExportPageSize();
   const sourceLabel = source === "played" ? t("history.playedSource") : t("history.allSource");
   setAppMessage(format === "csv"
     ? t("remote.exportingCsv", { source: sourceLabel })
-    : t("remote.exportingImage", { source: sourceLabel }));
+    : t("remote.exportingImagePaged", { source: sourceLabel, count: pageSize }));
   try {
-    await downloadHistoryExport(format, source);
+    await downloadHistoryExport(format, source, pageSize);
     setAppMessage(format === "csv"
       ? t("history.csvDownloadStarted", { source: sourceLabel })
       : t("history.imageDownloadStarted", { source: sourceLabel }));
@@ -1009,7 +1045,7 @@ async function refreshCacheStatusOnly() {
       state.data = payload.data;
       const current = state.data.current_item;
       if (current) {
-        elements.currentCacheState.textContent = currentCacheStateLabel(current);
+        renderCurrentPlaybackState(current);
         if (current.cache_status === "downloading" || current.cache_status === "queued" || current.cache_status === "waiting") {
           state.autoRefreshTimer = setTimeout(refreshCacheStatusOnly, 1000);
           return;
@@ -1805,12 +1841,25 @@ function renderRequesterSelect(sessionUsers) {
 
 function renderCurrentItem(current, playbackMode) {
   if (current) {
-    elements.currentTitle.textContent = current.display_title;
     const requesterText = requesterBadgeText(current.requester_name);
-    elements.currentRequester.textContent = requesterText;
-    elements.currentRequester.classList.toggle("hidden", !requesterText);
+    const ownerText = ownerLineText(current.owner_name);
+    const nowPlayingSignature = JSON.stringify([
+      current.id || "",
+      current.display_title || "",
+      requesterText,
+      ownerText,
+    ]);
+    if (nowPlayingSignature !== state.currentNowPlayingSignature) {
+      state.currentNowPlayingSignature = nowPlayingSignature;
+      elements.currentTitle.textContent = current.display_title;
+      elements.currentRequester.textContent = requesterText;
+      elements.currentRequester.classList.toggle("hidden", !requesterText);
+      elements.currentOwner.textContent = ownerText;
+      elements.currentOwner.classList.toggle("hidden", !ownerText);
+      elements.currentMeta.textContent = ""; // 不显示 log 避免高度抖动
+    }
     
-    elements.currentCacheState.textContent = currentCacheStateLabel(current);
+    renderCurrentPlaybackState(current);
     elements.currentCacheState.classList.remove("hidden");
     
     if (current.cache_status === "downloading" || current.cache_status === "queued" || current.cache_status === "waiting") {
@@ -1828,13 +1877,21 @@ function renderCurrentItem(current, playbackMode) {
     return;
   }
 
-  elements.currentTitle.textContent = t("remote.noCurrentSong");
-  elements.currentRequester.textContent = "";
-  elements.currentRequester.classList.add("hidden");
-  elements.currentCacheState.textContent = "";
-  elements.currentCacheState.classList.add("hidden");
-  elements.currentCacheState.classList.remove("ready", "failed");
-  elements.currentMeta.textContent = t("remote.noCurrentHint");
+  if (state.currentNowPlayingSignature !== "__empty__") {
+    state.currentNowPlayingSignature = "__empty__";
+    clearCurrentPlaybackClock();
+    elements.currentTitle.textContent = t("remote.noCurrentSong");
+    elements.currentRequester.textContent = "";
+    elements.currentRequester.classList.add("hidden");
+    if (elements.currentOwner) {
+      elements.currentOwner.textContent = "";
+      elements.currentOwner.classList.add("hidden");
+    }
+    elements.currentCacheState.textContent = "";
+    elements.currentCacheState.classList.add("hidden");
+    elements.currentCacheState.classList.remove("ready", "failed");
+    elements.currentMeta.textContent = t("remote.noCurrentHint");
+  }
 }
 
 function audioVariantsForItem(item) {
@@ -2246,6 +2303,86 @@ function closeGatchaFavlistSheet() {
   }, 280);
 }
 
+function openReorderConfirmSheet(intent) {
+  if (!intent?.itemId || !Number.isInteger(intent.targetIndex) || !elements.reorderConfirmSheet) {
+    return;
+  }
+
+  const title = String(intent.title || "").trim() || t("request.thisSong");
+  state.reorderConfirmIntent = {
+    itemId: intent.itemId,
+    targetIndex: intent.targetIndex,
+    title,
+  };
+  state.reorderConfirmSaving = false;
+  state.reorderConfirmSheetOpen = true;
+  if (elements.reorderConfirmSheetText) {
+    elements.reorderConfirmSheetText.textContent = t("remote.queueOrderMessage", {
+      title,
+      index: intent.targetIndex + 1,
+    });
+  }
+  if (elements.reorderConfirmSheetConfirm) {
+    elements.reorderConfirmSheetConfirm.disabled = false;
+    elements.reorderConfirmSheetConfirm.textContent = t("remote.queueOrderConfirm");
+  }
+  elements.reorderConfirmSheet.classList.remove("hidden");
+  elements.reorderConfirmSheet.setAttribute("aria-hidden", "false");
+  requestAnimationFrame(() => {
+    elements.reorderConfirmSheet.classList.add("is-open");
+  });
+}
+
+function closeReorderConfirmSheet() {
+  state.reorderConfirmSheetOpen = false;
+  state.reorderConfirmIntent = null;
+  state.reorderConfirmSaving = false;
+  elements.reorderConfirmSheet?.classList.remove("is-open");
+  elements.reorderConfirmSheet?.setAttribute("aria-hidden", "true");
+  window.setTimeout(() => {
+    if (state.reorderConfirmSheetOpen) {
+      return;
+    }
+    elements.reorderConfirmSheet?.classList.add("hidden");
+    if (elements.reorderConfirmSheetText) {
+      elements.reorderConfirmSheetText.textContent = "";
+    }
+    if (elements.reorderConfirmSheetConfirm) {
+      elements.reorderConfirmSheetConfirm.disabled = false;
+      elements.reorderConfirmSheetConfirm.textContent = t("remote.queueOrderConfirm");
+    }
+  }, 280);
+}
+
+async function confirmReorderConfirmSheet() {
+  const intent = state.reorderConfirmIntent;
+  if (!intent?.itemId || !Number.isInteger(intent.targetIndex) || state.reorderConfirmSaving) {
+    return;
+  }
+
+  state.reorderConfirmSaving = true;
+  if (elements.reorderConfirmSheetConfirm) {
+    elements.reorderConfirmSheetConfirm.disabled = true;
+    elements.reorderConfirmSheetConfirm.textContent = t("remote.queueOrderMoving");
+  }
+
+  try {
+    state.data = await apiPost("/api/playlist/reorder", {
+      item_id: intent.itemId,
+      index: intent.targetIndex,
+    });
+    closeReorderConfirmSheet();
+    setFormMessage(t("remote.queueOrderUpdated"));
+    render();
+  } catch (error) {
+    state.reorderConfirmSaving = false;
+    if (elements.reorderConfirmSheetConfirm) {
+      elements.reorderConfirmSheetConfirm.disabled = false;
+      elements.reorderConfirmSheetConfirm.textContent = t("remote.queueOrderConfirm");
+    }
+    setFormMessage(error.message, true);
+  }
+}
 async function confirmGatchaFavlistSheet() {
   const intent = state.gatchaFavlistIntent;
   if (!intent?.uid) {
@@ -2520,6 +2657,86 @@ function currentPlayerStatus(currentItem) {
   return playerStatus;
 }
 
+function playerStatusUpdatedAt(playerStatus) {
+  const updatedAt = Number(playerStatus?.updated_at || 0);
+  return Number.isFinite(updatedAt) && updatedAt > 0 ? updatedAt : 0;
+}
+
+function clearPlayerControlStatusRefreshTimers() {
+  state.playerControlStatusRefreshTimers.forEach((timerId) => {
+    window.clearTimeout(timerId);
+  });
+  state.playerControlStatusRefreshTimers = [];
+}
+
+function clearPlayerControlStatusSync() {
+  state.playerControlStatusSync = null;
+  clearPlayerControlStatusRefreshTimers();
+}
+
+function renderAfterPlayerControlStatusSync() {
+  const currentItem = state.data?.current_item;
+  renderCurrentPlaybackState(currentItem);
+  renderPlayerControls(currentItem, frontendPlaybackMode(state.data?.playback_mode));
+}
+
+function playerControlStatusSyncPending(currentItem, playerStatus = currentPlayerStatus(currentItem)) {
+  const sync = state.playerControlStatusSync;
+  if (!sync) {
+    return false;
+  }
+  if (!currentItem || String(currentItem.id || "") !== sync.itemId) {
+    clearPlayerControlStatusSync();
+    return false;
+  }
+  if (playerStatusUpdatedAt(playerStatus) > sync.updatedAfter) {
+    clearPlayerControlStatusSync();
+    return false;
+  }
+  if (Date.now() >= sync.expiresAt) {
+    clearPlayerControlStatusSync();
+    return false;
+  }
+  return true;
+}
+
+function schedulePlayerControlStatusRefresh() {
+  clearPlayerControlStatusRefreshTimers();
+  const timers = playerControlStatusRefreshDelaysMs.map((delayMs) => (
+    window.setTimeout(async () => {
+      if (!state.playerControlStatusSync) {
+        return;
+      }
+      await fetchState({ force: true }).catch(() => {});
+      const currentItem = state.data?.current_item;
+      playerControlStatusSyncPending(currentItem);
+      renderAfterPlayerControlStatusSync();
+    }, delayMs)
+  ));
+  timers.push(window.setTimeout(() => {
+    if (!state.playerControlStatusSync) {
+      return;
+    }
+    clearPlayerControlStatusSync();
+    renderAfterPlayerControlStatusSync();
+  }, playerControlStatusSyncTimeoutMs));
+  state.playerControlStatusRefreshTimers = timers;
+}
+
+function beginPlayerControlStatusSync(currentItem) {
+  const itemId = String(currentItem?.id || "").trim();
+  if (!itemId) {
+    clearPlayerControlStatusSync();
+    return;
+  }
+  state.playerControlStatusSync = {
+    itemId,
+    updatedAfter: playerStatusUpdatedAt(currentPlayerStatus(currentItem)),
+    expiresAt: Date.now() + playerControlStatusSyncTimeoutMs,
+  };
+  schedulePlayerControlStatusRefresh();
+}
+
 function renderPlayerControls(currentItem, playbackMode) {
   if (!currentItem) {
     elements.playerControlPanel.classList.add("hidden");
@@ -2650,10 +2867,116 @@ function currentCacheStateLabel(item) {
     return "";
   }
   if (item.cache_status === "downloading") {
+    const message = String(item.cache_message || "").trim();
+    if (message) {
+      return message;
+    }
     const size = Number(item.cache_size_bytes || 0);
     return size > 0 ? t("status.cachingWithSize", { size: formatBytes(size) }) : t("status.caching");
   }
   return queueStateLabel(item);
+}
+
+function formatPlaybackClockSeconds(seconds) {
+  const normalizedSeconds = Math.max(0, Math.floor(Number(seconds || 0)));
+  const hours = Math.floor(normalizedSeconds / 3600);
+  const minutes = Math.floor((normalizedSeconds % 3600) / 60);
+  const restSeconds = normalizedSeconds % 60;
+  if (hours > 0) {
+    return `${hours}:${String(minutes).padStart(2, "0")}:${String(restSeconds).padStart(2, "0")}`;
+  }
+  return `${minutes}:${String(restSeconds).padStart(2, "0")}`;
+}
+
+function clearCurrentPlaybackClock() {
+  if (state.currentPlaybackClockTimer) {
+    window.clearInterval(state.currentPlaybackClockTimer);
+    state.currentPlaybackClockTimer = null;
+  }
+  state.currentPlaybackClockSignature = "";
+  state.currentPlaybackClockBaseSeconds = 0;
+  state.currentPlaybackClockDurationSeconds = 0;
+  state.currentPlaybackClockStartedAt = 0;
+  state.currentPlaybackClockPaused = true;
+}
+
+function currentPlaybackClockText() {
+  const durationSeconds = Math.max(0, Number(state.currentPlaybackClockDurationSeconds || 0));
+  if (!(durationSeconds > 0)) {
+    return "";
+  }
+  const baseSeconds = Math.max(0, Number(state.currentPlaybackClockBaseSeconds || 0));
+  const elapsedSeconds = state.currentPlaybackClockPaused
+    ? 0
+    : Math.max(0, (Date.now() - Number(state.currentPlaybackClockStartedAt || Date.now())) / 1000);
+  const currentSeconds = Math.min(durationSeconds, baseSeconds + elapsedSeconds);
+  return `${formatPlaybackClockSeconds(currentSeconds)} / ${formatPlaybackClockSeconds(durationSeconds)}`;
+}
+
+function paintCurrentPlaybackClock() {
+  const text = currentPlaybackClockText();
+  if (!text || !elements.currentCacheState) {
+    return;
+  }
+  if (elements.currentCacheState.textContent !== text) {
+    elements.currentCacheState.textContent = text;
+  }
+}
+
+function renderCurrentPlaybackState(current) {
+  if (!current || current.cache_status !== "ready") {
+    if (
+      state.playerControlStatusSync
+      && (!current || String(current.id || "") !== state.playerControlStatusSync.itemId)
+    ) {
+      clearPlayerControlStatusSync();
+    }
+    clearCurrentPlaybackClock();
+    if (elements.currentCacheState) {
+      elements.currentCacheState.textContent = currentCacheStateLabel(current);
+    }
+    return;
+  }
+
+  const playerStatus = currentPlayerStatus(current);
+  const durationSeconds = Number(playerStatus?.duration || 0);
+  const currentSeconds = Math.max(0, Number(playerStatus?.current_time || 0));
+  const isPaused = Boolean(playerStatus?.is_paused);
+  const waitingForHostStatus = playerControlStatusSyncPending(current, playerStatus);
+  if (!(durationSeconds > 0) || (!currentSeconds && isPaused)) {
+    clearCurrentPlaybackClock();
+    if (elements.currentCacheState) {
+      elements.currentCacheState.textContent = currentCacheStateLabel(current);
+    }
+    return;
+  }
+
+  const signature = [
+    current.id || "",
+    Math.round(currentSeconds),
+    Math.round(durationSeconds),
+    isPaused ? "paused" : "playing",
+    waitingForHostStatus ? "host-sync" : "live",
+  ].join("|");
+  if (signature !== state.currentPlaybackClockSignature) {
+    state.currentPlaybackClockSignature = signature;
+    state.currentPlaybackClockBaseSeconds = currentSeconds;
+    state.currentPlaybackClockDurationSeconds = durationSeconds;
+    state.currentPlaybackClockStartedAt = Date.now();
+    state.currentPlaybackClockPaused = waitingForHostStatus || isPaused;
+  }
+
+  paintCurrentPlaybackClock();
+  if (waitingForHostStatus || isPaused) {
+    if (state.currentPlaybackClockTimer) {
+      window.clearInterval(state.currentPlaybackClockTimer);
+      state.currentPlaybackClockTimer = null;
+    }
+    return;
+  }
+  if (!state.currentPlaybackClockTimer) {
+    state.currentPlaybackClockTimer = window.setInterval(paintCurrentPlaybackClock, 1000);
+  }
 }
 
 function formatBytes(value) {
@@ -2876,17 +3199,9 @@ async function sendPlayerControl(action, deltaSeconds = 0) {
 
   try {
     state.playerControlPendingAction = action;
-    if (action === "toggle-play") {
-      const existingStatus = currentPlayerStatus(currentItem) || { item_id: currentItem.id, is_paused: false };
-      state.data.player_status = {
-        ...existingStatus,
-        item_id: currentItem.id,
-        is_paused: !Boolean(existingStatus.is_paused),
-      };
-      renderPlayerControls(currentItem, playbackMode);
-    } else {
-      renderPlayerControls(currentItem, playbackMode);
-    }
+    beginPlayerControlStatusSync(currentItem);
+    renderCurrentPlaybackState(currentItem);
+    renderPlayerControls(currentItem, playbackMode);
     applyStateSnapshot(await apiPost("/api/player/control", {
       action,
       item_id: currentItem.id,
@@ -2894,6 +3209,7 @@ async function sendPlayerControl(action, deltaSeconds = 0) {
     }));
     setFormMessage(message);
   } catch (error) {
+    clearPlayerControlStatusSync();
     setFormMessage(error.message, true);
     await fetchState().catch(() => {});
   }
@@ -3337,6 +3653,22 @@ elements.gatchaFavlistSheetConfirm?.addEventListener("click", async () => {
   await confirmGatchaFavlistSheet();
 });
 
+elements.reorderConfirmSheetClose?.addEventListener("click", () => {
+  closeReorderConfirmSheet();
+});
+
+elements.reorderConfirmSheetCancel?.addEventListener("click", () => {
+  closeReorderConfirmSheet();
+});
+
+elements.reorderConfirmSheetBackdrop?.addEventListener("click", () => {
+  closeReorderConfirmSheet();
+});
+
+elements.reorderConfirmSheetConfirm?.addEventListener("click", async () => {
+  await confirmReorderConfirmSheet();
+});
+
 elements.bindingVideoToggle?.addEventListener("click", () => {
   state.bindingAccordion.video = !state.bindingAccordion.video;
   renderBindingAccordion();
@@ -3506,6 +3838,9 @@ document.addEventListener("keydown", (event) => {
   }
   if (state.gatchaFavlistSheetOpen) {
     closeGatchaFavlistSheet();
+  }
+  if (state.reorderConfirmSheetOpen) {
+    closeReorderConfirmSheet();
   }
 });
 
