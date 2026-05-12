@@ -2745,13 +2745,30 @@ function maybeShowSongTransitionOverlay(previousData, nextData, { force = false 
   state.pendingSongTransitionOverlayData = nextData;
 }
 
+function hasPendingSongTransitionOverlayForItem(item) {
+  const itemId = String(item?.id || "");
+  return Boolean(
+    itemId
+    && currentItemIdFromData(state.pendingSongTransitionOverlayData) === itemId,
+  );
+}
+
 function flushPendingSongTransitionOverlay() {
   if (!state.pendingSongTransitionOverlayData) {
     return;
   }
-  const overlayData = state.pendingSongTransitionOverlayData;
+  const overlayItemId = currentItemIdFromData(state.pendingSongTransitionOverlayData);
+  const currentItemId = currentItemIdFromData(state.data);
+  if (!overlayItemId || overlayItemId !== currentItemId) {
+    state.pendingSongTransitionOverlayData = null;
+    return;
+  }
+  const currentItem = state.data?.current_item;
+  if (!selectedVideoUrlForItem(currentItem) || !selectedAudioUrlForItem(currentItem)) {
+    return;
+  }
   state.pendingSongTransitionOverlayData = null;
-  showSongTransitionOverlayForData(overlayData);
+  showSongTransitionOverlayForData(state.data);
 }
 
 function renderPlayerDelayItemRow(item, index) {
@@ -3545,7 +3562,7 @@ function renderPlayer(currentItem, playbackMode) {
   const preserveAdvanceDelayOverlay = Boolean(
     currentItem
     && (
-      state.pendingSongTransitionOverlayData
+      hasPendingSongTransitionOverlayForItem(currentItem)
       || hasLocalAdvanceDelayOverlay()
     ),
   );
@@ -3583,7 +3600,7 @@ function renderPlayer(currentItem, playbackMode) {
     return;
   }
 
-  const willShowOverlay = Boolean(state.pendingSongTransitionOverlayData);
+  const willShowOverlay = hasPendingSongTransitionOverlayForItem(currentItem);
   const isDelaying = state.localAdvanceDelayDeadline > 0 && Date.now() < state.localAdvanceDelayDeadline;
   const shouldAutoplay = !(willShowOverlay || isDelaying);
   const autoplayAttr = shouldAutoplay ? "autoplay" : "";
@@ -3855,7 +3872,7 @@ function renderPlayer(currentItem, playbackMode) {
   const preserveAdvanceDelayOverlay = Boolean(
     currentItem
     && (
-      state.pendingSongTransitionOverlayData
+      hasPendingSongTransitionOverlayForItem(currentItem)
       || hasLocalAdvanceDelayOverlay()
     ),
   );
@@ -3892,7 +3909,7 @@ function renderPlayer(currentItem, playbackMode) {
     return;
   }
 
-  const willShowOverlay = Boolean(state.pendingSongTransitionOverlayData);
+  const willShowOverlay = hasPendingSongTransitionOverlayForItem(currentItem);
   const isDelaying = state.localAdvanceDelayDeadline > 0 && Date.now() < state.localAdvanceDelayDeadline;
   const shouldAutoplay = !(willShowOverlay || isDelaying);
   const autoplayAttr = shouldAutoplay ? "autoplay" : "";
@@ -5538,25 +5555,19 @@ async function advanceLocalPlayerNow({ showTransition = true } = {}) {
 }
 
 async function requestNextTrack() {
-  await handleLocalPlaybackEnded({ manual: true });
+  await handleLocalPlaybackEnded();
 }
 
-async function handleLocalPlaybackEnded(options = {}) {
+async function handleLocalPlaybackEnded() {
   if (state.localAdvanceInFlight) {
     return;
   }
-  const manual = Boolean(options.manual);
   const delaySeconds = currentSongAdvanceDelaySeconds();
-  // Remove !isPlayerPanelFullscreen() check to allow countdown in normal view
   if (delaySeconds <= 0 || !queuedNextItem()) {
     await advanceLocalPlayerNow();
     return;
   }
-  if (manual) {
-    await advanceLocalPlayerNow({ showTransition: true });
-    return;
-  }
-  startLocalAdvanceDelay(delaySeconds);
+  await advanceLocalPlayerNow({ showTransition: true });
 }
 
 async function reorderPlaylist(itemId, index) {

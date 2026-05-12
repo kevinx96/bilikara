@@ -5,6 +5,8 @@ const viewportScaleResetDelaysMs = [0, 120, 360];
 const eventStreamInitialRetryMs = 1000;
 const eventStreamMaxRetryMs = 15000;
 const larkSearchTableCount = 5;
+const playerControlStatusRefreshDelaysMs = [180, 520, 1100, 1800];
+const playerControlStatusSyncTimeoutMs = 3200;
 const storageKeys = {
   layoutMode: "bilikara.remote.layout.mode",
 };
@@ -18,6 +20,8 @@ const state = {
   openQueueMenuId: null,
   openHistoryMenuId: null,
   playerControlPendingAction: "",
+  playerControlStatusSync: null,
+  playerControlStatusRefreshTimers: [],
   audioVariantSwitchInFlight: false,
   audioVariantSwitchUnlockAt: 0,
   audioVariantSwitchTimer: null,
@@ -2489,6 +2493,86 @@ function currentPlayerStatus(currentItem) {
   return playerStatus;
 }
 
+function playerStatusUpdatedAt(playerStatus) {
+  const updatedAt = Number(playerStatus?.updated_at || 0);
+  return Number.isFinite(updatedAt) && updatedAt > 0 ? updatedAt : 0;
+}
+
+function clearPlayerControlStatusRefreshTimers() {
+  state.playerControlStatusRefreshTimers.forEach((timerId) => {
+    window.clearTimeout(timerId);
+  });
+  state.playerControlStatusRefreshTimers = [];
+}
+
+function clearPlayerControlStatusSync() {
+  state.playerControlStatusSync = null;
+  clearPlayerControlStatusRefreshTimers();
+}
+
+function renderAfterPlayerControlStatusSync() {
+  const currentItem = state.data?.current_item;
+  renderCurrentPlaybackState(currentItem);
+  renderPlayerControls(currentItem, frontendPlaybackMode(state.data?.playback_mode));
+}
+
+function playerControlStatusSyncPending(currentItem, playerStatus = currentPlayerStatus(currentItem)) {
+  const sync = state.playerControlStatusSync;
+  if (!sync) {
+    return false;
+  }
+  if (!currentItem || String(currentItem.id || "") !== sync.itemId) {
+    clearPlayerControlStatusSync();
+    return false;
+  }
+  if (playerStatusUpdatedAt(playerStatus) > sync.updatedAfter) {
+    clearPlayerControlStatusSync();
+    return false;
+  }
+  if (Date.now() >= sync.expiresAt) {
+    clearPlayerControlStatusSync();
+    return false;
+  }
+  return true;
+}
+
+function schedulePlayerControlStatusRefresh() {
+  clearPlayerControlStatusRefreshTimers();
+  const timers = playerControlStatusRefreshDelaysMs.map((delayMs) => (
+    window.setTimeout(async () => {
+      if (!state.playerControlStatusSync) {
+        return;
+      }
+      await fetchState({ force: true }).catch(() => {});
+      const currentItem = state.data?.current_item;
+      playerControlStatusSyncPending(currentItem);
+      renderAfterPlayerControlStatusSync();
+    }, delayMs)
+  ));
+  timers.push(window.setTimeout(() => {
+    if (!state.playerControlStatusSync) {
+      return;
+    }
+    clearPlayerControlStatusSync();
+    renderAfterPlayerControlStatusSync();
+  }, playerControlStatusSyncTimeoutMs));
+  state.playerControlStatusRefreshTimers = timers;
+}
+
+function beginPlayerControlStatusSync(currentItem) {
+  const itemId = String(currentItem?.id || "").trim();
+  if (!itemId) {
+    clearPlayerControlStatusSync();
+    return;
+  }
+  state.playerControlStatusSync = {
+    itemId,
+    updatedAfter: playerStatusUpdatedAt(currentPlayerStatus(currentItem)),
+    expiresAt: Date.now() + playerControlStatusSyncTimeoutMs,
+  };
+  schedulePlayerControlStatusRefresh();
+}
+
 function renderPlayerControls(currentItem, playbackMode) {
   if (!currentItem) {
     elements.playerControlPanel.classList.add("hidden");
@@ -2675,6 +2759,12 @@ function paintCurrentPlaybackClock() {
 
 function renderCurrentPlaybackState(current) {
   if (!current || current.cache_status !== "ready") {
+    if (
+      state.playerControlStatusSync
+      && (!current || String(current.id || "") !== state.playerControlStatusSync.itemId)
+    ) {
+      clearPlayerControlStatusSync();
+    }
     clearCurrentPlaybackClock();
     elements.currentCacheState.textContent = currentCacheStateLabel(current);
     return;
@@ -2684,6 +2774,7 @@ function renderCurrentPlaybackState(current) {
   const durationSeconds = Number(playerStatus?.duration || 0);
   const currentSeconds = Math.max(0, Number(playerStatus?.current_time || 0));
   const isPaused = Boolean(playerStatus?.is_paused);
+  const waitingForHostStatus = playerControlStatusSyncPending(current, playerStatus);
   if (!(durationSeconds > 0) || (!currentSeconds && isPaused)) {
     clearCurrentPlaybackClock();
     elements.currentCacheState.textContent = currentCacheStateLabel(current);
@@ -2695,17 +2786,18 @@ function renderCurrentPlaybackState(current) {
     Math.round(currentSeconds),
     Math.round(durationSeconds),
     isPaused ? "paused" : "playing",
+    waitingForHostStatus ? "host-sync" : "live",
   ].join("|");
   if (signature !== state.currentPlaybackClockSignature) {
     state.currentPlaybackClockSignature = signature;
     state.currentPlaybackClockBaseSeconds = currentSeconds;
     state.currentPlaybackClockDurationSeconds = durationSeconds;
     state.currentPlaybackClockStartedAt = Date.now();
-    state.currentPlaybackClockPaused = isPaused;
+    state.currentPlaybackClockPaused = waitingForHostStatus || isPaused;
   }
 
   paintCurrentPlaybackClock();
-  if (isPaused) {
+  if (waitingForHostStatus || isPaused) {
     if (state.currentPlaybackClockTimer) {
       window.clearInterval(state.currentPlaybackClockTimer);
       state.currentPlaybackClockTimer = null;
@@ -2937,18 +3029,9 @@ async function sendPlayerControl(action, deltaSeconds = 0) {
 
   try {
     state.playerControlPendingAction = action;
-    if (action === "toggle-play") {
-      const existingStatus = currentPlayerStatus(currentItem) || { item_id: currentItem.id, is_paused: false };
-      state.data.player_status = {
-        ...existingStatus,
-        item_id: currentItem.id,
-        is_paused: !Boolean(existingStatus.is_paused),
-      };
-      renderCurrentPlaybackState(currentItem);
-      renderPlayerControls(currentItem, playbackMode);
-    } else {
-      renderPlayerControls(currentItem, playbackMode);
-    }
+    beginPlayerControlStatusSync(currentItem);
+    renderCurrentPlaybackState(currentItem);
+    renderPlayerControls(currentItem, playbackMode);
     applyStateSnapshot(await apiPost("/api/player/control", {
       action,
       item_id: currentItem.id,
@@ -2956,6 +3039,7 @@ async function sendPlayerControl(action, deltaSeconds = 0) {
     }));
     setFormMessage(message);
   } catch (error) {
+    clearPlayerControlStatusSync();
     setFormMessage(error.message, true);
     await fetchState().catch(() => {});
   }
