@@ -147,7 +147,7 @@ const state = {
   fullscreenRequestToastTimer: null,
   fullscreenRequestToastHideTimer: null,
   layoutMode: "full",
-  language: "cn",
+  language: "zh",
   translations: {},
   translationsLoaded: false,
 };
@@ -476,13 +476,13 @@ function setElementTitle(element, value) {
 }
 
 function normalizeLanguage(value) {
-  return ["cn", "en", "ja"].includes(value) ? value : "cn";
+  return ["zh", "en", "ja"].includes(value) ? value : "zh";
 }
 
 function t(key, values = {}) {
   const normalizedKey = String(key || "");
   const active = state.translations?.[state.language] || {};
-  const fallback = state.translations?.cn || {};
+  const fallback = state.translations?.zh || {};
   let text = active[normalizedKey] || fallback[normalizedKey] || normalizedKey;
   Object.entries(values || {}).forEach(([name, value]) => {
     text = text.split(`{${name}}`).join(String(value ?? ""));
@@ -578,7 +578,7 @@ async function loadTranslations() {
     state.translations = payload?.languages || {};
   } catch {
     state.translations = {
-      cn: {
+      zh: {
         "top.language": "语言",
         "top.mobileRemote": "手机点歌",
         "remote.qrLoading": "正在生成二维码...",
