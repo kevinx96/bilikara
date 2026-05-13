@@ -373,6 +373,9 @@ function invalidateLanguageSensitiveRenderCache() {
   state.followBrowseRenderSignature = "";
   state.requesterSelectRenderSignature = "";
   state.gatchaTaskLastMessageSignature = "";
+  state.listHeaderRenderSignature = "";
+  state.queueRenderSignature = "";
+  state.historyRenderSignature = "";
 }
 
 function setLanguage(language) {
@@ -2872,6 +2875,7 @@ function renderPlayerControls(currentItem, playbackMode) {
 function renderListHeader(playlist, history) {
   const isHistoryView = state.listView === "history";
   const signature = JSON.stringify({
+    language: state.language,
     view: state.listView,
     playlistLength: playlist.length,
     historyLength: history.length,
@@ -2901,7 +2905,10 @@ function syncListView() {
 }
 
 function renderQueue(playlist) {
-  const signature = JSON.stringify(playlist || []);
+  const signature = JSON.stringify({
+    language: state.language,
+    playlist: playlist || [],
+  });
   if (signature === state.queueRenderSignature) {
     return;
   }
@@ -2915,6 +2922,7 @@ function renderQueue(playlist) {
 
   playlist.forEach((item, index) => {
     const node = elements.queueItemTemplate.content.firstElementChild.cloneNode(true);
+    applyStaticI18n(node);
     node.classList.toggle("ready", item.cache_status === "ready");
     const orderNode = node.querySelector(".queue-order");
     if (orderNode) {
@@ -3103,6 +3111,7 @@ function formatBytes(value) {
 
 function renderHistory(history) {
   const signature = JSON.stringify({
+    language: state.language,
     history: history || [],
     openHistoryMenuId: state.openHistoryMenuId || "",
   });
@@ -3121,6 +3130,7 @@ function renderHistory(history) {
 
   history.forEach((entry) => {
     const node = elements.historyItemTemplate.content.firstElementChild.cloneNode(true);
+    applyStaticI18n(node);
     node.querySelector(".history-title").textContent = entry.display_title;
     const requesterNode = node.querySelector(".history-requester");
     const requesterText = requesterBadgeText(entry.requester_name);
