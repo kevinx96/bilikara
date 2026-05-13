@@ -45,6 +45,7 @@ const state = {
   searchCookieFaceRenderSignature: "",
   gatchaUidFaceRenderSignature: "",
   gatchaTaskLastMessageSignature: "",
+  confirmPopoverRenderSignature: "",
   gatchaTaskWatchStartedAt: Date.now() / 1000,
   historyRenderSignature: "",
   playlistEmptyRenderSignature: "",
@@ -4888,15 +4889,47 @@ function openConfirm(intent) {
 
 function closeConfirm() {
   state.confirmIntent = null;
+  state.confirmPopoverRenderSignature = "";
   renderConfirmPopover();
+}
+
+function confirmPopoverRenderSignature(intent) {
+  if (!intent) {
+    return "";
+  }
+  return JSON.stringify({
+    type: intent.type || "",
+    message: intent.message || "",
+    primaryLabel: intent.primaryLabel || "",
+    secondaryLabel: intent.secondaryLabel || "",
+    sourceSelect: Boolean(intent.sourceSelect),
+    pageSizeSelect: Boolean(intent.pageSizeSelect),
+    hideMessage: Boolean(intent.hideMessage),
+    source: normalizedHistoryExportSource(intent.source),
+    pageSize: selectedConfirmHistoryExportPageSize(intent),
+    x: Math.round(Number(intent.x || 0)),
+    y: Math.round(Number(intent.y || 0)),
+    width: window.innerWidth,
+    height: window.innerHeight,
+  });
 }
 
 function renderConfirmPopover() {
   const intent = state.confirmIntent;
   if (!intent) {
+    state.confirmPopoverRenderSignature = "";
     elements.confirmPopover.classList.add("hidden");
     return;
   }
+
+  const renderSignature = confirmPopoverRenderSignature(intent);
+  if (
+    renderSignature === state.confirmPopoverRenderSignature &&
+    !elements.confirmPopover.classList.contains("hidden")
+  ) {
+    return;
+  }
+  state.confirmPopoverRenderSignature = renderSignature;
 
   const hasSecondaryAction = Boolean(intent.secondaryLabel);
   const hasSourceSelect = Boolean(intent.sourceSelect);
@@ -5461,6 +5494,22 @@ function normalizedHistoryExportPageSize(pageSize) {
 
 function selectedConfirmHistoryExportPageSize(intent) {
   return normalizedHistoryExportPageSize(elements.confirmPageSize?.value || intent?.pageSize);
+}
+
+function updateConfirmHistoryExportSource() {
+  if (state.confirmIntent?.type !== "export-history") {
+    return;
+  }
+  state.confirmIntent.source = selectedConfirmHistoryExportSource(state.confirmIntent);
+  state.confirmPopoverRenderSignature = "";
+}
+
+function updateConfirmHistoryExportPageSize() {
+  if (state.confirmIntent?.type !== "export-history") {
+    return;
+  }
+  state.confirmIntent.pageSize = selectedConfirmHistoryExportPageSize(state.confirmIntent);
+  state.confirmPopoverRenderSignature = "";
 }
 
 async function downloadHistoryExport(format, source = "played", pageSize = 200) {
@@ -6558,6 +6607,14 @@ elements.historyList.addEventListener("click", async (event) => {
 
 elements.confirmCancel.addEventListener("click", () => {
   closeConfirm();
+});
+
+elements.confirmSource?.addEventListener("change", () => {
+  updateConfirmHistoryExportSource();
+});
+
+elements.confirmPageSize?.addEventListener("change", () => {
+  updateConfirmHistoryExportPageSize();
 });
 
 elements.confirmSecondary?.addEventListener("click", async () => {

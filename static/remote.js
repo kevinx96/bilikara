@@ -80,6 +80,7 @@ const state = {
   followBrowseLoading: false,
   followBrowseRenderSignature: "",
   requesterSelectRenderSignature: "",
+  dataRenderSignature: "",
   currentNowPlayingSignature: "",
   currentPlaybackClockSignature: "",
   currentPlaybackClockBaseSeconds: 0,
@@ -87,6 +88,10 @@ const state = {
   currentPlaybackClockStartedAt: 0,
   currentPlaybackClockPaused: true,
   currentPlaybackClockTimer: null,
+  playerControlsRenderSignature: "",
+  listHeaderRenderSignature: "",
+  queueRenderSignature: "",
+  historyRenderSignature: "",
   layoutMode: "full",
   remoteAccessRenderSignature: "",
   viewportScaleResetTimers: [],
@@ -1062,6 +1067,33 @@ function currentStateRevision(snapshot = state.data) {
   return Number.isFinite(revision) && revision >= 0 ? revision : 0;
 }
 
+function renderSignatureForSnapshot(snapshot) {
+  if (!snapshot || typeof snapshot !== "object") {
+    return "";
+  }
+  const { player_status: _playerStatus, state_revision: _stateRevision, ...renderedData } = snapshot;
+  return JSON.stringify(renderedData);
+}
+
+function scheduleRender() {
+  if (state.renderDebounceTimer) {
+    clearTimeout(state.renderDebounceTimer);
+  }
+  state.renderDebounceTimer = setTimeout(() => {
+    state.renderDebounceTimer = null;
+    render();
+  }, 50);
+}
+
+function renderPlaybackStatusOnly() {
+  const currentItem = state.data?.current_item;
+  if (!currentItem) {
+    return;
+  }
+  renderCurrentPlaybackState(currentItem);
+  renderPlayerControls(currentItem, frontendPlaybackMode(state.data?.playback_mode));
+}
+
 function applyStateSnapshot(snapshot, { forceRender = false } = {}) {
   if (!snapshot || typeof snapshot !== "object") {
     return false;
@@ -1076,14 +1108,19 @@ function applyStateSnapshot(snapshot, { forceRender = false } = {}) {
       return false;
     }
   }
+  const nextRenderSignature = renderSignatureForSnapshot(snapshot);
+  const shouldRender = forceRender
+    || !state.data
+    || nextRenderSignature !== state.dataRenderSignature;
   state.data = snapshot;
   
   // 简单的渲染防抖，合并 50ms 内的多次状态变更（如切歌时的密集事件）
-  if (state.renderDebounceTimer) clearTimeout(state.renderDebounceTimer);
-  state.renderDebounceTimer = setTimeout(() => {
-    state.renderDebounceTimer = null;
-    render();
-  }, 50);
+  if (shouldRender) {
+    state.dataRenderSignature = nextRenderSignature;
+    scheduleRender();
+  } else if (!state.renderDebounceTimer) {
+    renderPlaybackStatusOnly();
+  }
   
   return true;
 }
@@ -2739,6 +2776,7 @@ function beginPlayerControlStatusSync(currentItem) {
 
 function renderPlayerControls(currentItem, playbackMode) {
   if (!currentItem) {
+    state.playerControlsRenderSignature = "__empty__";
     elements.playerControlPanel.classList.add("hidden");
     elements.playerControlHint.textContent = "";
     return;
@@ -2747,6 +2785,19 @@ function renderPlayerControls(currentItem, playbackMode) {
   const canControl = canRemoteControlPlayer(currentItem, playbackMode);
   const playerStatus = currentPlayerStatus(currentItem);
   const isPaused = Boolean(playerStatus?.is_paused);
+  const controlSignature = JSON.stringify({
+    itemId: currentItem.id || "",
+    playbackMode,
+    canControl,
+    hasLocalSplitMedia: hasLocalSplitMedia(currentItem),
+    isPaused,
+    pendingAction: state.playerControlPendingAction || "",
+  });
+  if (controlSignature === state.playerControlsRenderSignature) {
+    return;
+  }
+  state.playerControlsRenderSignature = controlSignature;
+
   const toggleButton = elements.playerControlPanel.querySelector('[data-control-action="toggle-play"]');
   elements.playerControlPanel.classList.remove("hidden");
 
@@ -2781,6 +2832,16 @@ function renderPlayerControls(currentItem, playbackMode) {
 
 function renderListHeader(playlist, history) {
   const isHistoryView = state.listView === "history";
+  const signature = JSON.stringify({
+    view: state.listView,
+    playlistLength: playlist.length,
+    historyLength: history.length,
+  });
+  if (signature === state.listHeaderRenderSignature) {
+    return;
+  }
+  state.listHeaderRenderSignature = signature;
+
   elements.listTag.textContent = isHistoryView ? t("history.tag") : t("list.tag");
   elements.listTitle.textContent = isHistoryView ? t("history.title") : t("list.title");
   elements.listCount.textContent = t("follow.countSongs", { count: isHistoryView ? history.length : playlist.length });
@@ -2801,6 +2862,12 @@ function syncListView() {
 }
 
 function renderQueue(playlist) {
+  const signature = JSON.stringify(playlist || []);
+  if (signature === state.queueRenderSignature) {
+    return;
+  }
+  state.queueRenderSignature = signature;
+
   elements.queueList.innerHTML = "";
   if (!playlist.length) {
     elements.queueList.innerHTML = `<div class="queue-empty">${htmlT("remote.queueEmpty")}</div>`;
@@ -2996,6 +3063,15 @@ function formatBytes(value) {
 }
 
 function renderHistory(history) {
+  const signature = JSON.stringify({
+    history: history || [],
+    openHistoryMenuId: state.openHistoryMenuId || "",
+  });
+  if (signature === state.historyRenderSignature) {
+    return;
+  }
+  state.historyRenderSignature = signature;
+
   elements.historyList.innerHTML = "";
 
   if (!history.length) {

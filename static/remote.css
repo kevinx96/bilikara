@@ -1213,7 +1213,6 @@ select:disabled {
 
 .search-message {
   min-height: 18px;
-  margin-top: 10px;
   font-size: 12px;
   line-height: 1.4;
   color: var(--muted);
@@ -1406,9 +1405,9 @@ select:disabled {
   gap: 10px;
   align-content: start;
   grid-auto-rows: max-content;
-  margin-top: 12px;
+  margin-top: 2px;
   min-height: 0;
-  max-height: clamp(220px, 42vh, 460px);
+  max-height: var(--remote-follow-grid-height);
   overflow-y: auto;
   overscroll-behavior: contain;
   padding-right: 4px;
@@ -1672,13 +1671,13 @@ select:disabled {
 
 
 .remote-search-face-front {
-  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, var(--remote-follow-grid-height));
   pointer-events: auto;
 }
 
 
 .remote-search-face-lark {
-  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, var(--remote-follow-grid-height));
   pointer-events: none;
   transform: rotateY(240deg);
 }
@@ -2096,7 +2095,7 @@ select:disabled {
 
 
   .search-results {
-    max-height: clamp(200px, 46vh, 420px);
+    max-height: min(var(--remote-follow-grid-height), 46vh);
   }
 
 
