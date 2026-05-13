@@ -3773,6 +3773,12 @@ select:disabled {
   caret-color: var(--ink);
 }
 
+.search-stage.is-lark-view:not(.is-flipping):has(#lark-search-hitbox-button:hover) #lark-search-button,
+.search-stage.is-lark-view:not(.is-flipping):has(#lark-search-hitbox-button:focus-visible) #lark-search-button {
+  box-shadow: 0 6px 20px rgba(0, 210, 255, 0.6);
+  transform: translateY(-2px);
+}
+
 .search-sub-card/* ,
 .cookie-sub-card */ {
   padding: 20px 24px 24px;
@@ -4420,6 +4426,11 @@ h1 {
 
 .queue-current-progress-badge.ready::before {
   box-shadow: 0 0 12px rgba(0, 210, 255, 0.5) !important;
+}
+
+.audio-variant-button:hover,
+.audio-variant-button.active:hover {
+  transform: none;
 }
 
 .status-chip {
