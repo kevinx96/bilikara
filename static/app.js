@@ -44,6 +44,7 @@ const state = {
   searchCookieFaceRenderSignature: "",
   gatchaUidFaceRenderSignature: "",
   gatchaTaskLastMessageSignature: "",
+  confirmPopoverRenderSignature: "",
   gatchaTaskWatchStartedAt: Date.now() / 1000,
   historyRenderSignature: "",
   playlistEmptyRenderSignature: "",
@@ -3465,23 +3466,29 @@ function renderAudioVariantBar(currentItem, playbackMode) {
   toggleButton.innerHTML = '<span aria-hidden="true">▾</span>';
 
   elements.audioVariantBar.append(list, toggleButton);
-
-  const firstButton = list.querySelector(".audio-variant-button");
-  const firstRowHeight = firstButton
-    ? Math.ceil(firstButton.getBoundingClientRect().height) + 6
-    : 44;
-  const isWrapped = list.scrollHeight > firstRowHeight + 2;
-
-  elements.audioVariantBar.classList.toggle("is-collapsed", isWrapped && !state.audioVariantBarExpanded);
-  elements.audioVariantBar.classList.toggle("is-expanded", isWrapped && state.audioVariantBarExpanded);
-  toggleButton.classList.toggle("hidden", !isWrapped);
-  if (isWrapped) {
-    list.style.setProperty("--audio-variant-collapsed-height", `${firstRowHeight}px`);
-    toggleButton.classList.toggle("is-expanded", state.audioVariantBarExpanded);
-  } else {
-    state.audioVariantBarExpanded = false;
-  }
+  elements.audioVariantBar.classList.remove("is-collapsed", "is-expanded");
   setClassToggle(elements.audioVariantBar, "hidden", false);
+
+  requestAnimationFrame(() => {
+    if (!elements.audioVariantBar.contains(list)) {
+      return;
+    }
+    const firstButton = list.querySelector(".audio-variant-button");
+    const firstRowHeight = firstButton
+      ? Math.ceil(firstButton.getBoundingClientRect().height) + 6
+      : 44;
+    const isWrapped = list.scrollHeight > firstRowHeight + 2;
+
+    elements.audioVariantBar.classList.toggle("is-collapsed", isWrapped && !state.audioVariantBarExpanded);
+    elements.audioVariantBar.classList.toggle("is-expanded", isWrapped && state.audioVariantBarExpanded);
+    toggleButton.classList.toggle("hidden", !isWrapped);
+    if (isWrapped) {
+      list.style.setProperty("--audio-variant-collapsed-height", `${firstRowHeight}px`);
+      toggleButton.classList.toggle("is-expanded", state.audioVariantBarExpanded);
+    } else {
+      state.audioVariantBarExpanded = false;
+    }
+  });
 }
 
 function renderAvSyncControls(playbackMode, playerSettings) {
@@ -4742,15 +4749,47 @@ function openConfirm(intent) {
 
 function closeConfirm() {
   state.confirmIntent = null;
+  state.confirmPopoverRenderSignature = "";
   renderConfirmPopover();
+}
+
+function confirmPopoverRenderSignature(intent) {
+  if (!intent) {
+    return "";
+  }
+  return JSON.stringify({
+    type: intent.type || "",
+    message: intent.message || "",
+    primaryLabel: intent.primaryLabel || "",
+    secondaryLabel: intent.secondaryLabel || "",
+    sourceSelect: Boolean(intent.sourceSelect),
+    pageSizeSelect: Boolean(intent.pageSizeSelect),
+    hideMessage: Boolean(intent.hideMessage),
+    source: normalizedHistoryExportSource(intent.source),
+    pageSize: selectedConfirmHistoryExportPageSize(intent),
+    x: Math.round(Number(intent.x || 0)),
+    y: Math.round(Number(intent.y || 0)),
+    width: window.innerWidth,
+    height: window.innerHeight,
+  });
 }
 
 function renderConfirmPopover() {
   const intent = state.confirmIntent;
   if (!intent) {
+    state.confirmPopoverRenderSignature = "";
     elements.confirmPopover.classList.add("hidden");
     return;
   }
+
+  const renderSignature = confirmPopoverRenderSignature(intent);
+  if (
+    renderSignature === state.confirmPopoverRenderSignature &&
+    !elements.confirmPopover.classList.contains("hidden")
+  ) {
+    return;
+  }
+  state.confirmPopoverRenderSignature = renderSignature;
 
   const hasSecondaryAction = Boolean(intent.secondaryLabel);
   const hasSourceSelect = Boolean(intent.sourceSelect);
@@ -5310,6 +5349,22 @@ function normalizedHistoryExportPageSize(pageSize) {
 
 function selectedConfirmHistoryExportPageSize(intent) {
   return normalizedHistoryExportPageSize(elements.confirmPageSize?.value || intent?.pageSize);
+}
+
+function updateConfirmHistoryExportSource() {
+  if (state.confirmIntent?.type !== "export-history") {
+    return;
+  }
+  state.confirmIntent.source = selectedConfirmHistoryExportSource(state.confirmIntent);
+  state.confirmPopoverRenderSignature = "";
+}
+
+function updateConfirmHistoryExportPageSize() {
+  if (state.confirmIntent?.type !== "export-history") {
+    return;
+  }
+  state.confirmIntent.pageSize = selectedConfirmHistoryExportPageSize(state.confirmIntent);
+  state.confirmPopoverRenderSignature = "";
 }
 
 async function downloadHistoryExport(format, source = "played", pageSize = 200) {
@@ -6397,6 +6452,14 @@ elements.historyList.addEventListener("click", async (event) => {
 
 elements.confirmCancel.addEventListener("click", () => {
   closeConfirm();
+});
+
+elements.confirmSource?.addEventListener("change", () => {
+  updateConfirmHistoryExportSource();
+});
+
+elements.confirmPageSize?.addEventListener("change", () => {
+  updateConfirmHistoryExportPageSize();
 });
 
 elements.confirmSecondary?.addEventListener("click", async () => {

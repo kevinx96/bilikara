@@ -1072,7 +1072,6 @@ select:disabled {
 
 .search-message {
   min-height: 18px;
-  margin-top: 10px;
   font-size: 12px;
   line-height: 1.4;
   color: var(--muted);
@@ -1247,9 +1246,9 @@ select:disabled {
   gap: 10px;
   align-content: start;
   grid-auto-rows: max-content;
-  margin-top: 12px;
+  margin-top: 2px;
   min-height: 0;
-  max-height: clamp(220px, 42vh, 460px);
+  max-height: var(--remote-follow-grid-height);
   overflow-y: auto;
   overscroll-behavior: contain;
   padding-right: 4px;
@@ -1274,7 +1273,7 @@ select:disabled {
 
 .search-results::-webkit-scrollbar-thumb:hover,
 .follow-up-grid::-webkit-scrollbar-thumb:hover {
-  background: rgba(143, 49, 29, 0.36);
+  background: rgba(0, 210, 255, 0.36);
 }
 
 .search-result-item {
@@ -1290,11 +1289,17 @@ select:disabled {
 
 .search-result-item > div,
 .search-result-meta {
+  grid-column: 1;
+  grid-row: 1;
   min-width: 0;
 }
 
 .search-result-item .primary-button {
+  grid-column: 2;
+  grid-row: 1;
   justify-self: end;
+  align-self: center;
+  min-width: max-content;
   white-space: nowrap;
 }
 
@@ -1327,9 +1332,9 @@ select:disabled {
   display: grid;
   gap: 12px;
   text-align: center;
-  height: 154px;
+  min-height: 154px;
   align-content: start;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .gatcha-actions {
@@ -1417,10 +1422,12 @@ select:disabled {
 }
 
 .remote-search-stage {
+  --remote-search-stage-height: 360px;
+  --remote-follow-grid-height: 360px;
   position: relative;
   min-width: 0;
   max-width: 100%;
-  height: clamp(260px, 46vh, 460px);
+  height: var(--remote-search-stage-height);
   perspective: 1400px;
 }
 
@@ -1430,6 +1437,7 @@ select:disabled {
 
 .remote-search-stage-inner {
   display: grid;
+  height: 100%;
   min-width: 0;
   max-width: 100%;
   transform-style: preserve-3d;
@@ -1468,17 +1476,18 @@ select:disabled {
 }
 
 .remote-search-face-front {
-  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, var(--remote-follow-grid-height));
   pointer-events: auto;
 }
 
 .remote-search-face-lark {
-  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, var(--remote-follow-grid-height));
   pointer-events: none;
   transform: rotateY(240deg);
 }
 
 .remote-search-face-back {
+  grid-template-rows: minmax(0, 1fr) auto;
   transform: rotateY(120deg);
 }
 
@@ -1510,8 +1519,10 @@ select:disabled {
 .remote-search-stage.is-flip-pruned[data-previous-view="search"] .remote-search-face-front,
 .remote-search-stage.is-flip-pruned[data-previous-view="browse"] .remote-search-face-back,
 .remote-search-stage.is-flip-pruned[data-previous-view="lark"] .remote-search-face-lark {
+  display: none;
   visibility: hidden;
   pointer-events: none;
+  content-visibility: hidden;
 }
 
 .remote-search-stage.is-flip-pruned[data-next-view="search"] .remote-search-face-back,
@@ -1520,8 +1531,10 @@ select:disabled {
 .remote-search-stage.is-flip-pruned[data-next-view="browse"] .remote-search-face-lark,
 .remote-search-stage.is-flip-pruned[data-next-view="lark"] .remote-search-face-front,
 .remote-search-stage.is-flip-pruned[data-next-view="lark"] .remote-search-face-back {
+  display: none;
   visibility: hidden;
   pointer-events: none;
+  content-visibility: hidden;
 }
 
 .remote-search-stage.is-flipping[data-skipped-view="search"] .remote-search-face-front,
@@ -1544,13 +1557,20 @@ select:disabled {
 #follow-up-items-view {
   display: grid;
   gap: 12px;
+  min-height: 0;
+  min-width: 0;
+}
+
+.follow-up-items-view,
+#follow-up-items-view {
+  grid-template-rows: auto auto minmax(0, 1fr);
 }
 
 .follow-up-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
-  gap: 10px;
-  max-height: 240px;
+  gap: 8px;
+  max-height: var(--remote-follow-grid-height);
   overflow-y: auto;
   overscroll-behavior: contain;
   padding: 4px 4px 4px 0;
@@ -1558,7 +1578,7 @@ select:disabled {
 
 .follow-up-button {
   display: grid;
-  min-height: 72px;
+  min-height: 68px;
   gap: 6px;
   align-content: center;
   padding: 10px;
@@ -1655,9 +1675,12 @@ select:disabled {
   font-size: 16px;
   line-height: 1.4;
   margin: 0;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+  line-clamp: 4;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .gatcha-uid-view {
@@ -1824,7 +1847,7 @@ select:disabled {
   }
 
   .search-results {
-    max-height: clamp(200px, 46vh, 420px);
+    max-height: min(var(--remote-follow-grid-height), 46vh);
   }
 
   .gatcha-actions {
