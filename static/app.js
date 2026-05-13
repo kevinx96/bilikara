@@ -2493,20 +2493,43 @@ function partOptionsForItem(item) {
     return [];
   }
 
+  const cachedVariants = audioVariantsForItem(item);
   const cachedVariantsById = new Map(
-    audioVariantsForItem(item).map((variant) => [String(variant.id || "").trim(), variant]),
+    cachedVariants.map((variant) => [String(variant.id || "").trim(), variant]),
   );
 
   return availableParts.map((entry) => {
-    const cachedVariant = cachedVariantsById.get(entry.id);
+    const cachedVariant = cachedVariantForPartEntry(entry, cachedVariantsById, cachedVariants);
     return {
       ...entry,
+      id: String(cachedVariant?.id || entry.id || "").trim(),
       audio_url: String(cachedVariant?.audio_url || ""),
       // LEGACY: cachedVariant.media_url used to point to a muxed MP4 variant.
       // The host player now uses video_media_url + audio_url split playback.
       // media_url: String(cachedVariant?.media_url || ""),
     };
   });
+}
+
+function audioVariantPageNumber(variant) {
+  const directPage = Number(variant?.page || 0);
+  if (Number.isFinite(directPage) && directPage > 0) {
+    return directPage;
+  }
+  const idMatch = String(variant?.id || "").trim().match(/^p(\d+)(?:_|$)/i);
+  return idMatch ? Number(idMatch[1] || 0) : 0;
+}
+
+function cachedVariantForPartEntry(entry, cachedVariantsById, cachedVariants) {
+  const exactMatch = cachedVariantsById.get(String(entry?.id || "").trim());
+  if (exactMatch) {
+    return exactMatch;
+  }
+  const page = Number(entry?.page || 0);
+  if (!page) {
+    return null;
+  }
+  return cachedVariants.find((variant) => audioVariantPageNumber(variant) === page) || null;
 }
 
 function selectedAudioVariantForItem(item) {

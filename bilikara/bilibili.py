@@ -1645,11 +1645,11 @@ def _variant_id(page: int, label: str, index: int) -> str:
 
 def _part_keyword_match(part: str) -> bool:
     normalized = str(part or "").strip().lower()
-    return any(keyword in normalized for keyword in ("on", "off", "人声", "伴奏"))
+    return any(keyword in normalized for keyword in ("on", "off", "人声", "原唱", "伴奏"))
 
 
 def _is_auto_dual_audio_pair(pages: list[VideoPage]) -> bool:
-    return len(pages) == 2 and all(_part_keyword_match(page.part) for page in pages)
+    return len(pages) == 2 and any(_part_keyword_match(page.part) for page in pages)
 
 
 def _requires_manual_binding(pages: list[VideoPage]) -> bool:
