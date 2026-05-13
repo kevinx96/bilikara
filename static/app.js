@@ -6993,7 +6993,8 @@ elements.playlist.addEventListener("drop", async (event) => {
       index: targetIndex + 1,
     }),
     primaryLabel: t("remote.queueOrderConfirm"),
-  });  render();
+  });
+  render();
 });
 
 elements.listStage.addEventListener("wheel", (event) => {

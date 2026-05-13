@@ -2691,6 +2691,7 @@ select:disabled {
 .queue-current-progress-badge.ready .icon-play {
   display: block;
   color: var(--accent);
+  margin-left: 0;
 }
 
 /* 状态：出错 -> 显示叉号 (红色) */
