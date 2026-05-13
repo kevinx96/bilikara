@@ -1483,9 +1483,27 @@ select:disabled {
 
 
 .search-result-url {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   margin-top: 4px;
   font-size: 12px;
   color: var(--muted);
+  min-width: 0;
+}
+
+
+.search-result-bvid {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+
+.search-result-owner {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 

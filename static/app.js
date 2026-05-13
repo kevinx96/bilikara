@@ -1186,6 +1186,30 @@ function hideSearchResults() {
   elements.searchResults.classList.add("hidden");
 }
 
+function searchResultOwnerName(item) {
+  return String(item?.owner_name || item?.author || "").trim();
+}
+
+function createSearchResultUrlLine(item) {
+  const line = document.createElement("div");
+  line.className = "search-result-url";
+
+  const bvid = document.createElement("span");
+  bvid.className = "search-result-bvid";
+  bvid.textContent = String(item?.bvid || item?.url || "");
+  line.appendChild(bvid);
+
+  const ownerName = searchResultOwnerName(item);
+  if (ownerName) {
+    const owner = document.createElement("span");
+    owner.className = "search-result-owner";
+    owner.textContent = t("owner.tooltip", { name: ownerName });
+    line.appendChild(owner);
+  }
+
+  return line;
+}
+
 function renderSearchResultItems(container, items, emptyText = t("search.empty")) {
   if (!container) {
     return;
@@ -1212,9 +1236,7 @@ function renderSearchResultItems(container, items, emptyText = t("search.empty")
     title.className = "search-result-title";
     title.textContent = String(item.title || "");
 
-    const url = document.createElement("div");
-    url.className = "search-result-url";
-    url.textContent = String(item.bvid || "");
+    const url = createSearchResultUrlLine(item);
 
     const button = document.createElement("button");
     button.type = "button";
@@ -1249,9 +1271,7 @@ function appendSearchResultItems(container, items) {
     title.className = "search-result-title";
     title.textContent = String(item.title || "");
 
-    const url = document.createElement("div");
-    url.className = "search-result-url";
-    url.textContent = String(item.bvid || "");
+    const url = createSearchResultUrlLine(item);
 
     const button = document.createElement("button");
     button.type = "button";

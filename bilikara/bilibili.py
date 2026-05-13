@@ -1399,6 +1399,7 @@ def search_gatcha_cache(query: str, *, limit: int = 30) -> list[dict]:
                 "bvid": str(entry.get("bvid") or ""),
                 "title": title,
                 "url": str(entry.get("url") or ""),
+                "owner_name": str(entry.get("owner_name") or entry.get("author") or ""),
             }
         )
         if len(results) >= max(1, int(limit)):
@@ -1412,6 +1413,8 @@ def _gatcha_entry_payload(entry: dict) -> dict:
         "bvid": str(entry.get("bvid") or ""),
         "title": str(entry.get("title") or ""),
         "url": str(entry.get("url") or ""),
+        "owner_name": str(entry.get("owner_name") or entry.get("author") or ""),
+        "owner_url": str(entry.get("owner_url") or ""),
     }
 
 
