@@ -240,6 +240,22 @@ function clientHeaders(extraHeaders = {}) {
   };
 }
 
+function localizedApiMessage(message) {
+  const raw = String(message || "").trim();
+  if (!raw) {
+    return "";
+  }
+  const gatchaMessage = localizedGatchaTaskMessage(raw);
+  if (gatchaMessage && gatchaMessage !== raw) {
+    return gatchaMessage;
+  }
+  const cacheMessage = localizedCacheMessage(raw);
+  if (cacheMessage && cacheMessage !== raw) {
+    return cacheMessage;
+  }
+  return raw;
+}
+
 function requesterBadgeText(requesterName) {
   const normalized = String(requesterName || "").trim();
   return normalized ? t("request.requesterBadge", { name: normalized }) : "";
@@ -662,6 +678,41 @@ function setMessageForSource(source, message, isError = false) {
   setFormMessage(message, isError);
 }
 
+function localizedCacheMessage(message, cacheStatus = "") {
+  const raw = String(message || "").trim();
+  const status = String(cacheStatus || "").trim();
+  if (!raw) {
+    return "";
+  }
+  if (raw === "已缓存" || raw === "缓存已完成" || raw.includes("缓存完成")) {
+    return t("cache.ready");
+  }
+  if (raw === "等待缓存" || raw === "等待缓存队列" || raw.includes("等待优先缓存")) {
+    return t("status.pendingCache");
+  }
+  if (raw === "正在校验缓存") {
+    return t("status.checking");
+  }
+  const progressMatch = raw.match(/^缓存中\s*([0-9.]+)%$/);
+  if (progressMatch) {
+    return `${t("status.caching")} ${progressMatch[1]}%`;
+  }
+  if (raw.startsWith("缓存失败:")) {
+    const detail = raw.slice("缓存失败:".length).trim();
+    return detail ? `${t("cache.failed")}: ${detail}` : t("cache.failed");
+  }
+  if (raw.includes("开始缓存视频") || raw.includes("正在缓存")) {
+    return t("cache.caching");
+  }
+  if (status === "ready") {
+    return t("cache.ready");
+  }
+  if (status === "failed" && raw === "缓存失败") {
+    return t("cache.failed");
+  }
+  return raw;
+}
+
 function setRemoteSearchStageView(view) {
   if (!elements.remoteSearchStage) {
     return;
@@ -905,7 +956,7 @@ async function apiPost(url, payload = {}) {
   });
   const data = await response.json();
   if (!response.ok || !data.ok) {
-    const error = new Error(data.error || t("error.requestFailed"));
+    const error = new Error(localizedApiMessage(data.error) || t("error.requestFailed"));
     error.status = response.status;
     error.code = data.code || "";
     error.payload = data;
@@ -1041,7 +1092,7 @@ async function fetchState(options = {}) {
   const response = await fetch("/api/state", { headers: clientHeaders() });
   const payload = await response.json();
   if (!response.ok || !payload.ok) {
-    throw new Error(payload.error || t("error.stateFailed"));
+    throw new Error(localizedApiMessage(payload.error) || t("error.stateFailed"));
   }
   applyStateSnapshot(payload.data, { forceRender: force || !state.data });
 }
@@ -1199,7 +1250,7 @@ async function searchGatchaCache(query) {
   });
   const payload = await response.json();
   if (!response.ok || !payload.ok) {
-    throw new Error(payload.error || t("error.searchFailed"));
+    throw new Error(localizedApiMessage(payload.error) || t("error.searchFailed"));
   }
   return Array.isArray(payload.data?.items) ? payload.data.items : [];
 }
@@ -1215,7 +1266,7 @@ async function searchLarkPool(query) {
   });
   const payload = await response.json();
   if (!response.ok || !payload.ok) {
-    throw new Error(payload.error || t("error.larkSearchFailed"));
+    throw new Error(localizedApiMessage(payload.error) || t("error.larkSearchFailed"));
   }
   return Array.isArray(payload.data?.items) ? payload.data.items : [];
 }
@@ -1232,7 +1283,7 @@ async function searchLarkPoolTable(query, tableIndex) {
   });
   const payload = await response.json();
   if (!response.ok || !payload.ok) {
-    throw new Error(payload.error || t("error.larkSearchFailed"));
+    throw new Error(localizedApiMessage(payload.error) || t("error.larkSearchFailed"));
   }
   return Array.isArray(payload.data?.items) ? payload.data.items : [];
 }
@@ -1254,7 +1305,7 @@ async function fetchGatchaBrowse(uid = "", query = "") {
   });
   const payload = await response.json();
   if (!response.ok || !payload.ok) {
-    throw new Error(payload.error || t("error.browseFailed"));
+    throw new Error(localizedApiMessage(payload.error) || t("error.browseFailed"));
   }
   return payload.data || { owners: [], items: [] };
 }
@@ -1286,8 +1337,40 @@ function gatchaTaskBusy() {
   return Boolean(state.data?.gatcha?.busy);
 }
 
+function localizedGatchaTaskMessage(message, status = "") {
+  const raw = String(message || "").trim();
+  if (!raw) {
+    if (status === "success") {
+      return t("gatcha.refreshDone");
+    }
+    if (status === "partial") {
+      return t("gatcha.refreshPartial");
+    }
+    if (status === "failed") {
+      return t("gatcha.refreshFailed");
+    }
+    return "";
+  }
+  if (raw.includes("拉取任务执行中")) {
+    return t("gatcha.busyFallback");
+  }
+  if (raw.includes("部分更新")) {
+    return t("gatcha.refreshPartial");
+  }
+  if (raw.includes("更新完成") || raw.includes("重建完成")) {
+    return t("gatcha.refreshDone");
+  }
+  if (raw.includes("更新失败")) {
+    return t("gatcha.refreshFailed");
+  }
+  if (raw.includes("正在重建") || raw.includes("更新中")) {
+    return t("gatcha.refreshingBackground");
+  }
+  return raw;
+}
+
 function gatchaTaskBusyMessage() {
-  return state.data?.gatcha?.message || t("gatcha.busyFallback");
+  return localizedGatchaTaskMessage(state.data?.gatcha?.message, "running") || t("gatcha.busyFallback");
 }
 
 function syncGatchaTaskTerminalMessage() {
@@ -1319,7 +1402,8 @@ function syncGatchaTaskTerminalMessage() {
       : status === "partial"
         ? t("gatcha.refreshPartial")
         : t("gatcha.refreshFailed");
-  const detail = task.last_error ? `${task.last_message || fallback} ${task.last_error}` : task.last_message || fallback;
+  const message = localizedGatchaTaskMessage(task.last_message, status) || fallback;
+  const detail = task.last_error ? `${message} ${task.last_error}` : message;
   setGatchaUidMessage(detail, status !== "success");
 }
 
@@ -1715,7 +1799,7 @@ async function handleGatchaDraw() {
     const response = await fetch("/api/gatcha/candidate", { headers: clientHeaders() });
     const payload = await response.json();
     if (!response.ok || !payload.ok) {
-      throw new Error(payload.error || t("gatcha.drawFailed"));
+      throw new Error(localizedApiMessage(payload.error) || t("gatcha.drawFailed"));
     }
 
     state.gatchaCandidate = payload.data;
@@ -1826,7 +1910,7 @@ async function handleGatchaUidSubmit(event) {
   try {
     const preview = await previewGatchaUid(uid);
     const ownerName = preview?.name || `UID ${preview?.uid || uid}`;
-    const modeLabel = preview?.cache_mode_label || (preview?.cache_mode === "incremental" ? t("gatcha.latestMode") : t("gatcha.allMode"));
+    const modeLabel = preview?.cache_mode === "incremental" ? t("gatcha.latestMode") : t("gatcha.allMode");
     const followedPrefix = preview?.already_followed ? t("gatcha.alreadyFollowedPrefix") : "";
     setGatchaUidMessage(t("gatcha.detectedOwner", { prefix: followedPrefix, owner: ownerName }));
 
@@ -2975,10 +3059,11 @@ function queueNoteText(item) {
   if (!message) {
     return "";
   }
-  if (message === "已缓存" || message === "缓存已完成") {
+  const localizedMessage = localizedCacheMessage(message, item.cache_status);
+  if (localizedMessage === t("cache.ready")) {
     return "";
   }
-  return message;
+  return localizedMessage;
 }
 
 function queueStateLabel(item) {
@@ -3002,7 +3087,7 @@ function currentCacheStateLabel(item) {
     return "";
   }
   if (item.cache_status === "downloading") {
-    const message = String(item.cache_message || "").trim();
+    const message = localizedCacheMessage(item.cache_message, item.cache_status);
     if (message) {
       return message;
     }

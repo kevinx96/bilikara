@@ -446,11 +446,19 @@
 
             <section class="list-card sub-card search-sub-card" id="search-panel">
               <div class="search-card">
-                <div class="search-sub-card-head">
-                  <div>
-                    <p class="section-tag" id="search-tag" data-i18n="search.localTag">Local Search</p>
-                    <h2 id="search-title" data-i18n="search.title">搜索</h2>
-                  </div>
+                <div id="search-card-content" class="search-card-content">
+                  <div class="search-sub-card-head">
+                    <div class="search-title-row">
+                      <button type="button" id="search-expand-button" class="toolbar-button ghost search-expand-button" title="全屏展开" aria-label="全屏展开">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                          <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"></path>
+                        </svg>
+                      </button>
+                      <div>
+                        <p class="section-tag" id="search-tag" data-i18n="search.localTag">Local Search</p>
+                        <h2 id="search-title" data-i18n="search.title">搜索</h2>
+                      </div>
+                    </div>
                   <div class="search-head-actions">
                     <button type="button" id="search-cookie-toggle" class="toolbar-button ghost search-cookie-toggle" data-i18n="search.followBrowse">
                       关注浏览
@@ -520,6 +528,7 @@
                     </div>
                     <button type="submit" id="lark-search-hitbox-button" class="next-button" tabindex="-1" data-i18n="search.submit">搜索</button>
                   </form>
+                </div>
                 </div>
               </div>
             </section>
@@ -814,6 +823,56 @@
         <div class="selection-modal-actions">
           <button type="button" id="gatcha-favlist-modal-cancel" class="toolbar-button" data-i18n="common.cancel">取消</button>
           <button type="button" id="gatcha-favlist-modal-confirm" class="next-button" data-i18n="favlist.confirm">拉取选中收藏夹</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="selection-modal hidden" id="search-modal" role="dialog" aria-modal="true">
+      <div class="selection-modal-backdrop" id="search-modal-backdrop"></div>
+      <div class="selection-modal-card search-modal-card">
+        <div class="search-modal-sidebar">
+          <h2>搜索库</h2>
+          <button class="search-sidebar-item active" data-target="search">搜索</button>
+          <button class="search-sidebar-item" data-target="favlist" data-i18n="search.favlistBrowse">按收藏夹浏览</button>
+          <button class="search-sidebar-item" data-target="category">按类别浏览</button>
+          <button class="search-sidebar-item" data-target="name">按名称浏览</button>
+          <button class="search-sidebar-item" data-target="artist">按歌手浏览</button>
+        </div>
+        <div class="search-modal-main">
+          <button type="button" id="search-modal-close" class="banner-close search-modal-close" aria-label="关闭">×</button>
+          <div id="search-modal-content-placeholder" class="search-modal-content-placeholder">
+            <!-- search-sub-card-head and search-stage will be moved here -->
+          </div>
+          <div id="favlist-browser-view" class="favlist-browser search-modal-browser-view hidden">
+            <div id="favlist-list-view" class="follow-up-list-view">
+              <div id="favlist-grid" class="follow-up-grid favlist-grid" role="list"></div>
+            </div>
+            <div id="favlist-items-view" class="follow-up-items-view hidden">
+              <div class="follow-browser-head">
+                <button type="button" id="favlist-browse-back" class="toolbar-button ghost" data-i18n="common.back">返回</button>
+                <img id="favlist-browse-avatar" class="follow-browser-avatar hidden" alt="" loading="lazy" referrerpolicy="no-referrer">
+                <div class="follow-browser-title-block">
+                  <h3 id="favlist-browse-title" data-i18n="favlist.browseItemsTitle">收藏夹稿件</h3>
+                  <p id="favlist-browse-count" class="follow-browser-count" data-i18n="follow.zeroCount">0 首</p>
+                </div>
+              </div>
+              <form id="favlist-search-form" class="follow-search-form">
+                <input
+                  type="text"
+                  id="favlist-search-query"
+                  placeholder="在这个收藏夹的缓存稿件里搜索"
+                  data-i18n-placeholder="favlist.searchPlaceholder"
+                  autocomplete="off"
+                >
+                <button type="submit" id="favlist-search-button" class="next-button" data-i18n="search.submit">搜索</button>
+              </form>
+              <div id="favlist-song-results" class="search-results"></div>
+            </div>
+            <p class="gatcha-message" id="favlist-browse-message" role="status"></p>
+          </div>
+          <div id="search-modal-other-view" class="search-modal-other-view hidden">
+            此功能开发中...
+          </div>
         </div>
       </div>
     </div>

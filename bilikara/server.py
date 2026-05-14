@@ -23,6 +23,7 @@ from .bilibili import (
     MISSING_BILIBILI_COOKIE_MESSAGE,
     add_gatcha_uid,
     browse_gatcha_cache,
+    browse_gatcha_favlist,
     effective_bilibili_cookie,
     fetch_gatcha_candidate,
     gatcha_task_snapshot,
@@ -621,6 +622,15 @@ class BilikaraHandler(BaseHTTPRequestHandler):
             search_query = route_query.get("q", [""])[0]
             try:
                 self._write_json({"ok": True, "data": browse_gatcha_cache(selected_uid, search_query)})
+            except Exception as e:
+                self._write_json({"ok": False, "error": str(e)})
+            return
+        if route == "/api/gatcha/favlist/browse":
+            route_query = parse_qs(urlparse(self.path).query)
+            selected_folder_id = route_query.get("folder_id", [""])[0]
+            search_query = route_query.get("q", [""])[0]
+            try:
+                self._write_json({"ok": True, "data": browse_gatcha_favlist(selected_folder_id, search_query)})
             except Exception as e:
                 self._write_json({"ok": False, "error": str(e)})
             return
