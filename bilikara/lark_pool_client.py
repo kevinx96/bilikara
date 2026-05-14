@@ -482,7 +482,7 @@ def _cloudflare_search_item(raw_item: Any) -> dict | None:
         url = f"https://www.bilibili.com/video/{bvid}"
     if not bvid or not title or not url:
         return None
-    return {
+    item = {
         "mid": _field_text(raw_item.get("mid")).strip(),
         "bvid": bvid,
         "title": title,
@@ -491,6 +491,11 @@ def _cloudflare_search_item(raw_item: Any) -> dict | None:
         "owner_url": _field_text(raw_item.get("owner_url")).strip(),
         "source": "cloudflare",
     }
+    for key in ("cover_url", "played_count", "preserved_1"):
+        value = _field_text(raw_item.get(key)).strip()
+        if value:
+            item[key] = value
+    return item
 
 
 def _cloudflare_search_items(payload: Any) -> list[Any]:
@@ -605,6 +610,19 @@ def normalize_pool_entry(entry: dict) -> dict | None:
         "owner_name": str(entry.get("owner_name") or entry.get("author") or "").strip(),
         "owner_url": str(entry.get("owner_url") or "").strip(),
     }
+    for key in (
+        "cover_url",
+        "rank",
+        "played_count",
+        "preserved_1",
+        "preserved_2",
+        "preserved_3",
+        "preserved_4",
+        "preserved_5",
+    ):
+        value = entry.get(key)
+        if value is not None:
+            normalized[key] = str(value).strip()
     for key in ("tag_1", "tag_2", "tag_3", "tag_4", "tag_5"):
         value = entry.get(key)
         if value is not None:
@@ -639,6 +657,7 @@ def append_cloudflare_pool_entries(entries: list[dict]) -> dict:
     return {
         "attempted": int(payload.get("attempted") or len(normalized)),
         "added": int(payload.get("added") or 0),
+        "updated_existing": int(payload.get("updated_existing") or 0),
         "skipped_existing": int(payload.get("skipped_existing") or 0),
         "feishu_queued": int(payload.get("feishu_queued") or 0),
     }

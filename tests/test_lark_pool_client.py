@@ -92,11 +92,23 @@ class LarkPoolClientTest(unittest.TestCase):
 
         with patch.object(lark_pool, "_cloudflare_json", side_effect=fake_cloudflare):
             result = lark_pool.append_lark_pool_entries(
-                [{"bvid": "BV1CFADD0001", "title": "new", "url": "https://www.bilibili.com/video/BV1CFADD0001"}]
+                [
+                    {
+                        "bvid": "BV1CFADD0001",
+                        "title": "new",
+                        "url": "https://www.bilibili.com/video/BV1CFADD0001",
+                        "cover_url": "https://example.com/cover.jpg",
+                        "played_count": 683,
+                        "preserved_1": 201,
+                    }
+                ]
             )
 
         self.assertEqual(result["added"], 1)
         self.assertEqual(posted_payloads[0]["records"][0]["bvid"], "BV1CFADD0001")
+        self.assertEqual(posted_payloads[0]["records"][0]["cover_url"], "https://example.com/cover.jpg")
+        self.assertEqual(posted_payloads[0]["records"][0]["played_count"], "683")
+        self.assertEqual(posted_payloads[0]["records"][0]["preserved_1"], "201")
 
     def test_append_lark_pool_entries_rejects_short_dummy_bvids(self):
         with patch.object(lark_pool, "_cloudflare_json") as cloudflare:
