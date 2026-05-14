@@ -3542,6 +3542,7 @@ select:disabled {
 }
 
 .follow-up-button {
+  position: relative;
   min-width: 0;
   min-height: 72px;
   display: grid;
@@ -3566,6 +3567,18 @@ select:disabled {
   border-color: rgba(0, 210, 255, 0.24);
 }
 
+.follow-up-avatar {
+  position: absolute;
+  bottom: 6px;
+  right: 8px;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  object-fit: cover;
+  background: rgba(255, 255, 255, 0.1);
+  pointer-events: none;
+}
+
 .follow-up-name {
   min-width: 0;
   font-size: 14px;
@@ -3585,7 +3598,7 @@ select:disabled {
 
 .follow-browser-head {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: auto auto minmax(0, 1fr);
   align-items: center;
   gap: 10px;
 }
@@ -3597,6 +3610,14 @@ select:disabled {
 
 .follow-browser-title-block {
   min-width: 0;
+}
+
+.follow-browser-avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  object-fit: cover;
+  background: rgba(255, 255, 255, 0.1);
 }
 
 .follow-browser-title-block h3 {

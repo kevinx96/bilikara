@@ -302,6 +302,7 @@ const elements = {
   followUpGrid: document.getElementById("follow-up-grid"),
   followUpItemsView: document.getElementById("follow-up-items-view"),
   followBrowseBack: document.getElementById("follow-browse-back"),
+  followBrowseAvatar: document.getElementById("follow-browse-avatar"),
   followBrowseTitle: document.getElementById("follow-browse-title"),
   followBrowseCount: document.getElementById("follow-browse-count"),
   followSearchForm: document.getElementById("follow-search-form"),
@@ -1373,6 +1374,17 @@ function renderFollowBrowse() {
         count.textContent = t("follow.countSongs", { count: Number(owner.count || 0) });
 
         button.append(name, count);
+
+        if (owner.avatar_url) {
+          const avatar = document.createElement("img");
+          avatar.className = "follow-up-avatar";
+          avatar.src = owner.avatar_url;
+          avatar.alt = "";
+          avatar.loading = "lazy";
+          avatar.referrerPolicy = "no-referrer";
+          button.append(avatar);
+        }
+
         elements.followUpGrid.appendChild(button);
       });
     }
@@ -1381,6 +1393,15 @@ function renderFollowBrowse() {
   }
 
   const owner = selectedFollowOwner();
+  if (elements.followBrowseAvatar) {
+    const avatarUrl = String(owner?.avatar_url || "").trim();
+    elements.followBrowseAvatar.classList.toggle("hidden", !avatarUrl);
+    if (avatarUrl) {
+      elements.followBrowseAvatar.src = avatarUrl;
+    } else {
+      elements.followBrowseAvatar.removeAttribute("src");
+    }
+  }
   if (elements.followBrowseTitle) {
     elements.followBrowseTitle.textContent = followOwnerDisplayName(owner) || `UID ${state.followBrowseSelectedUid}`;
   }
