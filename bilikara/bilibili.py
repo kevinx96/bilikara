@@ -548,14 +548,35 @@ def _load_gatcha_favlist() -> dict:
         if folder_uid:
             normalized_folder["uid"] = folder_uid
         normalized_folders.append(normalized_folder)
-    items = []
-    for entry in _dedupe_gatcha_entries(payload.get("items")):
+    raw_items = payload.get("items")
+    if not isinstance(raw_items, list):
+        raw_items = []
+    normalized_items: list[dict] = []
+    for entry in raw_items:
         if not isinstance(entry, dict):
             continue
         normalized_entry = dict(entry)
-        if legacy_uid and not str(normalized_entry.get("fav_uid") or "").strip():
-            normalized_entry["fav_uid"] = legacy_uid
-        items.append(normalized_entry)
+        entry_uid = str(normalized_entry.get("fav_uid") or legacy_uid or "").strip()
+        if entry_uid:
+            normalized_entry["fav_uid"] = entry_uid
+        if not str(normalized_entry.get("source") or "").strip():
+            normalized_entry["source"] = "favlist"
+        if not str(normalized_entry.get("fav_folder_id") or "").strip():
+            matching_folders = [
+                folder
+                for folder in normalized_folders
+                if not entry_uid or _favlist_folder_uid(folder, legacy_uid) == entry_uid
+            ]
+            if len(matching_folders) == 1:
+                folder = matching_folders[0]
+                folder_id = _gatcha_favlist_media_id(folder)
+                if folder_id:
+                    normalized_entry["fav_folder_id"] = folder_id
+                folder_title = str(folder.get("title") or "").strip()
+                if folder_title and not str(normalized_entry.get("fav_folder_title") or "").strip():
+                    normalized_entry["fav_folder_title"] = folder_title
+        normalized_items.append(normalized_entry)
+    items = _dedupe_gatcha_entries(normalized_items)
     uids = {
         str(uid).strip()
         for uid in (payload.get("uids") if isinstance(payload.get("uids"), list) else [])
