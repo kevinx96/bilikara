@@ -138,6 +138,10 @@ const state = {
   followBrowseSelectedUid: "",
   followBrowseLoading: false,
   followBrowseRenderSignature: "",
+  favlistBrowseData: null,
+  favlistBrowseSelectedFolderId: "",
+  favlistBrowseLoading: false,
+  favlistBrowseRenderSignature: "",
   gatchaUidVisible: false,
   gatchaUidSaving: false,
   gatchaRefreshSaving: false,
@@ -270,6 +274,16 @@ const elements = {
   remotePopoverUrlLink: document.getElementById("remote-popover-url-link"),
   remotePopoverUrlHint: document.getElementById("remote-popover-url-hint"),
   searchPanel: document.getElementById("search-panel"),
+  searchExpandButton: document.getElementById("search-expand-button"),
+  searchCardContent: document.getElementById("search-card-content"),
+  searchModal: document.getElementById("search-modal"),
+  searchModalBackdrop: document.getElementById("search-modal-backdrop"),
+  searchModalClose: document.getElementById("search-modal-close"),
+  searchModalPlaceholder: document.getElementById("search-modal-content-placeholder"),
+  favlistBrowserView: document.getElementById("favlist-browser-view"),
+  searchModalOtherView: document.getElementById("search-modal-other-view"),
+  searchSidebarItems: document.querySelectorAll(".search-sidebar-item"),
+  searchOriginalContainer: document.querySelector(".search-card"),
   searchTag: document.getElementById("search-tag"),
   searchTitle: document.getElementById("search-title"),
   searchCookieToggle: document.getElementById("search-cookie-toggle"),
@@ -302,6 +316,7 @@ const elements = {
   followUpGrid: document.getElementById("follow-up-grid"),
   followUpItemsView: document.getElementById("follow-up-items-view"),
   followBrowseBack: document.getElementById("follow-browse-back"),
+  followBrowseAvatar: document.getElementById("follow-browse-avatar"),
   followBrowseTitle: document.getElementById("follow-browse-title"),
   followBrowseCount: document.getElementById("follow-browse-count"),
   followSearchForm: document.getElementById("follow-search-form"),
@@ -309,6 +324,18 @@ const elements = {
   followSearchButton: document.getElementById("follow-search-button"),
   followSongResults: document.getElementById("follow-song-results"),
   followBrowseMessage: document.getElementById("follow-browse-message"),
+  favlistListView: document.getElementById("favlist-list-view"),
+  favlistGrid: document.getElementById("favlist-grid"),
+  favlistItemsView: document.getElementById("favlist-items-view"),
+  favlistBrowseBack: document.getElementById("favlist-browse-back"),
+  favlistBrowseAvatar: document.getElementById("favlist-browse-avatar"),
+  favlistBrowseTitle: document.getElementById("favlist-browse-title"),
+  favlistBrowseCount: document.getElementById("favlist-browse-count"),
+  favlistSearchForm: document.getElementById("favlist-search-form"),
+  favlistSearchQuery: document.getElementById("favlist-search-query"),
+  favlistSearchButton: document.getElementById("favlist-search-button"),
+  favlistSongResults: document.getElementById("favlist-song-results"),
+  favlistBrowseMessage: document.getElementById("favlist-browse-message"),
   larkSearchForm: document.getElementById("lark-search-form"),
   larkSearchQuery: document.getElementById("lark-search-query"),
   larkSearchButton: document.getElementById("lark-search-button"),
@@ -540,6 +567,7 @@ function invalidateLanguageSensitiveRenderCache() {
   state.sessionUsersRenderSignature = "";
   state.playerFullscreenButtonRenderSignature = "";
   state.followBrowseRenderSignature = "";
+  state.favlistBrowseRenderSignature = "";
   state.searchCookieFaceRenderSignature = "";
   state.gatchaUidFaceRenderSignature = "";
   state.gatchaTaskLastMessageSignature = "";
@@ -945,6 +973,22 @@ function clientHeaders(extraHeaders = {}) {
   };
 }
 
+function localizedApiMessage(message) {
+  const raw = String(message || "").trim();
+  if (!raw) {
+    return "";
+  }
+  const gatchaMessage = localizedGatchaTaskMessage(raw);
+  if (gatchaMessage && gatchaMessage !== raw) {
+    return gatchaMessage;
+  }
+  const cacheMessage = localizedCacheMessage(raw);
+  if (cacheMessage && cacheMessage !== raw) {
+    return cacheMessage;
+  }
+  return raw;
+}
+
 async function apiPost(url, payload = {}) {
   const response = await fetch(url, {
     method: "POST",
@@ -953,7 +997,7 @@ async function apiPost(url, payload = {}) {
   });
   const data = await response.json();
   if (!response.ok || !data.ok) {
-    const error = new Error(data.error || t("error.requestFailed"));
+    const error = new Error(localizedApiMessage(data.error) || t("error.requestFailed"));
     error.status = response.status;
     error.code = data.code || "";
     error.payload = data;
@@ -970,7 +1014,7 @@ async function apiGet(url, options = {}) {
   });
   const data = await response.json();
   if (!response.ok || !data.ok) {
-    const error = new Error(data.error || t("error.requestFailed"));
+    const error = new Error(localizedApiMessage(data.error) || t("error.requestFailed"));
     error.status = response.status;
     error.code = data.code || "";
     error.payload = data;
@@ -987,7 +1031,7 @@ async function fetchState() {
   });
   const payload = await response.json();
   if (!response.ok || !payload.ok) {
-    throw new Error(payload.error || t("error.stateFailed"));
+    throw new Error(localizedApiMessage(payload.error) || t("error.stateFailed"));
   }
   state.data = payload.data;
   maybeShowIncomingRequestToast(previousData, state.data);
@@ -1055,7 +1099,7 @@ async function searchGatchaCache(query) {
   });
   const payload = await response.json();
   if (!response.ok || !payload.ok) {
-    throw new Error(payload.error || t("error.searchFailed"));
+    throw new Error(localizedApiMessage(payload.error) || t("error.searchFailed"));
   }
   return Array.isArray(payload.data?.items) ? payload.data.items : [];
 }
@@ -1071,7 +1115,7 @@ async function searchLarkPool(query) {
   });
   const payload = await response.json();
   if (!response.ok || !payload.ok) {
-    throw new Error(payload.error || t("error.larkSearchFailed"));
+    throw new Error(localizedApiMessage(payload.error) || t("error.larkSearchFailed"));
   }
   return Array.isArray(payload.data?.items) ? payload.data.items : [];
 }
@@ -1088,7 +1132,7 @@ async function searchLarkPoolTable(query, tableIndex) {
   });
   const payload = await response.json();
   if (!response.ok || !payload.ok) {
-    throw new Error(payload.error || t("error.larkSearchFailed"));
+    throw new Error(localizedApiMessage(payload.error) || t("error.larkSearchFailed"));
   }
   return Array.isArray(payload.data?.items) ? payload.data.items : [];
 }
@@ -1110,9 +1154,31 @@ async function fetchGatchaBrowse(uid = "", query = "") {
   });
   const payload = await response.json();
   if (!response.ok || !payload.ok) {
-    throw new Error(payload.error || t("error.browseFailed"));
+    throw new Error(localizedApiMessage(payload.error) || t("error.browseFailed"));
   }
   return payload.data || { owners: [], items: [] };
+}
+
+async function fetchGatchaFavlistBrowse(folderId = "", query = "") {
+  const params = new URLSearchParams();
+  const normalizedFolderId = String(folderId || "").trim();
+  const normalizedQuery = String(query || "").trim();
+  if (normalizedFolderId) {
+    params.set("folder_id", normalizedFolderId);
+  }
+  if (normalizedQuery) {
+    params.set("q", normalizedQuery);
+  }
+  const queryString = params.toString();
+  const response = await fetch(`/api/gatcha/favlist/browse${queryString ? `?${queryString}` : ""}`, {
+    cache: "no-store",
+    headers: clientHeaders(),
+  });
+  const payload = await response.json();
+  if (!response.ok || !payload.ok) {
+    throw new Error(localizedApiMessage(payload.error) || t("error.browseFailed"));
+  }
+  return payload.data || { folders: [], items: [] };
 }
 
 async function previewGatchaUid(uid) {
@@ -1190,6 +1256,86 @@ function searchResultOwnerName(item) {
   return String(item?.owner_name || item?.author || "").trim();
 }
 
+function firstSearchResultValue(item, keys) {
+  for (const key of keys) {
+    const value = String(item?.[key] ?? "").trim();
+    if (value) {
+      return value;
+    }
+  }
+  return "";
+}
+
+function searchResultCoverUrl(item) {
+  let coverUrl = firstSearchResultValue(item, ["cover_url", "cover", "pic", "pic_url", "thumbnail"]);
+  if (coverUrl.startsWith("//")) {
+    coverUrl = `https:${coverUrl}`;
+  }
+  return coverUrl;
+}
+
+function formatCompactCount(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw) {
+    return "";
+  }
+  const numeric = Number(raw.replace(/,/g, ""));
+  if (!Number.isFinite(numeric)) {
+    return raw;
+  }
+  if (numeric >= 100000000) {
+    return `${Number((numeric / 100000000).toFixed(numeric >= 1000000000 ? 0 : 1))}亿`;
+  }
+  if (numeric >= 10000) {
+    return `${Number((numeric / 10000).toFixed(numeric >= 100000 ? 0 : 1))}万`;
+  }
+  return String(Math.round(numeric));
+}
+
+function formatSearchDuration(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw) {
+    return "";
+  }
+  if (raw.includes(":")) {
+    return raw;
+  }
+  const totalSeconds = Number(raw);
+  if (!Number.isFinite(totalSeconds) || totalSeconds < 0) {
+    return raw;
+  }
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = Math.floor(totalSeconds % 60);
+  const paddedSeconds = String(seconds).padStart(2, "0");
+  if (hours > 0) {
+    return `${hours}:${String(minutes).padStart(2, "0")}:${paddedSeconds}`;
+  }
+  return `${minutes}:${paddedSeconds}`;
+}
+
+function searchResultStatusLabel(item) {
+  const localSource = String(item?.local_source || "").trim();
+  if (localSource === "favlist") {
+    return t("search.favorited");
+  }
+  if (localSource === "follow") {
+    return t("search.followed");
+  }
+
+  const source = String(item?.source || "").trim();
+  if (source === "bilikara" || source === "cloudflare") {
+    return "";
+  }
+  if (source === "favlist") {
+    return t("search.favorited");
+  }
+  if (String(item?.mid || item?.fav_uid || "").trim()) {
+    return t("search.followed");
+  }
+  return "";
+}
+
 function createSearchResultUrlLine(item) {
   const line = document.createElement("div");
   line.className = "search-result-url";
@@ -1210,6 +1356,85 @@ function createSearchResultUrlLine(item) {
   return line;
 }
 
+function createSearchResultItem(item) {
+  const row = document.createElement("article");
+  row.className = "search-result-item";
+  const itemUrl = String(item?.url || "").trim();
+  if (itemUrl) {
+    row.dataset.url = itemUrl;
+  }
+
+  const coverUrl = searchResultCoverUrl(item);
+  const cover = document.createElement("div");
+  cover.className = "search-result-cover";
+  if (coverUrl) {
+    const image = document.createElement("img");
+    image.src = coverUrl;
+    image.alt = "";
+    image.loading = "lazy";
+    image.referrerPolicy = "no-referrer";
+    cover.appendChild(image);
+  } else {
+    const fallback = document.createElement("span");
+    fallback.textContent = String(item?.bvid || "Bili");
+    cover.appendChild(fallback);
+    cover.classList.add("is-empty");
+  }
+
+  const duration = formatSearchDuration(firstSearchResultValue(item, ["preserved_1", "duration", "length"]));
+  if (duration) {
+    const durationNode = document.createElement("span");
+    durationNode.className = "search-result-duration";
+    durationNode.textContent = duration;
+    cover.appendChild(durationNode);
+  }
+
+  const body = document.createElement("div");
+  body.className = "search-result-meta search-result-body";
+
+  const title = document.createElement("div");
+  title.className = "search-result-title";
+  title.textContent = String(item.title || "");
+
+  const statusLine = document.createElement("div");
+  statusLine.className = "search-result-status";
+  const statusLabel = searchResultStatusLabel(item);
+  if (statusLabel) {
+    const status = document.createElement("span");
+    status.className = "search-result-follow";
+    status.textContent = statusLabel;
+    statusLine.appendChild(status);
+  }
+  const playCount = formatCompactCount(firstSearchResultValue(item, ["played_count", "play_count", "play", "view", "views"]));
+  if (playCount) {
+    const plays = document.createElement("span");
+    plays.className = "search-result-plays";
+    const playLabel = document.createElement("span");
+    playLabel.className = "search-result-play-label";
+    playLabel.textContent = t("search.playCountLabel");
+    const playValue = document.createElement("span");
+    playValue.textContent = playCount;
+    plays.append(playLabel, playValue);
+    statusLine.appendChild(plays);
+  }
+
+  const url = createSearchResultUrlLine(item);
+
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "next-button search-result-add";
+  button.dataset.url = itemUrl;
+  button.textContent = t("search.add");
+
+  body.append(title);
+  if (statusLine.children.length) {
+    body.appendChild(statusLine);
+  }
+  body.appendChild(url);
+  row.append(cover, body, button);
+  return row;
+}
+
 function renderSearchResultItems(container, items, emptyText = t("search.empty")) {
   if (!container) {
     return;
@@ -1226,27 +1451,7 @@ function renderSearchResultItems(container, items, emptyText = t("search.empty")
   }
 
   items.forEach((item) => {
-    const row = document.createElement("div");
-    row.className = "search-result-item";
-
-    const meta = document.createElement("div");
-    meta.className = "search-result-meta";
-
-    const title = document.createElement("div");
-    title.className = "search-result-title";
-    title.textContent = String(item.title || "");
-
-    const url = createSearchResultUrlLine(item);
-
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "next-button";
-    button.dataset.url = String(item.url || "");
-    button.textContent = t("search.add");
-
-    meta.append(title, url);
-    row.append(meta, button);
-    container.appendChild(row);
+    container.appendChild(createSearchResultItem(item));
   });
 }
 
@@ -1261,27 +1466,7 @@ function appendSearchResultItems(container, items) {
   container.classList.remove("hidden");
 
   items.forEach((item) => {
-    const row = document.createElement("div");
-    row.className = "search-result-item";
-
-    const meta = document.createElement("div");
-    meta.className = "search-result-meta";
-
-    const title = document.createElement("div");
-    title.className = "search-result-title";
-    title.textContent = String(item.title || "");
-
-    const url = createSearchResultUrlLine(item);
-
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "next-button";
-    button.dataset.url = String(item.url || "");
-    button.textContent = t("search.add");
-
-    meta.append(title, url);
-    row.append(meta, button);
-    container.appendChild(row);
+    container.appendChild(createSearchResultItem(item));
   });
 }
 
@@ -1373,6 +1558,17 @@ function renderFollowBrowse() {
         count.textContent = t("follow.countSongs", { count: Number(owner.count || 0) });
 
         button.append(name, count);
+
+        if (owner.avatar_url) {
+          const avatar = document.createElement("img");
+          avatar.className = "follow-up-avatar";
+          avatar.src = owner.avatar_url;
+          avatar.alt = "";
+          avatar.loading = "lazy";
+          avatar.referrerPolicy = "no-referrer";
+          button.append(avatar);
+        }
+
         elements.followUpGrid.appendChild(button);
       });
     }
@@ -1381,6 +1577,15 @@ function renderFollowBrowse() {
   }
 
   const owner = selectedFollowOwner();
+  if (elements.followBrowseAvatar) {
+    const avatarUrl = String(owner?.avatar_url || "").trim();
+    elements.followBrowseAvatar.classList.toggle("hidden", !avatarUrl);
+    if (avatarUrl) {
+      elements.followBrowseAvatar.src = avatarUrl;
+    } else {
+      elements.followBrowseAvatar.removeAttribute("src");
+    }
+  }
   if (elements.followBrowseTitle) {
     elements.followBrowseTitle.textContent = followOwnerDisplayName(owner) || `UID ${state.followBrowseSelectedUid}`;
   }
@@ -1422,13 +1627,150 @@ async function refreshFollowBrowseAfterGatchaUidAdd(uid = "") {
   await loadFollowBrowse({ uid: nextUid, query: "", keepQuery: false });
 }
 
+function selectedFavlistFolder() {
+  const folders = Array.isArray(state.favlistBrowseData?.folders) ? state.favlistBrowseData.folders : [];
+  return folders.find((folder) => String(folder.id || "") === state.favlistBrowseSelectedFolderId) || null;
+}
+
+function renderFavlistBrowse() {
+  if (!elements.favlistGrid || !elements.favlistSongResults) {
+    return;
+  }
+  const folders = Array.isArray(state.favlistBrowseData?.folders) ? state.favlistBrowseData.folders : [];
+  const items = Array.isArray(state.favlistBrowseData?.items) ? state.favlistBrowseData.items : [];
+  const signature = JSON.stringify({
+    loading: state.favlistBrowseLoading,
+    selected: state.favlistBrowseSelectedFolderId,
+    folders,
+    items,
+    language: state.language,
+  });
+  if (signature === state.favlistBrowseRenderSignature) {
+    return;
+  }
+  state.favlistBrowseRenderSignature = signature;
+
+  const hasSelectedFolder = Boolean(state.favlistBrowseSelectedFolderId);
+  elements.favlistListView?.classList.toggle("hidden", hasSelectedFolder);
+  elements.favlistItemsView?.classList.toggle("hidden", !hasSelectedFolder);
+
+  if (!hasSelectedFolder) {
+    elements.favlistGrid.innerHTML = "";
+    if (!folders.length) {
+      const empty = document.createElement("div");
+      empty.className = "search-empty";
+      empty.textContent = state.favlistBrowseLoading ? t("favlist.loadingFolders") : t("favlist.noBrowseFolders");
+      elements.favlistGrid.appendChild(empty);
+    } else {
+      folders.forEach((folder) => {
+        const folderId = String(folder.id || "").trim();
+        const title = String(folder.title || folderId || t("favlist.folder")).trim();
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "follow-up-button favlist-browse-button";
+        button.dataset.folderId = folderId;
+        button.title = title;
+
+        const name = document.createElement("span");
+        name.className = "follow-up-name favlist-browse-name";
+        name.textContent = title;
+
+        const count = document.createElement("span");
+        count.className = "follow-up-count favlist-browse-count";
+        count.textContent = t("favlist.mediaCount", { count: Number(folder.media_count || folder.count || 0) });
+
+        button.append(name, count);
+
+        if (folder.avatar_url) {
+          const avatar = document.createElement("img");
+          avatar.className = "follow-up-avatar favlist-browse-avatar";
+          avatar.src = folder.avatar_url;
+          avatar.alt = "";
+          avatar.loading = "lazy";
+          avatar.referrerPolicy = "no-referrer";
+          button.append(avatar);
+        }
+
+        elements.favlistGrid.appendChild(button);
+      });
+    }
+    setFavlistBrowseMessage(state.favlistBrowseLoading ? t("favlist.loadingFolders") : "");
+    return;
+  }
+
+  const folder = selectedFavlistFolder();
+  if (elements.favlistBrowseAvatar) {
+    const avatarUrl = String(folder?.avatar_url || "").trim();
+    elements.favlistBrowseAvatar.classList.toggle("hidden", !avatarUrl);
+    if (avatarUrl) {
+      elements.favlistBrowseAvatar.src = avatarUrl;
+    } else {
+      elements.favlistBrowseAvatar.removeAttribute("src");
+    }
+  }
+  if (elements.favlistBrowseTitle) {
+    elements.favlistBrowseTitle.textContent = String(folder?.title || state.favlistBrowseSelectedFolderId || t("favlist.folder"));
+  }
+  if (elements.favlistBrowseCount) {
+    const totalCount = Number(folder?.media_count || folder?.count || items.length || 0);
+    elements.favlistBrowseCount.textContent = t("follow.itemCount", { shown: items.length, total: totalCount });
+  }
+  renderSearchResultItems(
+    elements.favlistSongResults,
+    items,
+    state.favlistBrowseLoading ? t("favlist.loadingItems") : t("favlist.noItems"),
+  );
+  setFavlistBrowseMessage(state.favlistBrowseLoading ? t("favlist.loadingItems") : "");
+}
+
+async function loadFavlistBrowse({
+  folderId = state.favlistBrowseSelectedFolderId,
+  query = "",
+  keepQuery = false,
+} = {}) {
+  state.favlistBrowseLoading = true;
+  state.favlistBrowseSelectedFolderId = String(folderId || "").trim();
+  renderFavlistBrowse();
+  let caughtError = null;
+  try {
+    const nextData = await fetchGatchaFavlistBrowse(state.favlistBrowseSelectedFolderId, query);
+    state.favlistBrowseData = nextData;
+    state.favlistBrowseSelectedFolderId = String(
+      nextData.selected_folder_id || state.favlistBrowseSelectedFolderId || "",
+    );
+    if (!keepQuery && elements.favlistSearchQuery) {
+      elements.favlistSearchQuery.value = String(nextData.query || "");
+    }
+  } catch (error) {
+    caughtError = error;
+  } finally {
+    state.favlistBrowseLoading = false;
+    renderFavlistBrowse();
+    if (caughtError) {
+      setFavlistBrowseMessage(caughtError.message, true);
+    }
+  }
+}
+
+async function refreshFavlistBrowseAfterPull() {
+  if (!state.favlistBrowseData) {
+    return;
+  }
+  state.favlistBrowseRenderSignature = "";
+  await loadFavlistBrowse({
+    folderId: state.favlistBrowseSelectedFolderId,
+    query: String(elements.favlistSearchQuery?.value || "").trim(),
+    keepQuery: true,
+  });
+}
+
 async function handleGatchaDraw() {
   setGatchaMessage(t("gatcha.drawing"));
   try {
     const response = await fetch("/api/gatcha/candidate", { headers: clientHeaders() });
     const payload = await response.json();
     if (!response.ok || !payload.ok) {
-      throw new Error(payload.error || t("gatcha.drawFailed"));
+      throw new Error(localizedApiMessage(payload.error) || t("gatcha.drawFailed"));
     }
 
     state.gatchaCandidate = payload.data;
@@ -1459,12 +1801,55 @@ function setFollowBrowseMessage(message, isError = false) {
   elements.followBrowseMessage.classList.toggle("is-error", Boolean(isError));
 }
 
+function setFavlistBrowseMessage(message, isError = false) {
+  if (!elements.favlistBrowseMessage) {
+    return;
+  }
+  elements.favlistBrowseMessage.textContent = message || "";
+  elements.favlistBrowseMessage.classList.toggle("is-error", Boolean(isError));
+}
+
 function setLarkSearchMessage(message, isError = false) {
   if (!elements.larkSearchMessage) {
     return;
   }
   elements.larkSearchMessage.textContent = message || "";
   elements.larkSearchMessage.classList.toggle("is-error", Boolean(isError));
+}
+
+function localizedCacheMessage(message, cacheStatus = "") {
+  const raw = String(message || "").trim();
+  const status = String(cacheStatus || "").trim();
+  if (!raw) {
+    return "";
+  }
+  if (raw === "已缓存" || raw === "缓存已完成" || raw.includes("缓存完成")) {
+    return t("cache.ready");
+  }
+  if (raw === "等待缓存" || raw === "等待缓存队列" || raw.includes("等待优先缓存")) {
+    return t("status.pendingCache");
+  }
+  if (raw === "正在校验缓存") {
+    return t("status.checking");
+  }
+  const progressMatch = raw.match(/^缓存中\s*([0-9.]+)%$/);
+  if (progressMatch) {
+    return `${t("status.caching")} ${progressMatch[1]}%`;
+  }
+  if (raw.startsWith("缓存失败:")) {
+    const detail = raw.slice("缓存失败:".length).trim();
+    return detail ? `${t("cache.failed")}: ${detail}` : t("cache.failed");
+  }
+  if (raw.includes("开始缓存视频") || raw.includes("正在缓存")) {
+    return t("cache.caching");
+  }
+  if (status === "ready") {
+    return t("cache.ready");
+  }
+  if (status === "failed" && raw === "缓存失败") {
+    return t("cache.failed");
+  }
+  return raw;
 }
 
 function syncLarkSearchInputs(value, source = "") {
@@ -1493,8 +1878,40 @@ function gatchaTaskBusy() {
   return Boolean(state.data?.gatcha?.busy);
 }
 
+function localizedGatchaTaskMessage(message, status = "") {
+  const raw = String(message || "").trim();
+  if (!raw) {
+    if (status === "success") {
+      return t("gatcha.refreshDone");
+    }
+    if (status === "partial") {
+      return t("gatcha.refreshPartial");
+    }
+    if (status === "failed") {
+      return t("gatcha.refreshFailed");
+    }
+    return "";
+  }
+  if (raw.includes("拉取任务执行中")) {
+    return t("gatcha.busyFallback");
+  }
+  if (raw.includes("部分更新")) {
+    return t("gatcha.refreshPartial");
+  }
+  if (raw.includes("更新完成") || raw.includes("重建完成")) {
+    return t("gatcha.refreshDone");
+  }
+  if (raw.includes("更新失败")) {
+    return t("gatcha.refreshFailed");
+  }
+  if (raw.includes("正在重建") || raw.includes("更新中")) {
+    return t("gatcha.refreshingBackground");
+  }
+  return raw;
+}
+
 function gatchaTaskBusyMessage() {
-  return state.data?.gatcha?.message || t("gatcha.busyFallback");
+  return localizedGatchaTaskMessage(state.data?.gatcha?.message, "running") || t("gatcha.busyFallback");
 }
 
 function syncGatchaTaskTerminalMessage() {
@@ -1526,7 +1943,8 @@ function syncGatchaTaskTerminalMessage() {
       : status === "partial"
         ? t("gatcha.refreshPartial")
         : t("gatcha.refreshFailed");
-  const detail = task.last_error ? `${task.last_message || fallback} ${task.last_error}` : task.last_message || fallback;
+  const message = localizedGatchaTaskMessage(task.last_message, status) || fallback;
+  const detail = task.last_error ? `${message} ${task.last_error}` : message;
   setGatchaUidMessage(detail, status !== "success");
 }
 
@@ -1745,6 +2163,9 @@ function render() {
   );
   syncListStageView();
   renderSearchCookieFace();
+  if (elements.favlistBrowserView && !elements.favlistBrowserView.classList.contains("hidden")) {
+    renderFavlistBrowse();
+  }
   renderGatchaUidFace();
   renderConfirmPopover();
   flushPendingSongTransitionOverlay();
@@ -2293,17 +2714,29 @@ function updateAdvanceDelaySliderFill(value) {
 }
 
 function renderCachePolicyControls(cachePolicy) {
+  const qualityLabelForValue = (value) => {
+    const normalized = String(value || "").trim();
+    const labels = {
+      "1080P 高码率": t("quality.1080pHighBitrate"),
+      "1080P 高清": t("quality.1080p"),
+      "720P 高清": t("quality.720p"),
+      "480P 清晰": t("quality.480p"),
+      "360P 流畅": t("quality.360p"),
+    };
+    return labels[normalized] || normalized;
+  };
   const rawChoices = Array.isArray(cachePolicy?.video_quality_choices)
     ? cachePolicy.video_quality_choices
     : [];
   const choices = rawChoices.length
     ? rawChoices.map((choice) => {
       if (typeof choice === "string") {
-        return { value: choice, label: choice };
+        return { value: choice, label: qualityLabelForValue(choice) };
       }
+      const value = String(choice?.value || "");
       return {
-        value: String(choice?.value || ""),
-        label: String(choice?.label || choice?.value || ""),
+        value,
+        label: qualityLabelForValue(choice?.label || value),
       };
     }).filter((choice) => choice.value)
     : [
@@ -3139,7 +3572,7 @@ function syncPlayerFrameCacheHint(currentItem) {
   if (!hint || !currentItem) {
     return;
   }
-  setTextContent(hint, currentItem.cache_message || "正在后台缓存");
+  setTextContent(hint, localizedCacheMessage(currentItem.cache_message, currentItem.cache_status) || t("player.cachingFallback"));
 }
 
 function teardownMountedPlayer({ preserveAdvanceDelayOverlay = false } = {}) {
@@ -3782,7 +4215,9 @@ function renderPlayer(currentItem, playbackMode) {
     elements.playerFrame.innerHTML = `
       <div class="empty-state">
         <p>${escapeHtml(t("player.preparingTracks"))}</p>
-        <p class="empty-hint">${escapeHtml(currentItem.cache_message || t("player.cachingFallback"))}</p>
+        <p class="empty-hint">${escapeHtml(
+          localizedCacheMessage(currentItem.cache_message, currentItem.cache_status) || t("player.cachingFallback"),
+        )}</p>
       </div>
     `;
     return;
@@ -4092,7 +4527,9 @@ function renderPlayer(currentItem, playbackMode) {
     setPlayerFrameContent(`
       <div class="empty-state">
         <p>${escapeHtml(t("player.preparingTracks"))}</p>
-        <p class="empty-hint">${escapeHtml(currentItem.cache_message || t("player.cachingFallback"))}</p>
+        <p class="empty-hint">${escapeHtml(
+          localizedCacheMessage(currentItem.cache_message, currentItem.cache_status) || t("player.cachingFallback"),
+        )}</p>
       </div>
     `);
     return;
@@ -4693,14 +5130,14 @@ function badgeTitleForItem(item) {
     return t("cache.ready");
   }
   if (item.cache_status === "failed") {
-    return item.cache_message || t("cache.failed");
+    return localizedCacheMessage(item.cache_message, item.cache_status) || t("cache.failed");
   }
-  return item.cache_message || t("cache.caching");
+  return localizedCacheMessage(item.cache_message, item.cache_status) || t("cache.caching");
 }
 
 function noteForItem(item) {
   if (item.cache_status === "failed") {
-    return item.cache_message || t("cache.failed");
+    return localizedCacheMessage(item.cache_message, item.cache_status) || t("cache.failed");
   }
   return "";
 }
@@ -5281,6 +5718,7 @@ async function confirmGatchaFavlistModal() {
     setGatchaUidMessage(
       t("favlist.pullResult", { folders: result?.matched_folder_count || 0, items: result?.item_count || 0 }),
     );
+    await refreshFavlistBrowseAfterPull();
   } catch (error) {
     setGatchaUidMessage(error.message, true);
   } finally {
@@ -5322,7 +5760,9 @@ async function confirmBindingModal() {
       elements.gatchaInitView.classList.remove("hidden");
       setGatchaMessage(t("gatcha.nozomi"));
     }
-    setFormMessage(intent.position === "next" ? t("binding.addedNext") : t("binding.addedTail"));
+    const message = intent.position === "next" ? t("binding.addedNext") : t("binding.addedTail");
+    setFormMessage(message);
+    setAppMessage(message);
     render();
   } catch (error) {
     if (error.code === "manual_binding_required") {
@@ -5429,7 +5869,9 @@ async function handleAddByUrl(url, position, anchorPoint) {
   setFormMessage(t("history.addingFromHistory"));
   try {
     state.data = await submitAddRequest(url, position, { requesterName });
-    setFormMessage(position === "next" ? t("history.addedNext") : t("history.addedTail"));
+    const message = position === "next" ? t("history.addedNext") : t("history.addedTail");
+    setFormMessage(message);
+    setAppMessage(message);
     render();
   } catch (error) {
     if (error.code === "manual_binding_required") {
@@ -5675,18 +6117,15 @@ async function checkAppUpdate(event) {
       const fallbackMessage = result?.switch_to_release_available
         ? t("service.switchReleasePrompt")
         : t("service.updateFoundPrompt");
-      const message = result?.message
-        ? t("service.openReleaseWithMessage", { message: result.message })
-        : fallbackMessage;
       openConfirm({
         type: "open-release",
         releaseUrl: result.release_url,
-        message,
+        message: fallbackMessage,
         ...point,
       });
       return;
     }
-    setAppMessage(result?.message || t("service.upToDate"));
+    setAppMessage(t("service.upToDate"));
   } catch (error) {
     const message = error?.name === "AbortError"
       ? t("service.updateTimeout")
@@ -6026,25 +6465,50 @@ elements.searchForm.addEventListener("submit", async (event) => {
   }
 });
 
-elements.searchResults.addEventListener("click", async (event) => {
+function searchResultRequestTarget(event, container) {
   const button = event.target.closest("button[data-url]");
-  if (!button) {
+  if (button && container?.contains(button)) {
+    return {
+      url: String(button.dataset.url || "").trim(),
+      anchor: button,
+      button,
+    };
+  }
+  if (!container?.closest("#search-modal")) {
+    return null;
+  }
+  const card = event.target.closest(".search-result-item[data-url]");
+  if (!card || !container.contains(card)) {
+    return null;
+  }
+  return {
+    url: String(card.dataset.url || "").trim(),
+    anchor: card,
+    button: null,
+  };
+}
+
+elements.searchResults.addEventListener("click", async (event) => {
+  const target = searchResultRequestTarget(event, elements.searchResults);
+  if (!target) {
+    return;
+  }
+  if (!target.url) {
     return;
   }
 
-  const url = String(button.dataset.url || "").trim();
-  if (!url) {
-    return;
+  if (target.button) {
+    target.button.disabled = true;
   }
-
-  button.disabled = true;
   try {
-    await handleAddByUrl(url, "tail", anchorPointForEvent(event, button));
+    await handleAddByUrl(target.url, "tail", anchorPointForEvent(event, target.anchor));
     hideSearchResults();
     setSearchMessage("");
     elements.searchQuery.value = "";
   } finally {
-    button.disabled = false;
+    if (target.button) {
+      target.button.disabled = false;
+    }
   }
 });
 
@@ -6135,19 +6599,22 @@ elements.larkSearchHitboxQuery?.addEventListener("input", () => {
 });
 
 elements.larkSearchResults?.addEventListener("click", async (event) => {
-  const button = event.target.closest("button[data-url]");
-  if (!button) {
+  const target = searchResultRequestTarget(event, elements.larkSearchResults);
+  if (!target) {
     return;
   }
-  const url = String(button.dataset.url || "").trim();
-  if (!url) {
+  if (!target.url) {
     return;
   }
-  button.disabled = true;
+  if (target.button) {
+    target.button.disabled = true;
+  }
   try {
-    await handleAddByUrl(url, "tail", anchorPointForEvent(event, button));
+    await handleAddByUrl(target.url, "tail", anchorPointForEvent(event, target.anchor));
   } finally {
-    button.disabled = false;
+    if (target.button) {
+      target.button.disabled = false;
+    }
   }
 });
 
@@ -6290,9 +6757,10 @@ elements.cacheQualitySelect?.addEventListener("change", async (event) => {
   if (!quality || quality === String(state.data?.cache_policy?.video_quality || "")) {
     return;
   }
+  const selectedLabel = event.target.selectedOptions?.[0]?.textContent || quality;
   await setCachePolicyPreference(
     { video_quality: quality },
-    t("service.qualityUpdated", { quality }),
+    t("service.qualityUpdated", { quality: selectedLabel }),
   );
 });
 
@@ -7023,6 +7491,75 @@ elements.listStage.addEventListener("wheel", (event) => {
 elements.gatchaButton.addEventListener("click", handleGatchaDraw);
 elements.gatchaRetryButton.addEventListener("click", handleGatchaDraw);
 
+elements.searchExpandButton?.addEventListener("click", () => {
+  if (elements.searchModalPlaceholder && elements.searchCardContent && elements.searchModal) {
+    elements.searchModalPlaceholder.appendChild(elements.searchCardContent);
+    elements.searchModal.classList.remove("hidden");
+    elements.searchModalPlaceholder.classList.remove("hidden");
+    elements.favlistBrowserView?.classList.add("hidden");
+    elements.searchModalOtherView?.classList.add("hidden");
+    elements.searchSidebarItems?.forEach((btn) => {
+      btn.classList.toggle("active", btn.dataset.target === "search");
+    });
+    if (elements.searchExpandButton) {
+      elements.searchExpandButton.style.display = "none";
+    }
+  }
+});
+
+elements.searchModalClose?.addEventListener("click", () => {
+  if (elements.searchOriginalContainer && elements.searchCardContent && elements.searchModal) {
+    elements.searchOriginalContainer.appendChild(elements.searchCardContent);
+    elements.searchModal.classList.add("hidden");
+    if (elements.searchExpandButton) {
+      elements.searchExpandButton.style.display = "";
+    }
+  }
+});
+
+elements.searchModalBackdrop?.addEventListener("click", () => {
+  if (elements.searchOriginalContainer && elements.searchCardContent && elements.searchModal) {
+    elements.searchOriginalContainer.appendChild(elements.searchCardContent);
+    elements.searchModal.classList.add("hidden");
+    if (elements.searchExpandButton) {
+      elements.searchExpandButton.style.display = "";
+    }
+  }
+});
+
+elements.searchSidebarItems?.forEach((btn) => {
+  btn.addEventListener("click", () => {
+    elements.searchSidebarItems.forEach((b) => {
+      b.classList.remove("active");
+    });
+    btn.classList.add("active");
+
+    const target = btn.dataset.target;
+    if (target === "search") {
+      elements.searchModalPlaceholder?.classList.remove("hidden");
+      elements.favlistBrowserView?.classList.add("hidden");
+      elements.searchModalOtherView?.classList.add("hidden");
+    } else if (target === "favlist") {
+      elements.searchModalPlaceholder?.classList.add("hidden");
+      elements.favlistBrowserView?.classList.remove("hidden");
+      elements.searchModalOtherView?.classList.add("hidden");
+      if (!state.favlistBrowseData && !state.favlistBrowseLoading) {
+        state.favlistBrowseSelectedFolderId = "";
+        if (elements.favlistSearchQuery) {
+          elements.favlistSearchQuery.value = "";
+        }
+        loadFavlistBrowse({ folderId: "", query: "" });
+      } else {
+        renderFavlistBrowse();
+      }
+    } else {
+      elements.searchModalPlaceholder?.classList.add("hidden");
+      elements.favlistBrowserView?.classList.add("hidden");
+      elements.searchModalOtherView?.classList.remove("hidden");
+    }
+  });
+});
+
 elements.searchCookieToggle?.addEventListener("click", () => {
   state.searchLarkVisible = false;
   state.searchCookieVisible = !state.searchCookieVisible;
@@ -7078,21 +7615,78 @@ elements.followSearchForm?.addEventListener("submit", async (event) => {
 });
 
 elements.followSongResults?.addEventListener("click", async (event) => {
-  const button = event.target.closest("button[data-url]");
+  const target = searchResultRequestTarget(event, elements.followSongResults);
+  if (!target) {
+    return;
+  }
+  if (!target.url) {
+    return;
+  }
+
+  if (target.button) {
+    target.button.disabled = true;
+  }
+  try {
+    await handleAddByUrl(target.url, "tail", anchorPointForEvent(event, target.anchor));
+  } finally {
+    if (target.button) {
+      target.button.disabled = false;
+    }
+  }
+});
+
+elements.favlistGrid?.addEventListener("click", async (event) => {
+  const button = event.target.closest("button[data-folder-id]");
   if (!button) {
     return;
   }
+  const folderId = String(button.dataset.folderId || "").trim();
+  if (!folderId) {
+    return;
+  }
+  state.favlistBrowseSelectedFolderId = folderId;
+  if (elements.favlistSearchQuery) {
+    elements.favlistSearchQuery.value = "";
+  }
+  await loadFavlistBrowse({ folderId, query: "" });
+});
 
-  const url = String(button.dataset.url || "").trim();
-  if (!url) {
+elements.favlistBrowseBack?.addEventListener("click", () => {
+  state.favlistBrowseSelectedFolderId = "";
+  if (elements.favlistSearchQuery) {
+    elements.favlistSearchQuery.value = "";
+  }
+  renderFavlistBrowse();
+});
+
+elements.favlistSearchForm?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const query = String(elements.favlistSearchQuery?.value || "").trim();
+  await loadFavlistBrowse({
+    folderId: state.favlistBrowseSelectedFolderId,
+    query,
+    keepQuery: true,
+  });
+});
+
+elements.favlistSongResults?.addEventListener("click", async (event) => {
+  const target = searchResultRequestTarget(event, elements.favlistSongResults);
+  if (!target) {
+    return;
+  }
+  if (!target.url) {
     return;
   }
 
-  button.disabled = true;
+  if (target.button) {
+    target.button.disabled = true;
+  }
   try {
-    await handleAddByUrl(url, "tail", anchorPointForEvent(event, button));
+    await handleAddByUrl(target.url, "tail", anchorPointForEvent(event, target.anchor));
   } finally {
-    button.disabled = false;
+    if (target.button) {
+      target.button.disabled = false;
+    }
   }
 });
 
@@ -7175,7 +7769,7 @@ elements.gatchaUidForm?.addEventListener("submit", async (event) => {
   try {
     const preview = await previewGatchaUid(uid);
     const ownerName = preview?.name || `UID ${preview?.uid || uid}`;
-    const modeLabel = preview?.cache_mode_label || (preview?.cache_mode === "incremental" ? t("gatcha.latestMode") : t("gatcha.allMode"));
+    const modeLabel = preview?.cache_mode === "incremental" ? t("gatcha.latestMode") : t("gatcha.allMode");
     const followedPrefix = preview?.already_followed ? t("gatcha.alreadyFollowedPrefix") : "";
     const point = anchorPointForEvent(event, elements.addGatchaUidButton);
     openConfirm({

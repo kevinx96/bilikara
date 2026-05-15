@@ -22,7 +22,9 @@ from .bilibili import (
     ManualBindingRequiredError,
     MISSING_BILIBILI_COOKIE_MESSAGE,
     add_gatcha_uid,
+    annotate_gatcha_local_status,
     browse_gatcha_cache,
+    browse_gatcha_favlist,
     effective_bilibili_cookie,
     fetch_gatcha_candidate,
     gatcha_task_snapshot,
@@ -149,7 +151,11 @@ class AppContext:
             if not self._startup_gatcha_refresh_bypass_available:
                 return self.refresh_gatcha_cache_in_background()
             self._startup_gatcha_refresh_bypass_available = False
-        return refresh_gatcha_cache_in_background(use_global_lock=False, upload_default_uids_to_lark=False)
+        return refresh_gatcha_cache_in_background(
+            use_global_lock=False,
+            upload_default_uids_to_lark=False,
+            startup_schema_rebuild=True,
+        )
 
     def add_item(self, item, *, position: str, requester_name: str) -> None:
         self.store.add_item(item, position=position, requester_name=requester_name)
@@ -607,6 +613,7 @@ class BilikaraHandler(BaseHTTPRequestHandler):
                     results = search_lark_pool_table(query, int(table_index), limit=limit)
                 else:
                     results = search_lark_pool(query, limit=limit)
+                results = annotate_gatcha_local_status(results)
                 self._write_json({"ok": True, "data": {"items": results}})
             except Exception as e:
                 self._write_json({"ok": False, "error": str(e)})
@@ -617,6 +624,15 @@ class BilikaraHandler(BaseHTTPRequestHandler):
             search_query = route_query.get("q", [""])[0]
             try:
                 self._write_json({"ok": True, "data": browse_gatcha_cache(selected_uid, search_query)})
+            except Exception as e:
+                self._write_json({"ok": False, "error": str(e)})
+            return
+        if route == "/api/gatcha/favlist/browse":
+            route_query = parse_qs(urlparse(self.path).query)
+            selected_folder_id = route_query.get("folder_id", [""])[0]
+            search_query = route_query.get("q", [""])[0]
+            try:
+                self._write_json({"ok": True, "data": browse_gatcha_favlist(selected_folder_id, search_query)})
             except Exception as e:
                 self._write_json({"ok": False, "error": str(e)})
             return

@@ -1803,6 +1803,7 @@ select:disabled {
 
 
 .follow-up-button {
+  position: relative;
   display: grid;
   min-height: 68px;
   gap: 6px;
@@ -1817,13 +1818,21 @@ select:disabled {
   transition: border-color 0.18s ease, background 0.18s ease;
 }
 
-
-
-
 .follow-up-button:active {
   transform: translateY(1px);
 }
 
+.follow-up-avatar {
+  position: absolute;
+  bottom: 4px;
+  right: 8px;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  object-fit: cover;
+  background: rgba(255, 255, 255, 0.1);
+  pointer-events: none;
+}
 
 .follow-up-name {
   min-width: 0;
@@ -1843,7 +1852,7 @@ select:disabled {
 
 .follow-browser-head {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: auto auto minmax(0, 1fr);
   gap: 10px;
   align-items: center;
 }
@@ -1851,6 +1860,14 @@ select:disabled {
 
 .follow-browser-title {
   min-width: 0;
+}
+
+.follow-browser-avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  object-fit: cover;
+  background: rgba(255, 255, 255, 0.1);
 }
 
 

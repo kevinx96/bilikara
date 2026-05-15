@@ -36,7 +36,17 @@ _ACTIVE_TABLES: list[dict[str, Any]] = []
 _TABLE_PROBED: set[int] = set()
 _FIELD_TYPES_BY_TABLE: dict[tuple[str, str], dict[str, Any]] = {}
 _REQUIRED_FIELD_NAMES = {"mid", "bvid", "title", "url", "owner_name", "owner_url"}
-_OPTIONAL_FIELD_NAMES = {"tag_1", "tag_2", "tag_3", "tag_4", "tag_5", "tag_status"}
+_OPTIONAL_FIELD_NAMES = {
+    "cover_url",
+    "played_count",
+    "preserved_1",
+    "tag_1",
+    "tag_2",
+    "tag_3",
+    "tag_4",
+    "tag_5",
+    "tag_status",
+}
 _WRITE_FIELD_NAMES = _REQUIRED_FIELD_NAMES | _OPTIONAL_FIELD_NAMES
 _REQUIRED_SEARCH_FIELDS = {"bvid", "title", "url"}
 _DEBUG_LOGS = str(os.environ.get("BILIKARA_LARK_DEBUG") or "").strip().lower() in {"1", "true", "yes", "on"}
@@ -401,7 +411,7 @@ def _record_to_item(record: dict) -> dict | None:
         url = f"https://www.bilibili.com/video/{bvid}"
     if not bvid or not title or not url:
         return None
-    return {
+    item = {
         "mid": _field_text(fields.get("mid")).strip(),
         "bvid": bvid,
         "title": title,
@@ -410,6 +420,11 @@ def _record_to_item(record: dict) -> dict | None:
         "owner_url": _field_text(fields.get("owner_url")).strip(),
         "source": "bilikara",
     }
+    for key in ("cover_url", "played_count", "preserved_1"):
+        value = _field_text(fields.get(key)).strip()
+        if value:
+            item[key] = value
+    return item
 
 
 def _search_lark_pool_table(
@@ -482,7 +497,7 @@ def _cloudflare_search_item(raw_item: Any) -> dict | None:
         url = f"https://www.bilibili.com/video/{bvid}"
     if not bvid or not title or not url:
         return None
-    return {
+    item = {
         "mid": _field_text(raw_item.get("mid")).strip(),
         "bvid": bvid,
         "title": title,
@@ -491,6 +506,11 @@ def _cloudflare_search_item(raw_item: Any) -> dict | None:
         "owner_url": _field_text(raw_item.get("owner_url")).strip(),
         "source": "cloudflare",
     }
+    for key in ("cover_url", "played_count", "preserved_1"):
+        value = _field_text(raw_item.get(key)).strip()
+        if value:
+            item[key] = value
+    return item
 
 
 def _cloudflare_search_items(payload: Any) -> list[Any]:
@@ -605,6 +625,19 @@ def normalize_pool_entry(entry: dict) -> dict | None:
         "owner_name": str(entry.get("owner_name") or entry.get("author") or "").strip(),
         "owner_url": str(entry.get("owner_url") or "").strip(),
     }
+    for key in (
+        "cover_url",
+        "rank",
+        "played_count",
+        "preserved_1",
+        "preserved_2",
+        "preserved_3",
+        "preserved_4",
+        "preserved_5",
+    ):
+        value = entry.get(key)
+        if value is not None:
+            normalized[key] = str(value).strip()
     for key in ("tag_1", "tag_2", "tag_3", "tag_4", "tag_5"):
         value = entry.get(key)
         if value is not None:
@@ -639,6 +672,7 @@ def append_cloudflare_pool_entries(entries: list[dict]) -> dict:
     return {
         "attempted": int(payload.get("attempted") or len(normalized)),
         "added": int(payload.get("added") or 0),
+        "updated_existing": int(payload.get("updated_existing") or 0),
         "skipped_existing": int(payload.get("skipped_existing") or 0),
         "feishu_queued": int(payload.get("feishu_queued") or 0),
     }
