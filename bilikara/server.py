@@ -22,6 +22,7 @@ from .bilibili import (
     ManualBindingRequiredError,
     MISSING_BILIBILI_COOKIE_MESSAGE,
     add_gatcha_uid,
+    annotate_gatcha_local_status,
     browse_gatcha_cache,
     browse_gatcha_favlist,
     effective_bilibili_cookie,
@@ -612,6 +613,7 @@ class BilikaraHandler(BaseHTTPRequestHandler):
                     results = search_lark_pool_table(query, int(table_index), limit=limit)
                 else:
                     results = search_lark_pool(query, limit=limit)
+                results = annotate_gatcha_local_status(results)
                 self._write_json({"ok": True, "data": {"items": results}})
             except Exception as e:
                 self._write_json({"ok": False, "error": str(e)})

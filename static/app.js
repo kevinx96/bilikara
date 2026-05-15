@@ -1315,6 +1315,14 @@ function formatSearchDuration(value) {
 }
 
 function searchResultStatusLabel(item) {
+  const localSource = String(item?.local_source || "").trim();
+  if (localSource === "favlist") {
+    return t("search.favorited");
+  }
+  if (localSource === "follow") {
+    return t("search.followed");
+  }
+
   const source = String(item?.source || "").trim();
   if (source === "bilikara" || source === "cloudflare") {
     return "";

@@ -2072,6 +2072,45 @@ def _gatcha_entry_payload(entry: dict) -> dict:
     return payload
 
 
+def annotate_gatcha_local_status(items: list[dict]) -> list[dict]:
+    if not isinstance(items, list):
+        return []
+
+    followed_by_bvid: dict[str, dict] = {}
+    for entry in _local_gatcha_candidates():
+        if not isinstance(entry, dict):
+            continue
+        bvid = str(entry.get("bvid") or "").strip()
+        if bvid:
+            followed_by_bvid.setdefault(bvid, entry)
+
+    favorited_by_bvid: dict[str, dict] = {}
+    for entry in _local_gatcha_favlist_candidates():
+        if not isinstance(entry, dict):
+            continue
+        bvid = str(entry.get("bvid") or "").strip()
+        if bvid:
+            favorited_by_bvid.setdefault(bvid, entry)
+
+    annotated: list[dict] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        next_item = dict(item)
+        bvid = str(next_item.get("bvid") or "").strip()
+        if bvid in favorited_by_bvid:
+            local_entry = favorited_by_bvid[bvid]
+            next_item["local_source"] = "favlist"
+            next_item.setdefault("fav_uid", str(local_entry.get("fav_uid") or ""))
+            next_item.setdefault("fav_folder_title", str(local_entry.get("fav_folder_title") or ""))
+        elif bvid in followed_by_bvid:
+            local_entry = followed_by_bvid[bvid]
+            next_item["local_source"] = "follow"
+            next_item.setdefault("mid", str(local_entry.get("mid") or ""))
+        annotated.append(next_item)
+    return annotated
+
+
 def _profile_from_cached_entries(mid: str, entries: list[dict]) -> dict:
     for entry in entries:
         if not isinstance(entry, dict):
