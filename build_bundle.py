@@ -12,6 +12,7 @@ ROOT_DIR = Path(__file__).resolve().parent
 VERSION_FILE = ROOT_DIR / "APP_VERSION"
 REQUIRED_TOOL_BINARIES = ("ffmpeg",)
 OPTIONAL_TOOL_BINARIES = ("ffprobe",)
+PYTHON_HTTPS_HIDDEN_IMPORTS = ("ssl", "_ssl", "urllib.request", "http.client")
 
 
 def main() -> None:
@@ -19,6 +20,8 @@ def main() -> None:
     static_arg = f"{ROOT_DIR / 'static'}{data_separator}static"
     version_arg = f"{VERSION_FILE}{data_separator}."
     VERSION_FILE.write_text(_bundle_version(), encoding="utf-8")
+    spec_dir = ROOT_DIR / "build"
+    spec_dir.mkdir(exist_ok=True)
 
     command = [
         sys.executable,
@@ -29,12 +32,15 @@ def main() -> None:
         "--windowed",
         "--name",
         APP_NAME,
+        "--specpath",
+        str(spec_dir),
         "--add-data",
         static_arg,
         "--add-data",
         version_arg,
         str(ROOT_DIR / "start_bilikara.py"),
     ]
+    command.extend(_python_https_args(data_separator, verbose=True))
     command.extend(_bundled_binary_args(data_separator, verbose=True))
 
     if platform.system() == "Darwin":
@@ -91,6 +97,52 @@ def _bundled_binary_args(data_separator: str, *, verbose: bool = False) -> list[
             print(f"Optional tools not bundled: {', '.join(optional_missing)}")
 
     return args
+
+
+def _python_https_args(data_separator: str, *, verbose: bool = False) -> list[str]:
+    args: list[str] = []
+    for module_name in PYTHON_HTTPS_HIDDEN_IMPORTS:
+        args.extend(["--hidden-import", module_name])
+
+    ssl_binaries = _python_https_binary_paths()
+    for source in ssl_binaries:
+        args.extend(["--add-binary", f"{source.resolve()}{data_separator}."])
+
+    if verbose:
+        print("Bundling Python HTTPS support:")
+        print(f"  - hidden imports: {', '.join(PYTHON_HTTPS_HIDDEN_IMPORTS)}")
+        if ssl_binaries:
+            for source in ssl_binaries:
+                print(f"  - {source}")
+        elif platform.system() == "Windows":
+            print("  - no OpenSSL DLLs found next to this Python installation")
+
+    return args
+
+
+def _python_https_binary_paths() -> list[Path]:
+    if platform.system() != "Windows":
+        return []
+
+    roots = [
+        Path(sys.prefix),
+        Path(sys.base_prefix),
+        Path(sys.exec_prefix),
+        Path(sys.base_exec_prefix),
+    ]
+    search_dirs: list[Path] = []
+    for root in roots:
+        search_dirs.extend([root, root / "DLLs", root / "Library" / "bin"])
+
+    paths: dict[str, Path] = {}
+    for directory in search_dirs:
+        if not directory.exists():
+            continue
+        for pattern in ("libssl*.dll", "libcrypto*.dll"):
+            for candidate in directory.glob(pattern):
+                if candidate.is_file():
+                    paths[str(candidate.resolve()).lower()] = candidate
+    return list(paths.values())
 
 
 def _resolve_bundle_binary_path(binary_name: str) -> Path | None:

@@ -873,6 +873,28 @@ class CacheManagerPolicyTest(unittest.TestCase):
             finally:
                 manager.shutdown()
 
+    def test_select_asset_uses_windows_arm64_package(self):
+        release = {
+            "assets": [
+                {
+                    "name": "BBDown_1.6.3_20240814_win-x64.zip",
+                    "browser_download_url": "https://example.test/win-x64.zip",
+                },
+                {
+                    "name": "BBDown_1.6.3_20240814_win-arm64.zip",
+                    "browser_download_url": "https://example.test/win-arm64.zip",
+                },
+            ],
+        }
+
+        with patch("bilikara.cache.platform.system", return_value="Windows"), patch(
+            "bilikara.cache.platform.machine",
+            return_value="ARM64",
+        ):
+            selected = CacheManager._select_asset(object(), release)
+
+        self.assertEqual(selected["name"], "BBDown_1.6.3_20240814_win-arm64.zip")
+
     def test_ensure_ffmpeg_syncs_bundled_binary_into_runtime_tools(self):
         vendor_dir = Path(self.temp_dir.name) / "vendor"
         tools_dir = Path(self.temp_dir.name) / "tools" / "bbdown"

@@ -2013,6 +2013,8 @@ class CacheManager:
             token = "osx-arm64"
         elif system == "windows" and machine in {"x86_64", "amd64"}:
             token = "win-x64"
+        elif system == "windows" and machine in {"arm64", "aarch64"}:
+            token = "win-arm64"
         else:
             raise RuntimeError(f"当前平台暂未适配 BBDown 自动下载: {system}/{machine}")
 
