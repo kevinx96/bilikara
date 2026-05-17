@@ -142,6 +142,17 @@ const state = {
   favlistBrowseSelectedFolderId: "",
   favlistBrowseLoading: false,
   favlistBrowseRenderSignature: "",
+  d1BrowseKind: "",
+  d1BrowseLetter: "",
+  d1BrowseTag: "",
+  d1BrowseLocale: "",
+  d1BrowseAliases: [],
+  d1BrowseQuery: "",
+  d1BrowseData: null,
+  d1BrowseLoading: false,
+  d1BrowseSeq: 0,
+  d1BrowseResolvedCounts: new Map(),
+  d1BrowseItemCache: new Map(),
   gatchaUidVisible: false,
   gatchaUidSaving: false,
   gatchaRefreshSaving: false,
@@ -1137,6 +1148,37 @@ async function searchLarkPoolTable(query, tableIndex) {
   return Array.isArray(payload.data?.items) ? payload.data.items : [];
 }
 
+async function fetchD1Browse({ kind = "name", letter = "", query = "", tag = "", locale = "", limit = 100 } = {}) {
+  const params = new URLSearchParams();
+  params.set("kind", kind === "artist" ? "artist" : "name");
+  params.set("limit", String(limit));
+  const normalizedLetter = String(letter || "").trim().toUpperCase();
+  const normalizedQuery = String(query || "").trim();
+  const normalizedTag = String(tag || "").trim();
+  const normalizedLocale = String(locale || "").trim();
+  if (normalizedLetter) {
+    params.set("letter", normalizedLetter);
+  }
+  if (normalizedQuery) {
+    params.set("q", normalizedQuery);
+  }
+  if (normalizedTag) {
+    params.set("tag", normalizedTag);
+  }
+  if (normalizedLocale) {
+    params.set("locale", normalizedLocale);
+  }
+  const response = await fetch(`/api/d1/browse?${params.toString()}`, {
+    cache: "no-store",
+    headers: clientHeaders(),
+  });
+  const payload = await response.json();
+  if (!response.ok || !payload.ok) {
+    throw new Error(localizedApiMessage(payload.error) || t("error.larkSearchFailed"));
+  }
+  return payload.data || { kind, letter: normalizedLetter, query: normalizedQuery, tag: normalizedTag, tags: [], items: [] };
+}
+
 async function fetchGatchaBrowse(uid = "", query = "") {
   const params = new URLSearchParams();
   const normalizedUid = String(uid || "").trim();
@@ -1472,6 +1514,416 @@ function appendSearchResultItems(container, items) {
 
 function renderSearchResults(items) {
   renderSearchResultItems(elements.searchResults, items);
+}
+
+function d1BrowseTitle(kind = state.d1BrowseKind) {
+  return kind === "artist" ? t("search.artistBrowse") : t("search.nameBrowse");
+}
+
+function d1BrowsePickLetterText(kind = state.d1BrowseKind) {
+  return kind === "artist" ? t("search.browsePickArtistLetter") : t("search.browsePickLetter");
+}
+
+function d1BrowseSearchPlaceholder(kind = state.d1BrowseKind) {
+  return state.d1BrowseTag ? t("search.browseItemPlaceholder") : t("search.tagBrowsePlaceholder", { title: d1BrowseTitle(kind) });
+}
+
+const D1_BROWSE_ITEM_LIMIT = 450;
+const D1_BROWSE_TAG_LIMIT = 450;
+const D1_BROWSE_MERGE_MIN_LENGTH = 5;
+const D1_BROWSE_COUNT_CONCURRENCY = 4;
+const D1_BROWSE_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ#".split("");
+
+function normalizeD1BrowseTagForMerge(value) {
+  return String(value || "")
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[\u200b-\u200d\ufeff]/g, "")
+    .replace(/[\s"'`._!?,:;~\-\/\\|()[\]{}<>]+/g, "")
+    .replace(/[\u2018-\u201f\u3000-\u303f\uff01-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65]/g, "");
+}
+
+function d1BrowseMergeLength(value) {
+  return Array.from(value || "").length;
+}
+
+function d1BrowseMergeCandidate(entry) {
+  const tag = String(entry?.tag || "").trim();
+  const locale = String(entry?.locale || "").trim();
+  const normalized = normalizeD1BrowseTagForMerge(tag);
+  return {
+    tag,
+    locale,
+    normalized,
+    count: Number(entry?.count || 0),
+    yomi: String(entry?.yomi || ""),
+    letter: String(entry?.letter || ""),
+  };
+}
+
+function isBetterD1BrowseMergeLabel(candidate, current) {
+  const candidateLength = d1BrowseMergeLength(candidate.normalized);
+  const currentLength = d1BrowseMergeLength(current.normalized);
+  if (candidateLength !== currentLength) {
+    return candidateLength < currentLength;
+  }
+  if (candidate.count !== current.count) {
+    return candidate.count > current.count;
+  }
+  return false;
+}
+
+function mergeD1BrowseTags(tags) {
+  const groups = [];
+  (Array.isArray(tags) ? tags : []).forEach((entry) => {
+    const candidate = d1BrowseMergeCandidate(entry);
+    if (!candidate.tag) {
+      return;
+    }
+    const canMerge = d1BrowseMergeLength(candidate.normalized) >= D1_BROWSE_MERGE_MIN_LENGTH;
+    let group = null;
+    if (canMerge) {
+      group = groups.find((item) => (
+        item.canMerge
+        && item.normalized
+        && (candidate.normalized.startsWith(item.normalized) || item.normalized.startsWith(candidate.normalized))
+      ));
+    }
+    if (!group) {
+      groups.push({
+        ...candidate,
+        canMerge,
+        aliases: [{ tag: candidate.tag, locale: candidate.locale }],
+      });
+      return;
+    }
+    group.count += candidate.count;
+    group.aliases.push({ tag: candidate.tag, locale: candidate.locale });
+    if (isBetterD1BrowseMergeLabel(candidate, group)) {
+      group.tag = candidate.tag;
+      group.locale = candidate.locale;
+      group.normalized = candidate.normalized;
+      group.yomi = candidate.yomi;
+      group.letter = candidate.letter;
+    }
+  });
+  groups.forEach((group) => {
+    group.aliases = uniqueD1BrowseAliases(group.aliases, group.tag, group.locale);
+    group.aliasKey = d1BrowseAliasKey(group.aliases, { kind: state.d1BrowseKind, query: "" });
+    if (state.d1BrowseResolvedCounts.has(group.aliasKey)) {
+      group.count = state.d1BrowseResolvedCounts.get(group.aliasKey);
+    }
+  });
+  return groups;
+}
+
+function uniqueD1BrowseAliases(aliases, fallbackTag = "", fallbackLocale = "") {
+  const seen = new Set();
+  const results = [];
+  const source = Array.isArray(aliases) && aliases.length ? aliases : [{ tag: fallbackTag, locale: fallbackLocale }];
+  source.forEach((entry) => {
+    const tag = String(entry?.tag || "").trim();
+    const locale = String(entry?.locale || "").trim();
+    if (!tag) {
+      return;
+    }
+    const key = `${locale}\n${tag}`;
+    if (seen.has(key)) {
+      return;
+    }
+    seen.add(key);
+    results.push({ tag, locale });
+  });
+  return results;
+}
+
+function d1BrowseAliasKey(aliases, { kind = state.d1BrowseKind, query = state.d1BrowseQuery } = {}) {
+  const normalizedAliases = uniqueD1BrowseAliases(aliases)
+    .map((entry) => ({ tag: entry.tag, locale: entry.locale }))
+    .sort((left, right) => `${left.locale}\n${left.tag}`.localeCompare(`${right.locale}\n${right.tag}`));
+  return JSON.stringify({
+    kind: kind === "artist" ? "artist" : "name",
+    query: String(query || "").trim(),
+    aliases: normalizedAliases,
+  });
+}
+
+function d1BrowseItemKey(item) {
+  return String(item?.bvid || item?.url || item?.id || `${item?.title || ""}\n${searchResultOwnerName(item)}`).trim();
+}
+
+function mergeD1BrowseItemPayloads(payloads) {
+  const seen = new Set();
+  const items = [];
+  (Array.isArray(payloads) ? payloads : []).forEach((payload) => {
+    (Array.isArray(payload?.items) ? payload.items : []).forEach((item) => {
+      const key = d1BrowseItemKey(item);
+      if (!key || seen.has(key)) {
+        return;
+      }
+      seen.add(key);
+      items.push(item);
+    });
+  });
+  return items;
+}
+
+async function resolveD1BrowseMergedTagCounts(groups, { kind, letter, query } = {}) {
+  const targets = (Array.isArray(groups) ? groups : []).filter((group) => (
+    Array.isArray(group.aliases)
+    && group.aliases.length > 1
+    && group.aliasKey
+    && !state.d1BrowseResolvedCounts.has(group.aliasKey)
+  ));
+  if (!targets.length) {
+    return;
+  }
+  let targetIndex = 0;
+  const workerCount = Math.min(D1_BROWSE_COUNT_CONCURRENCY, targets.length);
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (targetIndex < targets.length) {
+      const group = targets[targetIndex];
+      targetIndex += 1;
+      try {
+        const payloads = await Promise.all(group.aliases.map((alias) => fetchD1Browse({
+          kind,
+          letter,
+          query,
+          tag: alias.tag,
+          locale: alias.locale,
+          limit: D1_BROWSE_ITEM_LIMIT,
+        })));
+        const items = mergeD1BrowseItemPayloads(payloads);
+        state.d1BrowseResolvedCounts.set(group.aliasKey, items.length);
+        state.d1BrowseItemCache.set(group.aliasKey, items);
+      } catch (error) {
+        // Keep the optimistic aggregate count if the exact count fails.
+      }
+    }
+  }));
+}
+
+function ensureD1BrowseView() {
+  if (!elements.searchModalOtherView) {
+    return null;
+  }
+  elements.searchModalOtherView.classList.add("search-modal-browser-view");
+  let view = elements.searchModalOtherView.querySelector("[data-d1-browse-view]");
+  if (view) {
+    return view;
+  }
+  elements.searchModalOtherView.textContent = "";
+  view = document.createElement("div");
+  view.className = "tag-browser";
+  view.dataset.d1BrowseView = "1";
+  view.innerHTML = `
+    <form class="tag-browser-search" data-d1-browse-search>
+      <input type="text" autocomplete="off" data-d1-browse-query>
+      <button type="submit" class="next-button" data-d1-browse-submit></button>
+    </form>
+    <div class="tag-browser-alphabet" data-d1-browse-alphabet></div>
+    <div class="tag-browser-nav">
+      <button type="button" class="tag-browser-back hidden" data-d1-browse-back></button>
+      <div class="tag-browser-current" data-d1-browse-current></div>
+    </div>
+    <div class="tag-browser-tags" data-d1-browse-tags></div>
+    <div class="search-results hidden" data-d1-browse-results></div>
+    <p class="gatcha-message tag-browser-message" data-d1-browse-message role="status"></p>
+  `;
+  elements.searchModalOtherView.appendChild(view);
+  return view;
+}
+
+function renderD1BrowseView() {
+  const view = ensureD1BrowseView();
+  if (!view) {
+    return;
+  }
+  const kind = state.d1BrowseKind || "name";
+  const title = d1BrowseTitle(kind);
+  const queryInput = view.querySelector("[data-d1-browse-query]");
+  const submitButton = view.querySelector("[data-d1-browse-submit]");
+  const alphabet = view.querySelector("[data-d1-browse-alphabet]");
+  const backButton = view.querySelector("[data-d1-browse-back]");
+  const current = view.querySelector("[data-d1-browse-current]");
+  const tagGrid = view.querySelector("[data-d1-browse-tags]");
+  const results = view.querySelector("[data-d1-browse-results]");
+  const message = view.querySelector("[data-d1-browse-message]");
+
+  if (queryInput && document.activeElement !== queryInput) {
+    queryInput.value = state.d1BrowseQuery || "";
+  }
+  if (queryInput) {
+    queryInput.placeholder = d1BrowseSearchPlaceholder(kind);
+  }
+  if (submitButton) {
+    submitButton.textContent = t("search.submit");
+    submitButton.disabled = state.d1BrowseLoading;
+  }
+  if (alphabet) {
+    alphabet.innerHTML = "";
+    D1_BROWSE_LETTERS.forEach((letter) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "tag-letter-button";
+      button.dataset.letter = letter;
+      button.textContent = letter;
+      button.classList.toggle("active", state.d1BrowseLetter === letter);
+      button.disabled = state.d1BrowseLoading;
+      alphabet.appendChild(button);
+    });
+  }
+  if (backButton) {
+    backButton.textContent = t("common.back");
+    backButton.classList.toggle("hidden", !state.d1BrowseLetter);
+    backButton.disabled = state.d1BrowseLoading;
+  }
+
+  const tags = mergeD1BrowseTags(state.d1BrowseData?.tags);
+  const items = Array.isArray(state.d1BrowseData?.items) ? state.d1BrowseData.items : [];
+  if (current) {
+    const parts = [title];
+    if (state.d1BrowseLetter) {
+      parts.push(state.d1BrowseLetter);
+    }
+    if (state.d1BrowseTag) {
+      parts.push(state.d1BrowseTag);
+    }
+    current.textContent = parts.join(" / ");
+  }
+  if (tagGrid) {
+    tagGrid.innerHTML = "";
+    tagGrid.classList.toggle("hidden", Boolean(state.d1BrowseTag));
+    if (!state.d1BrowseTag) {
+      if (state.d1BrowseLoading) {
+        const loading = document.createElement("div");
+        loading.className = "search-empty";
+        loading.textContent = t("search.browseLoading");
+        tagGrid.appendChild(loading);
+      } else if (!state.d1BrowseLetter) {
+        const empty = document.createElement("div");
+        empty.className = "search-empty";
+        empty.textContent = d1BrowsePickLetterText(kind);
+        tagGrid.appendChild(empty);
+      } else if (!tags.length) {
+        const empty = document.createElement("div");
+        empty.className = "search-empty";
+        empty.textContent = t("search.browseNoTags");
+        tagGrid.appendChild(empty);
+      } else {
+        tags.forEach((entry) => {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = "tag-browser-tag";
+          button.dataset.tag = String(entry.tag || "");
+          button.dataset.locale = String(entry.locale || "");
+          button.dataset.aliases = JSON.stringify(entry.aliases || []);
+          const name = document.createElement("span");
+          name.className = "tag-browser-tag-name";
+          name.textContent = String(entry.tag || "");
+          const count = document.createElement("span");
+          count.className = "tag-browser-tag-count";
+          count.textContent = t("search.browseTagCount", { count: Number(entry.count || 0) });
+          button.append(name, count);
+          tagGrid.appendChild(button);
+        });
+      }
+    }
+  }
+  if (results) {
+    if (state.d1BrowseTag) {
+      renderSearchResultItems(results, items, t("search.larkNoResults"));
+    } else {
+      results.innerHTML = "";
+      results.classList.add("hidden");
+    }
+  }
+  if (message) {
+    let text = "";
+    if (state.d1BrowseTag && !state.d1BrowseLoading) {
+      text = items.length ? t("search.larkFound", { count: items.length }) : t("search.larkNoResults");
+    } else if (!state.d1BrowseTag && tags.length) {
+      text = t("search.browseTagsFound", { count: tags.length });
+    }
+    message.textContent = state.d1BrowseLoading ? t("search.browseLoading") : text;
+    message.classList.toggle("is-error", false);
+  }
+}
+
+async function loadD1Browse({ kind = state.d1BrowseKind || "name", letter = state.d1BrowseLetter, query = state.d1BrowseQuery, tag = "", locale = "", aliases = [] } = {}) {
+  const searchSeq = state.d1BrowseSeq + 1;
+  state.d1BrowseSeq = searchSeq;
+  state.d1BrowseKind = kind === "artist" ? "artist" : "name";
+  state.d1BrowseLetter = String(letter || "").trim().toUpperCase();
+  state.d1BrowseQuery = String(query || "").trim();
+  state.d1BrowseTag = String(tag || "").trim();
+  state.d1BrowseLocale = String(locale || "").trim();
+  state.d1BrowseAliases = state.d1BrowseTag ? uniqueD1BrowseAliases(aliases, state.d1BrowseTag, state.d1BrowseLocale) : [];
+  state.d1BrowseLoading = true;
+  renderD1BrowseView();
+  try {
+    const requestAliases = state.d1BrowseTag ? state.d1BrowseAliases : [];
+    const requestAliasKey = requestAliases.length ? d1BrowseAliasKey(requestAliases, {
+      kind: state.d1BrowseKind,
+      query: state.d1BrowseQuery,
+    }) : "";
+    if (requestAliasKey && state.d1BrowseItemCache.has(requestAliasKey)) {
+      const items = state.d1BrowseItemCache.get(requestAliasKey) || [];
+      state.d1BrowseData = { kind: state.d1BrowseKind, letter: state.d1BrowseLetter, query: state.d1BrowseQuery, tag: state.d1BrowseTag, locale: state.d1BrowseLocale, tags: [], items };
+      state.d1BrowseResolvedCounts.set(requestAliasKey, items.length);
+      return;
+    }
+    const payloads = requestAliases.length > 1
+      ? await Promise.all(requestAliases.map((alias) => fetchD1Browse({
+        kind: state.d1BrowseKind,
+        letter: state.d1BrowseLetter,
+        query: state.d1BrowseQuery,
+        tag: alias.tag,
+        locale: alias.locale,
+        limit: D1_BROWSE_ITEM_LIMIT,
+      })))
+      : [await fetchD1Browse({
+        kind: state.d1BrowseKind,
+        letter: state.d1BrowseLetter,
+        query: state.d1BrowseQuery,
+        tag: state.d1BrowseTag,
+        locale: state.d1BrowseLocale,
+        limit: state.d1BrowseTag ? D1_BROWSE_ITEM_LIMIT : D1_BROWSE_TAG_LIMIT,
+      })];
+    if (state.d1BrowseSeq !== searchSeq) {
+      return;
+    }
+    const data = payloads[0] || {};
+    if (!state.d1BrowseTag) {
+      const mergedTags = mergeD1BrowseTags(data.tags);
+      await resolveD1BrowseMergedTagCounts(mergedTags, {
+        kind: state.d1BrowseKind,
+        letter: state.d1BrowseLetter,
+        query: "",
+      });
+      if (state.d1BrowseSeq !== searchSeq) {
+        return;
+      }
+    }
+    state.d1BrowseData = requestAliases.length > 1 ? { ...data, items: mergeD1BrowseItemPayloads(payloads) } : data;
+    if (requestAliasKey) {
+      const items = Array.isArray(state.d1BrowseData.items) ? state.d1BrowseData.items : [];
+      state.d1BrowseResolvedCounts.set(requestAliasKey, items.length);
+      state.d1BrowseItemCache.set(requestAliasKey, items);
+    }
+  } catch (error) {
+    const view = ensureD1BrowseView();
+    const message = view?.querySelector("[data-d1-browse-message]");
+    if (message) {
+      message.textContent = error.message;
+      message.classList.add("is-error");
+    }
+  } finally {
+    if (state.d1BrowseSeq === searchSeq) {
+      state.d1BrowseLoading = false;
+      renderD1BrowseView();
+    }
+  }
 }
 
 function selectedFollowOwner() {
@@ -7552,12 +8004,140 @@ elements.searchSidebarItems?.forEach((btn) => {
       } else {
         renderFavlistBrowse();
       }
-    } else {
+    } else if (target === "name" || target === "artist") {
       elements.searchModalPlaceholder?.classList.add("hidden");
       elements.favlistBrowserView?.classList.add("hidden");
       elements.searchModalOtherView?.classList.remove("hidden");
+      if (state.d1BrowseKind !== target) {
+        state.d1BrowseData = null;
+        state.d1BrowseLetter = "";
+        state.d1BrowseTag = "";
+        state.d1BrowseLocale = "";
+        state.d1BrowseAliases = [];
+        state.d1BrowseQuery = "";
+      }
+      state.d1BrowseKind = target;
+      renderD1BrowseView();
+    } else {
+      elements.searchModalPlaceholder?.classList.add("hidden");
+      elements.favlistBrowserView?.classList.add("hidden");
+      elements.searchModalOtherView?.classList.remove("search-modal-browser-view");
+      elements.searchModalOtherView?.classList.remove("hidden");
+      if (elements.searchModalOtherView) {
+        elements.searchModalOtherView.textContent = t("search.browseComingSoon");
+      }
     }
   });
+});
+
+elements.searchModalOtherView?.addEventListener("submit", (event) => {
+  const form = event.target.closest("[data-d1-browse-search]");
+  if (!form || !elements.searchModalOtherView.contains(form)) {
+    return;
+  }
+  event.preventDefault();
+  const input = form.querySelector("[data-d1-browse-query]");
+  if (!state.d1BrowseLetter) {
+    if (input) {
+      input.value = "";
+    }
+    state.d1BrowseQuery = "";
+    state.d1BrowseTag = "";
+    state.d1BrowseLocale = "";
+    state.d1BrowseAliases = [];
+    state.d1BrowseData = null;
+    renderD1BrowseView();
+    return;
+  }
+  if (state.d1BrowseTag) {
+    loadD1Browse({
+      kind: state.d1BrowseKind || "name",
+      letter: state.d1BrowseLetter,
+      query: input?.value || "",
+      tag: state.d1BrowseTag,
+      locale: state.d1BrowseLocale,
+      aliases: state.d1BrowseAliases,
+    });
+    return;
+  }
+  loadD1Browse({
+    kind: state.d1BrowseKind || "name",
+    letter: state.d1BrowseLetter,
+    query: input?.value || "",
+    tag: "",
+    locale: "",
+  });
+});
+
+elements.searchModalOtherView?.addEventListener("click", (event) => {
+  const backButton = event.target.closest("[data-d1-browse-back]");
+  if (backButton && elements.searchModalOtherView.contains(backButton)) {
+    if (state.d1BrowseTag) {
+      loadD1Browse({
+        kind: state.d1BrowseKind || "name",
+        letter: state.d1BrowseLetter,
+        query: "",
+        tag: "",
+        locale: "",
+        aliases: [],
+      });
+    } else if (state.d1BrowseLetter) {
+      state.d1BrowseLetter = "";
+      state.d1BrowseTag = "";
+      state.d1BrowseLocale = "";
+      state.d1BrowseAliases = [];
+      state.d1BrowseQuery = "";
+      state.d1BrowseData = null;
+      renderD1BrowseView();
+    }
+    return;
+  }
+  const letterButton = event.target.closest("[data-letter]");
+  if (letterButton && elements.searchModalOtherView.contains(letterButton)) {
+    loadD1Browse({
+      kind: state.d1BrowseKind || "name",
+      letter: letterButton.dataset.letter || "",
+      query: "",
+      tag: "",
+      locale: "",
+      aliases: [],
+    });
+    return;
+  }
+  const tagButton = event.target.closest("[data-tag]");
+  if (tagButton && elements.searchModalOtherView.contains(tagButton)) {
+    let aliases = [];
+    try {
+      aliases = JSON.parse(tagButton.dataset.aliases || "[]");
+    } catch (error) {
+      aliases = [];
+    }
+    loadD1Browse({
+      kind: state.d1BrowseKind || "name",
+      letter: state.d1BrowseLetter,
+      query: "",
+      tag: tagButton.dataset.tag || "",
+      locale: tagButton.dataset.locale || "",
+      aliases,
+    });
+  }
+});
+
+elements.searchModalOtherView?.addEventListener("click", async (event) => {
+  const target = searchResultRequestTarget(event, elements.searchModalOtherView);
+  if (!target?.url) {
+    return;
+  }
+  if (target.button) {
+    target.button.disabled = true;
+  }
+  try {
+    await handleAddByUrl(target.url, "tail", anchorPointForEvent(event, target.anchor));
+  } finally {
+    if (target.button) {
+      target.button.disabled = false;
+    }
+  }
 });
 
 elements.searchCookieToggle?.addEventListener("click", () => {

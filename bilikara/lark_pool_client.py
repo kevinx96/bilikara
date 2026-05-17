@@ -506,7 +506,20 @@ def _cloudflare_search_item(raw_item: Any) -> dict | None:
         "owner_url": _field_text(raw_item.get("owner_url")).strip(),
         "source": "cloudflare",
     }
-    for key in ("cover_url", "played_count", "preserved_1"):
+    for key in (
+        "cover_url",
+        "played_count",
+        "preserved_1",
+        "preserved_2",
+        "preserved_3",
+        "preserved_4",
+        "preserved_5",
+        "tag_1",
+        "tag_2",
+        "tag_3",
+        "tag_4",
+        "tag_5",
+    ):
         value = _field_text(raw_item.get(key)).strip()
         if value:
             item[key] = value
@@ -530,6 +543,18 @@ def _cloudflare_search_items(payload: Any) -> list[Any]:
             items = data.get(key)
             if isinstance(items, list):
                 return items
+    return []
+
+
+def _cloudflare_browse_tags(payload: Any) -> list[Any]:
+    if not isinstance(payload, dict):
+        return []
+    tags = payload.get("tags")
+    if isinstance(tags, list):
+        return tags
+    data = payload.get("data")
+    if isinstance(data, dict) and isinstance(data.get("tags"), list):
+        return data["tags"]
     return []
 
 
@@ -567,6 +592,71 @@ def _search_cloudflare_pool(query: str, *, limit: int = 80) -> list[dict] | None
         },
     )
     return results
+
+
+def browse_d1_pool(
+    kind: str,
+    *,
+    letter: str = "",
+    query: str = "",
+    tag: str = "",
+    locale: str = "",
+    limit: int = 100,
+) -> dict:
+    normalized_kind = "artist" if str(kind or "").strip().lower() == "artist" else "name"
+    params = {
+        "kind": normalized_kind,
+        "limit": str(max(1, int(limit))),
+    }
+    if letter:
+        params["letter"] = str(letter or "").strip().upper()
+    if query:
+        params["q"] = str(query or "").strip()
+    if tag:
+        params["tag"] = str(tag or "").strip()
+    if locale:
+        params["locale"] = str(locale or "").strip().lower()
+    try:
+        payload = _cloudflare_json(
+            "GET",
+            f"/browse?{urllib.parse.urlencode(params)}",
+            timeout=_CLOUDFLARE_SEARCH_TIMEOUT,
+        )
+    except LarkPoolError:
+        return {"kind": normalized_kind, "letter": letter, "query": query, "tag": tag, "locale": locale, "tags": [], "items": []}
+    tags = []
+    for raw_tag in _cloudflare_browse_tags(payload):
+        if not isinstance(raw_tag, dict):
+            continue
+        tag_text = _field_text(raw_tag.get("tag")).strip()
+        if not tag_text:
+            continue
+        tags.append(
+            {
+                "tag": tag_text,
+                "letter": _field_text(raw_tag.get("letter")).strip(),
+                "locale": _field_text(raw_tag.get("locale")).strip(),
+                "yomi": _field_text(raw_tag.get("yomi")).strip(),
+                "count": int(raw_tag.get("count") or 0),
+            }
+        )
+    items: list[dict] = []
+    seen_bvids: set[str] = set()
+    for raw_item in _cloudflare_search_items(payload):
+        item = _cloudflare_search_item(raw_item)
+        if not item or item["bvid"] in seen_bvids:
+            continue
+        seen_bvids.add(item["bvid"])
+        items.append(item)
+    return {
+        "kind": str(payload.get("kind") or normalized_kind) if isinstance(payload, dict) else normalized_kind,
+        "letter": str(payload.get("letter") or letter) if isinstance(payload, dict) else letter,
+        "query": str(payload.get("query") or query) if isinstance(payload, dict) else query,
+        "tag": str(payload.get("tag") or tag) if isinstance(payload, dict) else tag,
+        "locale": str(payload.get("locale") or locale) if isinstance(payload, dict) else locale,
+        "tags": tags,
+        "items": items,
+    }
 
 
 def _search_lark_pool_legacy(query: str, *, limit: int = 80) -> list[dict]:

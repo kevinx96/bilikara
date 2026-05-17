@@ -310,6 +310,38 @@ class LarkPoolClientTest(unittest.TestCase):
         self.assertFalse(result["success"])
         self.assertFalse(result["deleted"])
 
+    def test_browse_d1_pool_posts_query_to_cloudflare(self):
+        requests = []
+
+        def fake_cloudflare(method, path, payload=None, *, timeout=12.0):
+            requests.append((method, path, payload, timeout))
+            return {
+                "kind": "name",
+                "letter": "W",
+                "tags": [{"tag": "我推的孩子", "letter": "W", "locale": "zh", "count": 2}],
+                "items": [
+                    {
+                        "bvid": "BV1xx411c7mD",
+                        "title": "song",
+                        "url": "https://www.bilibili.com/video/BV1xx411c7mD",
+                    }
+                ],
+            }
+
+        with patch.object(lark_pool, "_cloudflare_json", side_effect=fake_cloudflare):
+            result = lark_pool.browse_d1_pool("name", letter="W", tag="我推的孩子", locale="zh")
+
+        self.assertEqual(result["tags"][0]["tag"], "我推的孩子")
+        self.assertEqual(result["items"][0]["bvid"], "BV1xx411c7mD")
+        self.assertEqual(len(requests), 1)
+        method, path, payload, timeout = requests[0]
+        self.assertEqual(method, "GET")
+        self.assertIn("/browse?", path)
+        self.assertIn("kind=name", path)
+        self.assertIn("letter=W", path)
+        self.assertIsNone(payload)
+        self.assertLessEqual(timeout, 2.0)
+
 
 if __name__ == "__main__":
     unittest.main()
