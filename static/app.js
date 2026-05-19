@@ -127,7 +127,7 @@ const state = {
   retryActivityById: {},
   gatchaCandidate: null,
   searchCookieVisible: false,
-  searchLarkVisible: false,
+  searchLarkVisible: true,
   larkSearchLoading: false,
   larkSearchSeq: 0,
   searchStageView: "",
