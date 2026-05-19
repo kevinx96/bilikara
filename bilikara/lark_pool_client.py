@@ -659,6 +659,82 @@ def browse_d1_pool(
     }
 
 
+def browse_d1_category_pool(
+    tags: list[str],
+    *,
+    query: str = "",
+    limit: int = 100,
+    offset: int = 0,
+) -> dict:
+    normalized_tags: list[str] = []
+    seen_tags: set[str] = set()
+    for tag in tags or []:
+        normalized_tag = str(tag or "").strip()
+        if not normalized_tag or normalized_tag in seen_tags:
+            continue
+        seen_tags.add(normalized_tag)
+        normalized_tags.append(normalized_tag)
+    normalized_limit = max(1, min(100, int(limit)))
+    normalized_offset = max(0, int(offset))
+    normalized_query = str(query or "").strip()
+    if not normalized_tags:
+        return {
+            "query": normalized_query,
+            "tags": [],
+            "offset": normalized_offset,
+            "limit": normalized_limit,
+            "items": [],
+            "has_more": False,
+            "next_offset": normalized_offset,
+        }
+    params: list[tuple[str, str]] = [
+        ("limit", str(normalized_limit)),
+        ("offset", str(normalized_offset)),
+    ]
+    if normalized_query:
+        params.append(("q", normalized_query))
+    params.extend(("tag", tag) for tag in normalized_tags)
+    try:
+        payload = _cloudflare_json(
+            "GET",
+            f"/browse-category?{urllib.parse.urlencode(params)}",
+            timeout=_CLOUDFLARE_SEARCH_TIMEOUT,
+        )
+    except (LarkPoolError, ValueError):
+        return {
+            "query": normalized_query,
+            "tags": normalized_tags,
+            "offset": normalized_offset,
+            "limit": normalized_limit,
+            "items": [],
+            "has_more": False,
+            "next_offset": normalized_offset,
+        }
+    items: list[dict] = []
+    seen_bvids: set[str] = set()
+    for raw_item in _cloudflare_search_items(payload):
+        item = _cloudflare_search_item(raw_item)
+        if not item or item["bvid"] in seen_bvids:
+            continue
+        seen_bvids.add(item["bvid"])
+        items.append(item)
+    payload_dict = payload if isinstance(payload, dict) else {}
+    has_more = bool(payload_dict.get("has_more")) if isinstance(payload_dict, dict) else len(items) >= normalized_limit
+    try:
+        next_offset = int(payload_dict.get("next_offset"))
+    except (TypeError, ValueError):
+        next_offset = normalized_offset + len(items)
+    return {
+        "query": str(payload_dict.get("query") or normalized_query),
+        "tags": normalized_tags,
+        "offset": normalized_offset,
+        "limit": normalized_limit,
+        "items": items[:normalized_limit],
+        "has_more": has_more,
+        "next_offset": max(normalized_offset, next_offset),
+    }
+
+
 def _search_lark_pool_legacy(query: str, *, limit: int = 80) -> list[dict]:
     normalized_query = str(query or "").strip()
     if not normalized_query:

@@ -342,6 +342,40 @@ class LarkPoolClientTest(unittest.TestCase):
         self.assertIsNone(payload)
         self.assertLessEqual(timeout, 2.0)
 
+    def test_browse_d1_category_pool_uses_repeated_tags_and_offset(self):
+        requests = []
+
+        def fake_cloudflare(method, path, payload=None, *, timeout=12.0):
+            requests.append((method, path, payload, timeout))
+            return {
+                "items": [
+                    {
+                        "bvid": "BV1xx411c7mD",
+                        "title": "song",
+                        "url": "https://www.bilibili.com/video/BV1xx411c7mD",
+                    }
+                ],
+                "has_more": True,
+                "next_offset": 120,
+            }
+
+        with patch.object(lark_pool, "_cloudflare_json", side_effect=fake_cloudflare):
+            result = lark_pool.browse_d1_category_pool(["热血", "战斗"], query="op", offset=20, limit=100)
+
+        self.assertEqual(result["items"][0]["bvid"], "BV1xx411c7mD")
+        self.assertTrue(result["has_more"])
+        self.assertEqual(result["next_offset"], 120)
+        self.assertEqual(len(requests), 1)
+        method, path, payload, timeout = requests[0]
+        self.assertEqual(method, "GET")
+        self.assertIn("/browse-category?", path)
+        self.assertIn("tag=%E7%83%AD%E8%A1%80", path)
+        self.assertIn("tag=%E6%88%98%E6%96%97", path)
+        self.assertIn("q=op", path)
+        self.assertIn("offset=20", path)
+        self.assertIsNone(payload)
+        self.assertLessEqual(timeout, 2.0)
+
 
 if __name__ == "__main__":
     unittest.main()

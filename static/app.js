@@ -153,6 +153,14 @@ const state = {
   d1BrowseSeq: 0,
   d1BrowseResolvedCounts: new Map(),
   d1BrowseItemCache: new Map(),
+  categoryBrowseSelectedId: "",
+  categoryBrowseQuery: "",
+  categoryBrowseItems: [],
+  categoryBrowseOffset: 0,
+  categoryBrowseHasMore: false,
+  categoryBrowseLoading: false,
+  categoryBrowseSeq: 0,
+  categoryBrowseError: "",
   gatchaUidVisible: false,
   gatchaUidSaving: false,
   gatchaRefreshSaving: false,
@@ -1179,6 +1187,39 @@ async function fetchD1Browse({ kind = "name", letter = "", query = "", tag = "",
   return payload.data || { kind, letter: normalizedLetter, query: normalizedQuery, tag: normalizedTag, tags: [], items: [] };
 }
 
+async function fetchD1CategoryBrowse({ tags = [], query = "", offset = 0, limit = 100 } = {}) {
+  const params = new URLSearchParams();
+  const normalizedTags = uniqueD1BrowseAliases(
+    (Array.isArray(tags) ? tags : []).map((tag) => ({ tag, locale: "" })),
+  ).map((entry) => entry.tag);
+  normalizedTags.forEach((tag) => {
+    params.append("tag", tag);
+  });
+  params.set("limit", String(limit));
+  params.set("offset", String(offset));
+  const normalizedQuery = String(query || "").trim();
+  if (normalizedQuery) {
+    params.set("q", normalizedQuery);
+  }
+  const response = await fetch(`/api/d1/category-browse?${params.toString()}`, {
+    cache: "no-store",
+    headers: clientHeaders(),
+  });
+  const payload = await response.json();
+  if (!response.ok || !payload.ok) {
+    throw new Error(localizedApiMessage(payload.error) || t("error.larkSearchFailed"));
+  }
+  return payload.data || {
+    tags: normalizedTags,
+    query: normalizedQuery,
+    offset,
+    limit,
+    items: [],
+    has_more: false,
+    next_offset: offset,
+  };
+}
+
 async function fetchGatchaBrowse(uid = "", query = "") {
   const params = new URLSearchParams();
   const normalizedUid = String(uid || "").trim();
@@ -1533,6 +1574,84 @@ const D1_BROWSE_TAG_LIMIT = 450;
 const D1_BROWSE_MERGE_MIN_LENGTH = 5;
 const D1_BROWSE_COUNT_CONCURRENCY = 4;
 const D1_BROWSE_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ#".split("");
+const CATEGORY_BROWSE_PAGE_SIZE = 100;
+const CATEGORY_BROWSE_DEFINITIONS = [
+  { key: "hotBlood", tags: ["热血", "战斗"] },
+  { key: "fantasy", tags: ["奇幻", "冒险", "魔法", "科幻"] },
+  { key: "yuri", tags: ["百合"] },
+  { key: "vtuberSeries", tags: ["vtuber系列"] },
+  { key: "idol", tags: ["偶像", "bangdream", "Lovelive系列", "偶像大师系列"] },
+  { key: "school", tags: ["校园", "学园"] },
+  { key: "healing", tags: ["治愈", "催泪", "致郁"] },
+  { key: "vocaloid", tags: ["V家"] },
+  { key: "workplace", tags: ["职场"] },
+  { key: "detective", tags: ["推理"] },
+  { key: "mecha", tags: ["机战", "高达系列"] },
+  { key: "sliceOfLife", tags: ["日常"] },
+  { key: "moe", tags: ["萌系"] },
+  { key: "sports", tags: ["运动"] },
+  { key: "original", tags: ["原创"] },
+  { key: "mangaAdapted", tags: ["漫画改", "漫改", "动漫改"] },
+  { key: "gameAdapted", tags: ["游戏改"] },
+  { key: "novelAdapted", tags: ["小说改", "轻改"] },
+  { key: "pjsk", tags: ["pjsk"] },
+  { key: "symphogear", tags: ["战姬绝唱"] },
+  { key: "pokemonSeries", tags: ["宝可梦系列"] },
+  { key: "childhood", tags: ["童年", "宝可梦系列"] },
+  { key: "bangDream", tags: ["bangdream"] },
+  { key: "loveLive", tags: ["Lovelive系列"] },
+  { key: "idolmaster", tags: ["偶像大师系列"] },
+  { key: "isekai", tags: ["异世界", "穿越"] },
+  { key: "kamitsubaki", tags: ["神椿", "KAMITSUBAKI", "神椿工作室", "KAMITSUBAKI STUDIO"] },
+  { key: "youth", tags: ["青春"] },
+  { key: "otome", tags: ["乙女", "逆后宫"] },
+  { key: "kids", tags: ["子供向"] },
+  { key: "comedy", tags: ["搞笑", "喜剧"] },
+  { key: "tokusatsu", tags: ["特摄"] },
+  { key: "dark", tags: ["黑暗", "悬疑", "战争", "心理", "恐怖", "犯罪"] },
+  { key: "godsDemons", tags: ["神魔"] },
+  { key: "workplace", tags: ["职场"] },
+  { key: "gourmet", tags: ["美食"] },
+  { key: "history", tags: ["历史"] },
+];
+const CATEGORY_BROWSE_IMAGE_URLS = [
+  "/pic/cat_1.png",
+  "/pic/cat_2.png",
+  "/pic/cat_3.png",
+  "/pic/cat_4.png",
+  "/pic/cat_5.png",
+  "/pic/cat_6.png",
+  "/pic/cat_7.jpg",
+  "/pic/cat_8.jpg",
+  "/pic/cat_9.png",
+  "/pic/cat_10.jpg",
+  "/pic/cat_11.jpg",
+  "/pic/cat_12.jpg",
+  "/pic/cat_13.jpg",
+  "/pic/cat_14.png",
+  "/pic/cat_15.png",
+  "/pic/cat_16.jpg",
+  "/pic/cat_17.jpg",
+  "/pic/cat_18.jpg",
+  "/pic/cat_19.jpg",
+  "/pic/cat_20.jpg",
+  "/pic/cat_21.png",
+  "/pic/cat_22.jpg",
+  "/pic/cat_23.jpg",
+  "/pic/cat_24.jpg",
+  "/pic/cat_25.png",
+  "/pic/cat_26.png",
+  "/pic/cat_27.jpg",
+  "/pic/cat_28.jpg",
+  "/pic/cat_29.png",
+  "/pic/cat_30.jpg",
+  "/pic/cat_31.jpg",
+  "/pic/cat_32.jpg",
+  "/pic/cat_33.jpg",
+  "/pic/cat_34.jpg",
+  "/pic/cat_35.jpg",
+  "/pic/cat_36.jpg",
+];
 
 function normalizeD1BrowseTagForMerge(value) {
   return String(value || "")
@@ -1650,6 +1769,60 @@ function d1BrowseAliasKey(aliases, { kind = state.d1BrowseKind, query = state.d1
 
 function d1BrowseItemKey(item) {
   return String(item?.bvid || item?.url || item?.id || `${item?.title || ""}\n${searchResultOwnerName(item)}`).trim();
+}
+
+function categoryBrowseIdForName(name) {
+  return encodeURIComponent(String(name || "").trim()).replace(/%/g, "_");
+}
+
+function categoryBrowseDefinitions() {
+  const groups = [];
+  const byKey = new Map();
+  CATEGORY_BROWSE_DEFINITIONS.forEach((definition) => {
+    const key = String(definition?.key || "").trim();
+    const tags = (Array.isArray(definition?.tags) ? definition.tags : []).map((value) => String(value || "").trim()).filter(Boolean);
+    if (!key || !tags.length) {
+      return;
+    }
+    let group = byKey.get(key);
+    if (!group) {
+      const imageIndex = groups.length;
+      group = {
+        id: categoryBrowseIdForName(key),
+        key,
+        name: t(`search.category.${key}`),
+        coverUrl: CATEGORY_BROWSE_IMAGE_URLS[imageIndex] || "",
+        tags: [],
+      };
+      byKey.set(key, group);
+      groups.push(group);
+    }
+    tags.forEach((tag) => {
+      if (!group.tags.includes(tag)) {
+        group.tags.push(tag);
+      }
+    });
+  });
+  return groups;
+}
+
+function selectedCategoryBrowseDefinition() {
+  const selectedId = String(state.categoryBrowseSelectedId || "");
+  return categoryBrowseDefinitions().find((entry) => entry.id === selectedId) || null;
+}
+
+function mergeCategoryBrowseItems(existingItems, nextItems) {
+  const seen = new Set();
+  const items = [];
+  [...(Array.isArray(existingItems) ? existingItems : []), ...(Array.isArray(nextItems) ? nextItems : [])].forEach((item) => {
+    const key = d1BrowseItemKey(item);
+    if (!key || seen.has(key)) {
+      return;
+    }
+    seen.add(key);
+    items.push(item);
+  });
+  return items;
 }
 
 function mergeD1BrowseItemPayloads(payloads) {
@@ -1923,6 +2096,198 @@ async function loadD1Browse({ kind = state.d1BrowseKind || "name", letter = stat
       state.d1BrowseLoading = false;
       renderD1BrowseView();
     }
+  }
+}
+
+function ensureCategoryBrowseView() {
+  if (!elements.searchModalOtherView) {
+    return null;
+  }
+  elements.searchModalOtherView.classList.add("search-modal-browser-view");
+  let view = elements.searchModalOtherView.querySelector("[data-category-browse-view]");
+  if (view) {
+    return view;
+  }
+  elements.searchModalOtherView.textContent = "";
+  view = document.createElement("div");
+  view.className = "category-browser";
+  view.dataset.categoryBrowseView = "1";
+  view.innerHTML = `
+    <div class="category-browser-home" data-category-browser-home>
+      <div class="category-browser-grid" data-category-browser-grid></div>
+    </div>
+    <div class="category-browser-detail hidden" data-category-browser-detail>
+      <form class="tag-browser-search category-browser-search" data-category-browse-search>
+        <input type="text" autocomplete="off" data-category-browse-query>
+        <button type="submit" class="next-button" data-category-browse-submit></button>
+      </form>
+      <div class="category-browser-tabs" data-category-browser-tabs></div>
+      <div class="tag-browser-nav">
+        <button type="button" class="tag-browser-back" data-category-browse-back></button>
+        <div class="tag-browser-current" data-category-browse-current></div>
+      </div>
+      <div class="search-results category-browser-results" data-category-browse-results></div>
+      <p class="gatcha-message tag-browser-message" data-category-browse-message role="status"></p>
+    </div>
+  `;
+  elements.searchModalOtherView.appendChild(view);
+  return view;
+}
+
+function createCategoryBrowseCard(category, { compact = false } = {}) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = compact ? "category-browser-tab" : "category-browser-card";
+  button.dataset.categoryId = category.id;
+  const media = document.createElement("span");
+  media.className = compact ? "category-browser-tab-media" : "category-browser-card-media";
+  if (category.coverUrl) {
+    media.style.backgroundImage = `linear-gradient(135deg, rgba(0, 210, 255, 0.18), rgba(255, 102, 51, 0.14)), url("${category.coverUrl}")`;
+  }
+  const name = document.createElement("span");
+  name.className = compact ? "category-browser-tab-name" : "category-browser-card-name";
+  name.textContent = category.name;
+  button.append(media, name);
+  return button;
+}
+
+function renderCategoryBrowseView() {
+  const view = ensureCategoryBrowseView();
+  if (!view) {
+    return;
+  }
+  const categories = categoryBrowseDefinitions();
+  const selected = selectedCategoryBrowseDefinition();
+  const home = view.querySelector("[data-category-browser-home]");
+  const detail = view.querySelector("[data-category-browser-detail]");
+  const grid = view.querySelector("[data-category-browser-grid]");
+  const tabs = view.querySelector("[data-category-browser-tabs]");
+  const queryInput = view.querySelector("[data-category-browse-query]");
+  const submitButton = view.querySelector("[data-category-browse-submit]");
+  const backButton = view.querySelector("[data-category-browse-back]");
+  const current = view.querySelector("[data-category-browse-current]");
+  const results = view.querySelector("[data-category-browse-results]");
+  const message = view.querySelector("[data-category-browse-message]");
+
+  home?.classList.toggle("hidden", Boolean(selected));
+  detail?.classList.toggle("hidden", !selected);
+  if (grid && !selected) {
+    grid.innerHTML = "";
+    categories.forEach((category) => {
+      grid.appendChild(createCategoryBrowseCard(category));
+    });
+  }
+  if (!selected) {
+    return;
+  }
+  if (queryInput && document.activeElement !== queryInput) {
+    queryInput.value = state.categoryBrowseQuery || "";
+  }
+  if (queryInput) {
+    queryInput.placeholder = t("search.browseItemPlaceholder");
+  }
+  if (submitButton) {
+    submitButton.textContent = t("search.submit");
+    submitButton.disabled = state.categoryBrowseLoading;
+  }
+  if (backButton) {
+    backButton.textContent = t("common.back");
+    backButton.disabled = state.categoryBrowseLoading;
+  }
+  if (current) {
+    current.textContent = "";
+    current.classList.add("hidden");
+  }
+  if (tabs) {
+    tabs.innerHTML = "";
+    categories.forEach((category) => {
+      const tab = createCategoryBrowseCard(category, { compact: true });
+      tab.classList.toggle("active", category.id === selected.id);
+      tab.disabled = state.categoryBrowseLoading && category.id === selected.id;
+      tabs.appendChild(tab);
+    });
+  }
+  if (results) {
+    renderSearchResultItems(results, state.categoryBrowseItems, t("search.larkNoResults"));
+  }
+  if (message) {
+    let text = "";
+    if (state.categoryBrowseError) {
+      text = state.categoryBrowseError;
+    } else if (state.categoryBrowseLoading && !state.categoryBrowseItems.length) {
+      text = t("search.browseLoading");
+    } else if (state.categoryBrowseItems.length) {
+      text = state.categoryBrowseHasMore
+        ? t("search.categoryLoadedMore", { count: state.categoryBrowseItems.length })
+        : t("search.categoryLoadedAll", { count: state.categoryBrowseItems.length });
+    } else if (!state.categoryBrowseLoading) {
+      text = t("search.larkNoResults");
+    }
+    message.textContent = text;
+    message.classList.toggle("is-error", Boolean(state.categoryBrowseError));
+  }
+}
+
+async function loadCategoryBrowse({ categoryId = state.categoryBrowseSelectedId, query = state.categoryBrowseQuery, append = false } = {}) {
+  const category = categoryBrowseDefinitions().find((entry) => entry.id === categoryId);
+  if (!category) {
+    state.categoryBrowseSelectedId = "";
+    state.categoryBrowseItems = [];
+    state.categoryBrowseOffset = 0;
+    state.categoryBrowseHasMore = false;
+    renderCategoryBrowseView();
+    return;
+  }
+  const searchSeq = state.categoryBrowseSeq + 1;
+  state.categoryBrowseSeq = searchSeq;
+  state.categoryBrowseSelectedId = category.id;
+  state.categoryBrowseQuery = String(query || "").trim();
+  state.categoryBrowseError = "";
+  if (!append) {
+    state.categoryBrowseItems = [];
+    state.categoryBrowseOffset = 0;
+    state.categoryBrowseHasMore = true;
+  }
+  state.categoryBrowseLoading = true;
+  renderCategoryBrowseView();
+  try {
+    const data = await fetchD1CategoryBrowse({
+      tags: category.tags,
+      query: state.categoryBrowseQuery,
+      offset: append ? state.categoryBrowseOffset : 0,
+      limit: CATEGORY_BROWSE_PAGE_SIZE,
+    });
+    if (state.categoryBrowseSeq !== searchSeq) {
+      return;
+    }
+    const nextItems = Array.isArray(data.items) ? data.items : [];
+    state.categoryBrowseItems = append ? mergeCategoryBrowseItems(state.categoryBrowseItems, nextItems) : mergeCategoryBrowseItems([], nextItems);
+    state.categoryBrowseHasMore = Boolean(data.has_more);
+    state.categoryBrowseOffset = Number(data.next_offset ?? (append ? state.categoryBrowseOffset + nextItems.length : nextItems.length)) || state.categoryBrowseItems.length;
+  } catch (error) {
+    if (state.categoryBrowseSeq === searchSeq) {
+      state.categoryBrowseError = error.message;
+    }
+  } finally {
+    if (state.categoryBrowseSeq === searchSeq) {
+      state.categoryBrowseLoading = false;
+      renderCategoryBrowseView();
+    }
+  }
+}
+
+function maybeLoadMoreCategoryBrowse(scrollContainer) {
+  if (
+    !state.categoryBrowseSelectedId
+    || state.categoryBrowseLoading
+    || !state.categoryBrowseHasMore
+    || !scrollContainer
+  ) {
+    return;
+  }
+  const remaining = scrollContainer.scrollHeight - scrollContainer.scrollTop - scrollContainer.clientHeight;
+  if (remaining <= 160) {
+    loadCategoryBrowse({ append: true });
   }
 }
 
@@ -8018,6 +8383,11 @@ elements.searchSidebarItems?.forEach((btn) => {
       }
       state.d1BrowseKind = target;
       renderD1BrowseView();
+    } else if (target === "category") {
+      elements.searchModalPlaceholder?.classList.add("hidden");
+      elements.favlistBrowserView?.classList.add("hidden");
+      elements.searchModalOtherView?.classList.remove("hidden");
+      renderCategoryBrowseView();
     } else {
       elements.searchModalPlaceholder?.classList.add("hidden");
       elements.favlistBrowserView?.classList.add("hidden");
@@ -8031,6 +8401,16 @@ elements.searchSidebarItems?.forEach((btn) => {
 });
 
 elements.searchModalOtherView?.addEventListener("submit", (event) => {
+  const categoryForm = event.target.closest("[data-category-browse-search]");
+  if (categoryForm && elements.searchModalOtherView.contains(categoryForm)) {
+    event.preventDefault();
+    const input = categoryForm.querySelector("[data-category-browse-query]");
+    loadCategoryBrowse({
+      query: input?.value || "",
+      append: false,
+    });
+    return;
+  }
   const form = event.target.closest("[data-d1-browse-search]");
   if (!form || !elements.searchModalOtherView.contains(form)) {
     return;
@@ -8070,6 +8450,26 @@ elements.searchModalOtherView?.addEventListener("submit", (event) => {
 });
 
 elements.searchModalOtherView?.addEventListener("click", (event) => {
+  const categoryBackButton = event.target.closest("[data-category-browse-back]");
+  if (categoryBackButton && elements.searchModalOtherView.contains(categoryBackButton)) {
+    state.categoryBrowseSelectedId = "";
+    state.categoryBrowseQuery = "";
+    state.categoryBrowseItems = [];
+    state.categoryBrowseOffset = 0;
+    state.categoryBrowseHasMore = false;
+    state.categoryBrowseError = "";
+    renderCategoryBrowseView();
+    return;
+  }
+  const categoryButton = event.target.closest("[data-category-id]");
+  if (categoryButton && elements.searchModalOtherView.contains(categoryButton)) {
+    loadCategoryBrowse({
+      categoryId: categoryButton.dataset.categoryId || "",
+      query: "",
+      append: false,
+    });
+    return;
+  }
   const backButton = event.target.closest("[data-d1-browse-back]");
   if (backButton && elements.searchModalOtherView.contains(backButton)) {
     if (state.d1BrowseTag) {
@@ -8139,6 +8539,13 @@ elements.searchModalOtherView?.addEventListener("click", async (event) => {
     }
   }
 });
+
+elements.searchModalOtherView?.addEventListener("scroll", (event) => {
+  const target = event.target;
+  if (target instanceof Element && target.matches("[data-category-browse-results]")) {
+    maybeLoadMoreCategoryBrowse(target);
+  }
+}, true);
 
 elements.searchCookieToggle?.addEventListener("click", () => {
   state.searchLarkVisible = false;
