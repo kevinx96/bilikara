@@ -873,6 +873,28 @@ class CacheManagerPolicyTest(unittest.TestCase):
             finally:
                 manager.shutdown()
 
+    def test_select_asset_uses_windows_arm64_package(self):
+        release = {
+            "assets": [
+                {
+                    "name": "BBDown_1.6.3_20240814_win-x64.zip",
+                    "browser_download_url": "https://example.test/win-x64.zip",
+                },
+                {
+                    "name": "BBDown_1.6.3_20240814_win-arm64.zip",
+                    "browser_download_url": "https://example.test/win-arm64.zip",
+                },
+            ],
+        }
+
+        with patch("bilikara.cache.platform.system", return_value="Windows"), patch(
+            "bilikara.cache.platform.machine",
+            return_value="ARM64",
+        ):
+            selected = CacheManager._select_asset(object(), release)
+
+        self.assertEqual(selected["name"], "BBDown_1.6.3_20240814_win-arm64.zip")
+
     def test_ensure_ffmpeg_syncs_bundled_binary_into_runtime_tools(self):
         vendor_dir = Path(self.temp_dir.name) / "vendor"
         tools_dir = Path(self.temp_dir.name) / "tools" / "bbdown"
@@ -911,10 +933,27 @@ class CacheManagerPolicyTest(unittest.TestCase):
         binary_path.parent.mkdir(parents=True, exist_ok=True)
         binary_path.write_bytes(b"ffmpeg-bin")
 
-        self.assertEqual(
-            CacheManager._bbdown_ffmpeg_path_arg(binary_path),
-            str(binary_path.parent),
-        )
+        with patch.object(CacheManager, "_tool_arg_path", return_value="C:\\SHORT\\FFMPEG"):
+            self.assertEqual(CacheManager._bbdown_ffmpeg_path_arg(binary_path), "C:\\SHORT\\FFMPEG")
+
+    def test_tool_arg_path_prefers_windows_short_path(self):
+        path = Path("C:/Users/Test User/AppData/Local/bilikara/runtime/tools/bbdown")
+
+        with patch("bilikara.cache.os.name", "nt"), patch.object(
+            CacheManager,
+            "_windows_short_path",
+            return_value="C:\\Users\\TESTUS~1\\AppData\\Local\\BILIKA~1\\runtime\\tools\\bbdown",
+        ):
+            self.assertEqual(
+                CacheManager._tool_arg_path(path),
+                "C:\\Users\\TESTUS~1\\AppData\\Local\\BILIKA~1\\runtime\\tools\\bbdown",
+            )
+
+    def test_tool_arg_path_falls_back_when_short_path_unavailable(self):
+        path = Path("C:/Users/Test User/AppData/Local/bilikara/runtime/tools/bbdown")
+
+        with patch("bilikara.cache.os.name", "nt"), patch.object(CacheManager, "_windows_short_path", return_value=""):
+            self.assertEqual(CacheManager._tool_arg_path(path), str(path))
 
     def test_tool_process_env_prepends_ffmpeg_and_bbdown_dirs(self):
         suffix = ".exe" if os.name == "nt" else ""
@@ -922,11 +961,15 @@ class CacheManagerPolicyTest(unittest.TestCase):
         ffmpeg_path.parent.mkdir(parents=True, exist_ok=True)
         ffmpeg_path.write_bytes(b"ffmpeg-bin")
 
-        with patch("bilikara.cache.BB_DOWN_DIR", ffmpeg_path.parent):
+        with patch("bilikara.cache.BB_DOWN_DIR", ffmpeg_path.parent), patch.object(
+            CacheManager,
+            "_tool_arg_path",
+            side_effect=lambda path: f"short-{Path(path).name}",
+        ):
             env = CacheManager._tool_process_env(ffmpeg_path)
 
         first_path = env["PATH"].split(os.pathsep)[0]
-        self.assertEqual(first_path, str(ffmpeg_path.parent))
+        self.assertEqual(first_path, "short-bbdown")
 
     def test_download_selected_streams_skips_legacy_muxed_variant_outputs(self):
         item_dir = self.cache_dir / "song-a"

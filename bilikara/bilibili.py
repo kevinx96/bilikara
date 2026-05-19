@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import threading
 import re
 import urllib.parse
@@ -219,9 +220,17 @@ def _read_json_file(path) -> object | None:
 
 def _write_json_file(path, payload: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_suffix(path.suffix + ".tmp")
+    temp_path = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     with temp_path.open("w", encoding="utf-8") as handle:
         json.dump(payload, handle, ensure_ascii=False, indent=2)
+    for attempt in range(6):
+        try:
+            temp_path.replace(path)
+            return
+        except PermissionError:
+            if attempt >= 5:
+                raise
+            time.sleep(0.08 * (attempt + 1))
     temp_path.replace(path)
 
 
@@ -1576,7 +1585,13 @@ def _cleanup_gatcha_rebuild_temp_files() -> None:
         _GATCHA_UIDS_TEMP_FILE,
         _GATCHA_FAVLIST_TEMP_FILE,
         _GATCHA_REBUILD_PROGRESS_FILE,
+        _GATCHA_REBUILD_PROGRESS_FILE.with_suffix(_GATCHA_REBUILD_PROGRESS_FILE.suffix + ".tmp"),
     ):
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+    for path in _GATCHA_REBUILD_PROGRESS_FILE.parent.glob(f".{_GATCHA_REBUILD_PROGRESS_FILE.name}.*.tmp"):
         try:
             path.unlink(missing_ok=True)
         except OSError:

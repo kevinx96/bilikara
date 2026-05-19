@@ -37,7 +37,7 @@ from .bilibili import (
     refresh_gatcha_favlist,
     search_gatcha_cache,
 )
-from .lark_pool_client import delete_cloudflare_pool_entry, search_lark_pool, search_lark_pool_table
+from .lark_pool_client import browse_d1_category_pool, browse_d1_pool, delete_cloudflare_pool_entry, search_lark_pool, search_lark_pool_table
 from .cache import CacheManager
 from .config import (
     APP_RELEASES_URL,
@@ -615,6 +615,50 @@ class BilikaraHandler(BaseHTTPRequestHandler):
                     results = search_lark_pool(query, limit=limit)
                 results = annotate_gatcha_local_status(results)
                 self._write_json({"ok": True, "data": {"items": results}})
+            except Exception as e:
+                self._write_json({"ok": False, "error": str(e)})
+            return
+        if route == "/api/d1/browse":
+            route_query = parse_qs(urlparse(self.path).query)
+            kind = route_query.get("kind", route_query.get("type", ["name"]))[0]
+            letter = route_query.get("letter", [""])[0]
+            search_query = route_query.get("q", [""])[0]
+            tag = route_query.get("tag", [""])[0]
+            locale = route_query.get("locale", [""])[0]
+            try:
+                limit = max(1, min(500, int(route_query.get("limit", ["100"])[0] or "100")))
+            except (TypeError, ValueError):
+                limit = 100
+            try:
+                results = browse_d1_pool(kind, letter=letter, query=search_query, tag=tag, locale=locale, limit=limit)
+                if isinstance(results.get("items"), list):
+                    results["items"] = annotate_gatcha_local_status(results["items"])
+                self._write_json({"ok": True, "data": results})
+            except Exception as e:
+                self._write_json({"ok": False, "error": str(e)})
+            return
+        if route == "/api/d1/category-browse":
+            route_query = parse_qs(urlparse(self.path).query)
+            tags = route_query.get("tag", [])
+            tags.extend(
+                tag
+                for packed in route_query.get("tags", [])
+                for tag in str(packed or "").split(",")
+            )
+            search_query = route_query.get("q", [""])[0]
+            try:
+                limit = max(1, min(100, int(route_query.get("limit", ["100"])[0] or "100")))
+            except (TypeError, ValueError):
+                limit = 100
+            try:
+                offset = max(0, int(route_query.get("offset", ["0"])[0] or "0"))
+            except (TypeError, ValueError):
+                offset = 0
+            try:
+                results = browse_d1_category_pool(tags, query=search_query, limit=limit, offset=offset)
+                if isinstance(results.get("items"), list):
+                    results["items"] = annotate_gatcha_local_status(results["items"])
+                self._write_json({"ok": True, "data": results})
             except Exception as e:
                 self._write_json({"ok": False, "error": str(e)})
             return

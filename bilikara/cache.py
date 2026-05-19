@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import ctypes
 from datetime import datetime
 import json
 import os
@@ -1157,13 +1158,13 @@ class CacheManager:
         preference_args = self._bbdown_stream_preference_args(stream_kind)
 
         command = [
-            str(binary_path),
+            self._tool_arg_path(binary_path),
             page_url,
             "-p",
             str(page),
             *preference_args,
             "--work-dir",
-            str(target_dir),
+            self._tool_arg_path(target_dir),
             "--ffmpeg-path",
             self._bbdown_ffmpeg_path_arg(ffmpeg_path),
             "--file-pattern",
@@ -1246,7 +1247,7 @@ class CacheManager:
             encoding=SUBPROCESS_OUTPUT_ENCODING,
             errors="replace",
             bufsize=1,
-            cwd=str(BB_DOWN_DIR),
+            cwd=self._tool_arg_path(BB_DOWN_DIR),
             env=self._tool_process_env(ffmpeg_path),
             **self._hidden_process_kwargs(),
         )
@@ -1639,14 +1640,14 @@ class CacheManager:
             raise DownloadCommandError(f"缓存校验失败: {label} 文件为空")
 
         command = [
-            str(ffprobe_path),
+            self._tool_arg_path(ffprobe_path),
             "-v",
             "error",
             "-print_format",
             "json",
             "-show_streams",
             "-show_format",
-            str(media_path),
+            self._tool_arg_path(media_path),
         ]
         self._append_log_line(
             log_path,
@@ -1660,7 +1661,7 @@ class CacheManager:
             errors="replace",
             check=False,
             timeout=20,
-            cwd=str(BB_DOWN_DIR),
+            cwd=self._tool_arg_path(BB_DOWN_DIR),
             env=self._tool_process_env(ffmpeg_path),
             **self._hidden_process_kwargs(),
         )
@@ -2013,6 +2014,8 @@ class CacheManager:
             token = "osx-arm64"
         elif system == "windows" and machine in {"x86_64", "amd64"}:
             token = "win-x64"
+        elif system == "windows" and machine in {"arm64", "aarch64"}:
+            token = "win-arm64"
         else:
             raise RuntimeError(f"当前平台暂未适配 BBDown 自动下载: {system}/{machine}")
 
@@ -2247,7 +2250,29 @@ class CacheManager:
     @staticmethod
     def _bbdown_ffmpeg_path_arg(binary_path: Path) -> str:
         target = binary_path if binary_path.is_dir() else binary_path.parent
-        return str(target)
+        return CacheManager._tool_arg_path(target)
+
+    @staticmethod
+    def _tool_arg_path(path: Path) -> str:
+        raw = str(path)
+        if os.name != "nt":
+            return raw
+        return CacheManager._windows_short_path(path) or raw
+
+    @staticmethod
+    def _windows_short_path(path: Path) -> str:
+        try:
+            raw = str(path)
+            required = ctypes.windll.kernel32.GetShortPathNameW(raw, None, 0)
+            if required <= 0:
+                return ""
+            buffer = ctypes.create_unicode_buffer(required)
+            written = ctypes.windll.kernel32.GetShortPathNameW(raw, buffer, required)
+            if written <= 0:
+                return ""
+            return buffer.value
+        except Exception:
+            return ""
 
     @staticmethod
     def _bbdown_data_path() -> Path:
@@ -2316,10 +2341,10 @@ class CacheManager:
     def _tool_process_env(binary_path: Path) -> dict[str, str]:
         env = os.environ.copy()
         path_entries = []
-        ffmpeg_dir = str(binary_path if binary_path.is_dir() else binary_path.parent)
+        ffmpeg_dir = CacheManager._tool_arg_path(binary_path if binary_path.is_dir() else binary_path.parent)
         if ffmpeg_dir:
             path_entries.append(ffmpeg_dir)
-        bbdown_dir = str(BB_DOWN_DIR)
+        bbdown_dir = CacheManager._tool_arg_path(BB_DOWN_DIR)
         if bbdown_dir and bbdown_dir not in path_entries:
             path_entries.append(bbdown_dir)
         existing_path = env.get("PATH", "")
@@ -2572,7 +2597,7 @@ class CacheManager:
                     self.bbdown_login_message = f"BBDown 不可用: {exc}"
                 return
 
-            command = [str(binary_path), "login"]
+            command = [self._tool_arg_path(binary_path), "login"]
             try:
                 process = subprocess.Popen(
                     command,
@@ -2583,7 +2608,7 @@ class CacheManager:
                     encoding=SUBPROCESS_OUTPUT_ENCODING,
                     errors="replace",
                     bufsize=1,
-                    cwd=str(BB_DOWN_DIR),
+                    cwd=self._tool_arg_path(BB_DOWN_DIR),
                     env=self._tool_process_env(binary_path),
                     **self._hidden_process_kwargs(),
                 )
