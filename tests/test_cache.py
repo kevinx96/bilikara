@@ -964,12 +964,12 @@ class CacheManagerPolicyTest(unittest.TestCase):
         with patch("bilikara.cache.BB_DOWN_DIR", ffmpeg_path.parent), patch.object(
             CacheManager,
             "_tool_arg_path",
-            side_effect=lambda path: f"short:{Path(path).name}",
+            side_effect=lambda path: f"short-{Path(path).name}",
         ):
             env = CacheManager._tool_process_env(ffmpeg_path)
 
         first_path = env["PATH"].split(os.pathsep)[0]
-        self.assertEqual(first_path, "short:bbdown")
+        self.assertEqual(first_path, "short-bbdown")
 
     def test_download_selected_streams_skips_legacy_muxed_variant_outputs(self):
         item_dir = self.cache_dir / "song-a"
