@@ -146,7 +146,8 @@ p {
 }
 
 #binding-modal,
-#gatcha-favlist-modal {
+#gatcha-favlist-modal,
+#gatcha-pool-config-modal {
   z-index: 640;
 }
 
@@ -173,6 +174,10 @@ p {
 
 .selection-modal-card-single {
   width: min(560px, calc(100vw - 32px));
+}
+
+.gatcha-pool-config-card {
+  width: min(780px, calc(100vw - 32px));
 }
 
 .selection-modal-head,
@@ -248,6 +253,77 @@ p {
   color: var(--muted);
 }
 
+.pool-config-weight-row {
+  margin-top: 14px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px 16px;
+  align-items: center;
+}
+
+.pool-config-weight-row span,
+.pool-config-list-head h3 {
+  margin: 0;
+  font-size: 14px;
+  color: var(--accent);
+}
+
+.pool-config-weight-row strong {
+  color: var(--ink);
+  font-size: 14px;
+  white-space: nowrap;
+}
+
+#gatcha-pool-weight-slider {
+  grid-column: 1 / -1;
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+.pool-config-column {
+  gap: 12px;
+}
+
+.pool-config-list-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.pool-config-bulk-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.pool-config-bulk-actions .toolbar-button {
+  min-height: 32px;
+  padding: 6px 10px;
+  font-size: 12px;
+}
+
+.pool-config-empty {
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: 16px;
+  color: var(--muted);
+  background: rgba(15, 23, 42, 0.46);
+}
+
+.pool-config-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pool-config-head-actions .toolbar-button {
+  min-height: 34px;
+  padding: 7px 12px;
+  font-size: 12px;
+}
+
 .selection-modal-actions {
   margin-top: 18px;
   justify-content: flex-end;
@@ -255,6 +331,13 @@ p {
   padding-bottom: 2px;
   border-top: 1px solid rgba(255, 255, 255, 0.08);
   background: #0b1120;
+}
+
+.gatcha-pool-config-card .selection-modal-actions {
+  margin-top: 12px;
+  padding-top: 0;
+  border-top: 0;
+  background: transparent;
 }
 
 .confirm-text {
@@ -1296,7 +1379,7 @@ h2 {
 }
 
 .player-panel > .panel-head {
-  --player-fullscreen-button-space: clamp(112px, 18ch, 190px);
+  --player-fullscreen-button-space: clamp(220px, 28ch, 300px);
   position: relative;
   display: block;
   min-height: 44px;
@@ -1307,16 +1390,24 @@ h2 {
   min-width: 0;
 }
 
+.player-panel > .panel-head #player-rating-button,
 .player-panel > .panel-head #player-fullscreen-button {
   position: absolute;
   top: 0;
-  right: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   width: max-content;
   min-width: 96px;
   max-width: calc(100% - 8px);
+}
+
+.player-panel > .panel-head #player-rating-button {
+  right: clamp(104px, 15ch, 168px);
+}
+
+.player-panel > .panel-head #player-fullscreen-button {
+  right: 0;
 }
 
 .player-panel:fullscreen,
@@ -2236,6 +2327,7 @@ h2 {
 .empty-hint {
   margin-top: 10px;
   color: rgba(255, 255, 255, 0.68);
+  white-space: pre-line;
 }
 
 .compact-form {
@@ -2589,6 +2681,7 @@ select:disabled {
 
 .song-progress-badge,
 .queue-current-progress-badge {
+  --badge-progress-value: 0;
   position: relative;
   width: var(--queue-badge-size);
   height: var(--queue-badge-size);
@@ -2643,7 +2736,7 @@ select:disabled {
   box-shadow: 0 0 0 4px rgba(255, 51, 102, 0.1);
 }
 
-/* 下载中：不依赖 BBDown 跳跃的百分比，只让细圆环上的一小段转动。 */
+/* 下载中：使用真实缓存百分比填充圆环；总大小未知时保留一小段静态提示。 */
 .song-progress-badge.active,
 .queue-current-progress-badge.active {
   background: rgba(30, 41, 59, 0.96);
@@ -2661,12 +2754,11 @@ select:disabled {
   inset: 0;
   width: 100%;
   height: 100%;
-  /* animation: rotate 1.5s steps(60) infinite; */
-  animation: rotate 2s steps(60) infinite;
   display: none;
   pointer-events: none;
   z-index: 1;
-  will-change: transform;
+  transform: rotate(-90deg);
+  transform-origin: center;
   contain: strict;
 }
 
@@ -2677,11 +2769,17 @@ select:disabled {
 
 .path-fancy {
   stroke: #8b9bb4;
-  stroke-opacity: 0.6;
-  stroke-dasharray: 40, 200;
+  stroke-opacity: 0.68;
+  stroke-dasharray: var(--badge-progress-value) 100;
   stroke-dashoffset: 0;
   stroke-linecap: round;
-  animation: dash 1.5s steps(30) infinite;
+  transition: stroke-dasharray 0.25s ease, stroke-opacity 0.25s ease;
+}
+
+.song-progress-badge.active.indeterminate .path-fancy,
+.queue-current-progress-badge.active.indeterminate .path-fancy {
+  stroke-dasharray: 8 100;
+  stroke-opacity: 0.35;
 }
 
 .song-progress-badge.ready::before,
@@ -3292,7 +3390,15 @@ select:disabled {
   min-height: 0;
 }
 
+.gatcha-head-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .gatcha-uid-toggle,
+.gatcha-pool-config-toggle,
 .search-cookie-toggle {
   flex: 0 0 auto;
   white-space: nowrap;
@@ -3446,10 +3552,25 @@ select:disabled {
   letter-spacing: 0.1em;
 }
 
+#gatcha-result-view {
+  justify-content: stretch;
+}
+
+.gatcha-result-copy {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+
 #gatcha-candidate-title {
   font-size: 15px;
   color: var(--accent-deep);
-  margin: 6px 0;
+  margin: 0;
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 4;
@@ -3462,6 +3583,7 @@ select:disabled {
   gap: 8px;
   width: 100%;
   justify-content: center;
+  margin-top: auto;
 }
 
 .gatcha-main-btn {
@@ -4936,6 +5058,14 @@ select:focus {
   font-weight: 700;
 }
 
+.developer-only {
+  display: none;
+}
+
+.developer-mode .developer-only {
+  display: block;
+}
+
 .search-modal-main {
   position: relative;
   flex: 1;
@@ -5092,6 +5222,50 @@ select:focus {
 .tag-browser-tag-count {
   color: var(--muted);
   font-size: 12px;
+}
+
+.pending-review-browser {
+  width: 100%;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
+  gap: 14px;
+}
+
+.pending-review-head {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding-right: 46px;
+}
+
+.pending-review-title-block {
+  min-width: 0;
+}
+
+.pending-review-title-block h2 {
+  margin: 0;
+  color: var(--text);
+  font-size: 24px;
+  line-height: 1.2;
+}
+
+.pending-review-results {
+  min-height: 0;
+}
+
+.pending-review-message {
+  margin: 0;
+  min-height: 20px;
+}
+
+.pending-review-actions {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
 }
 
 .category-browser {
@@ -5646,6 +5820,37 @@ select:focus {
   background: rgba(148, 163, 184, 0.16);
   color: #f8fafc;
   cursor: pointer;
+}
+
+.rating-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin: 14px 0 0;
+  padding: 4px;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 10px;
+  background: rgba(2, 6, 23, 0.32);
+}
+
+.rating-tabs button {
+  min-height: 34px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: #94a3b8;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.rating-tabs button.active {
+  background: rgba(125, 211, 252, 0.18);
+  color: #f8fafc;
+}
+
+.rating-tabs button:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
 }
 
 .rating-media {

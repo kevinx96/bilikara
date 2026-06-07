@@ -159,6 +159,8 @@ const state = {
   confirmIntent: null,
   bindingIntent: null,
   gatchaFavlistIntent: null,
+  poolConfigData: null,
+  poolConfigSaving: false,
   developerMode: false,
   bilikaraSecret: "",
   bilikaraSecretVerifying: false,
@@ -203,6 +205,14 @@ const state = {
   categoryBrowseLoading: false,
   categoryBrowseSeq: 0,
   categoryBrowseError: "",
+  pendingReviewItems: [],
+  pendingReviewTotal: 0,
+  pendingReviewExportCount: 0,
+  pendingReviewLoading: false,
+  pendingReviewApproving: false,
+  pendingReviewSeq: 0,
+  pendingReviewMessage: "",
+  pendingReviewError: "",
   gatchaUidVisible: false,
   gatchaUidSaving: false,
   gatchaRefreshSaving: false,
@@ -212,11 +222,14 @@ const state = {
   updatePreviewEnabled: false,
   ratingPromptElement: null,
   ratingPromptItem: null,
+  ratingPromptItems: null,
+  ratingPromptActiveTab: "current",
   ratingPromptItemId: "",
   ratingPromptBvid: "",
   ratingPromptScore: 5,
   ratingPromptSubmitted: false,
   ratingPromptSeenPlayIds: new Set(),
+  ratingSubmittedKeys: new Set(),
   ratingOptOut: false,
   appToastTimer: null,
   fullscreenRequestToastTimer: null,
@@ -262,6 +275,7 @@ const elements = {
   currentTitle: document.getElementById("current-title"),
   playerPanel: document.querySelector(".player-panel"),
   playerFrame: document.getElementById("player-frame"),
+  playerRatingButton: document.getElementById("player-rating-button"),
   playerFullscreenButton: document.getElementById("player-fullscreen-button"),
   fullscreenRequestToast: document.getElementById("fullscreen-request-toast"),
   audioVariantBar: document.getElementById("audio-variant-bar"),
@@ -332,6 +346,21 @@ const elements = {
   gatchaFavlistModalClose: document.getElementById("gatcha-favlist-modal-close"),
   gatchaFavlistModalCancel: document.getElementById("gatcha-favlist-modal-cancel"),
   gatchaFavlistModalConfirm: document.getElementById("gatcha-favlist-modal-confirm"),
+  poolConfigModal: document.getElementById("gatcha-pool-config-modal"),
+  poolConfigModalBackdrop: document.getElementById("gatcha-pool-config-modal-backdrop"),
+  poolConfigModalClose: document.getElementById("gatcha-pool-config-modal-close"),
+  poolConfigModalCancel: document.getElementById("gatcha-pool-config-modal-cancel"),
+  poolConfigModalReset: document.getElementById("gatcha-pool-config-modal-reset"),
+  poolConfigModalSave: document.getElementById("gatcha-pool-config-modal-save"),
+  poolConfigWeightSlider: document.getElementById("gatcha-pool-weight-slider"),
+  poolConfigWeightLabel: document.getElementById("gatcha-pool-weight-label"),
+  poolConfigUidOptions: document.getElementById("gatcha-pool-uid-options"),
+  poolConfigFavlistOptions: document.getElementById("gatcha-pool-favlist-options"),
+  poolConfigUidSelectAll: document.getElementById("gatcha-pool-uid-select-all"),
+  poolConfigUidSelectNone: document.getElementById("gatcha-pool-uid-select-none"),
+  poolConfigFavlistSelectAll: document.getElementById("gatcha-pool-favlist-select-all"),
+  poolConfigFavlistSelectNone: document.getElementById("gatcha-pool-favlist-select-none"),
+  poolConfigMessage: document.getElementById("gatcha-pool-config-message"),
   copyRemoteUrlButton: document.getElementById("copy-remote-url-button"),
   remoteQrImage: document.getElementById("remote-qr-image"),
   remoteQrPlaceholder: document.getElementById("remote-qr-placeholder"),
@@ -386,6 +415,7 @@ const elements = {
   gatchaTitle: document.getElementById("gatcha-title"),
   gatchaStage: document.getElementById("gatcha-stage"),
   gatchaButton: document.getElementById("gatcha-button"),
+  gatchaPoolConfigToggle: document.getElementById("gatcha-pool-config-toggle"),
   gatchaUidToggle: document.getElementById("gatcha-uid-toggle"),
   gatchaMainView: document.getElementById("gatcha-main-view"),
   gatchaUidView: document.getElementById("gatcha-uid-view"),
@@ -809,6 +839,19 @@ function renderPlayerFullscreenButton() {
   setElementTitle(button, title);
 }
 
+function renderPlayerRatingButton() {
+  const button = elements.playerRatingButton;
+  if (!button) {
+    return;
+  }
+  const currentItem = state.data?.current_item;
+  const enabled = Boolean(currentItem?.bvid);
+  const submitted = enabled && hasSubmittedSongRating(currentItem);
+  button.disabled = !enabled || submitted;
+  setTextContent(button, submitted ? t("rating.rated") : t("rating.rate"));
+  setElementTitle(button, submitted ? t("rating.ratedTitle") : t("rating.rateTitle"));
+}
+
 function requestElementFullscreen(element) {
   if (!element) {
     return Promise.resolve(false);
@@ -1102,14 +1145,17 @@ async function apiPost(url, payload = {}) {
 
 function submitSongRating(item, score) {
   const bvid = String(item?.bvid || "").trim();
-  const playId = String(item?.play_id || item?.id || state.ratingPromptItemId || bvid).trim();
-  const sessionUserName = selectedRequesterName()
-    || String(item?.requester_name || "").trim()
-    || String(state.data?.current_item?.requester_name || "").trim()
-    || String(state.data?.session_users?.[0] || "").trim()
-    || "unknown";
-  if (!bvid) {
+  const playId = ratingSubmissionPlayId(item);
+  const sessionUserName = ratingSubmissionUserName(item);
+  const submissionKey = ratingSubmissionKey(item);
+  if (!bvid || !playId) {
     return null;
+  }
+  if (submissionKey && state.ratingSubmittedKeys.has(submissionKey)) {
+    return false;
+  }
+  if (submissionKey) {
+    state.ratingSubmittedKeys.add(submissionKey);
   }
   const payload = {
     session_user_name: sessionUserName,
@@ -1122,6 +1168,10 @@ function submitSongRating(item, score) {
     headers: clientHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(payload),
   }).catch((error) => {
+    if (submissionKey) {
+      state.ratingSubmittedKeys.delete(submissionKey);
+      renderPlayerRatingButton();
+    }
     console.warn("Rating submit failed:", error);
   });
   return true;
@@ -1131,10 +1181,92 @@ function ratingItemUrl(item) {
   return String(item?.resolved_url || item?.original_url || item?.url || "").trim();
 }
 
+function safeHttpUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return "";
+  }
+  try {
+    const url = new URL(raw, window.location.href);
+    return url.protocol === "http:" || url.protocol === "https:" ? url.href : "";
+  } catch {
+    return "";
+  }
+}
+
 function ratingOwnerUid(item) {
   const rawMid = item?.owner_mid ?? item?.mid;
   const uid = String(rawMid || "").trim();
   return /^\d+$/.test(uid) ? uid : "";
+}
+
+function ratingSubmissionUserName(item) {
+  return selectedRequesterName()
+    || String(item?.requester_name || "").trim()
+    || String(state.data?.current_item?.requester_name || "").trim()
+    || String(state.data?.session_users?.[0] || "").trim()
+    || "unknown";
+}
+
+function ratingSubmissionPlayId(item) {
+  const bvid = String(item?.bvid || "").trim();
+  return String(item?.play_id || item?.id || state.ratingPromptItemId || bvid).trim();
+}
+
+function ratingSubmissionKey(item) {
+  const playId = ratingSubmissionPlayId(item);
+  if (!playId) {
+    return "";
+  }
+  return `${ratingSubmissionUserName(item).toLowerCase()}::${playId}`;
+}
+
+function hasSubmittedSongRating(item) {
+  const key = ratingSubmissionKey(item);
+  return Boolean(key && state.ratingSubmittedKeys.has(key));
+}
+
+function normalizeRatingPromptItem(item) {
+  if (!item) {
+    return null;
+  }
+  const id = String(item.id || item.item_id || item.play_id || item.bvid || "").trim();
+  return {
+    ...item,
+    id,
+    play_id: String(item.play_id || item.item_id || id).trim(),
+    bvid: String(item.bvid || "").trim(),
+    cover_url: String(item.cover_url || "").trim(),
+  };
+}
+
+function previousRatingPromptItem(currentItem) {
+  const currentId = String(currentItem?.id || "").trim();
+  const playedItems = Array.isArray(state.data?.session_played) ? state.data.session_played : [];
+  for (let index = playedItems.length - 1; index >= 0; index -= 1) {
+    const entry = playedItems[index];
+    const entryId = String(entry?.item_id || entry?.id || "").trim();
+    if (entryId && entryId !== currentId) {
+      const candidate = normalizeRatingPromptItem({ ...entry, id: entryId, play_id: entryId });
+      return candidate?.bvid ? candidate : null;
+    }
+  }
+  return null;
+}
+
+function ratingPromptItemsForItem(item) {
+  return {
+    previous: previousRatingPromptItem(item),
+    current: normalizeRatingPromptItem(item),
+  };
+}
+
+function activeRatingPromptItem() {
+  return normalizeRatingPromptItem(
+    state.ratingPromptItems?.[state.ratingPromptActiveTab]
+      || state.ratingPromptItems?.current
+      || state.ratingPromptItem,
+  );
 }
 
 function renderRatingStars() {
@@ -1149,6 +1281,89 @@ function renderRatingStars() {
   });
 }
 
+function renderRatingPromptContent() {
+  const root = state.ratingPromptElement;
+  if (!root) {
+    return;
+  }
+  const activeItem = activeRatingPromptItem();
+  state.ratingPromptItem = activeItem;
+  state.ratingPromptBvid = String(activeItem?.bvid || "").trim();
+
+  root.querySelectorAll("[data-rating-tab]").forEach((button) => {
+    const tab = button.dataset.ratingTab;
+    const hasItem = Boolean(state.ratingPromptItems?.[tab]);
+    button.disabled = !hasItem;
+    button.classList.toggle("active", tab === state.ratingPromptActiveTab);
+    button.setAttribute("aria-selected", tab === state.ratingPromptActiveTab ? "true" : "false");
+  });
+
+  const content = root.querySelector("[data-rating-content]");
+  if (!content || !activeItem) {
+    return;
+  }
+  const bvid = String(activeItem.bvid || "").trim();
+  const ownerName = String(activeItem.owner_name || "").trim() || t("rating.unknownOwner");
+  const coverUrl = safeHttpUrl(activeItem.cover_url);
+  const url = safeHttpUrl(ratingItemUrl(activeItem) || (bvid ? `https://www.bilibili.com/video/${bvid}` : ""));
+  const titleKey = state.ratingPromptActiveTab === "previous" ? "rating.previousTitle" : "rating.title";
+  const media = document.createElement("div");
+  media.className = "rating-media";
+  if (coverUrl) {
+    const image = document.createElement("img");
+    image.className = "rating-cover";
+    image.src = coverUrl;
+    image.alt = "";
+    image.loading = "lazy";
+    image.referrerPolicy = "no-referrer";
+    media.appendChild(image);
+  } else {
+    const placeholder = document.createElement("div");
+    placeholder.className = "rating-cover rating-cover-empty";
+    media.appendChild(placeholder);
+  }
+  const copy = document.createElement("div");
+  copy.className = "rating-copy";
+  const kicker = document.createElement("p");
+  kicker.className = "rating-kicker";
+  kicker.textContent = t("rating.kicker");
+  const title = document.createElement("h2");
+  title.textContent = t(titleKey);
+  const hint = document.createElement("p");
+  hint.className = "rating-hint";
+  hint.textContent = t("rating.hint");
+  const owner = document.createElement("p");
+  owner.className = "rating-owner";
+  owner.textContent = t("rating.owner", { owner: ownerName });
+  copy.append(kicker, title, hint, owner);
+  if (url) {
+    const link = document.createElement("a");
+    link.className = "rating-link";
+    link.href = url;
+    link.target = "_blank";
+    link.rel = "noreferrer";
+    link.textContent = url;
+    copy.appendChild(link);
+  }
+  media.appendChild(copy);
+  content.replaceChildren(media);
+  const addUpButton = root.querySelector("[data-rating-add-up]");
+  if (addUpButton) {
+    const ownerUid = ratingOwnerUid(activeItem);
+    addUpButton.disabled = !ownerUid;
+    addUpButton.textContent = ownerUid ? t("rating.addUp") : t("rating.missingUid");
+  }
+  renderRatingStars();
+}
+
+function setRatingPromptActiveTab(tab) {
+  if (!state.ratingPromptElement || !state.ratingPromptItems?.[tab]) {
+    return;
+  }
+  state.ratingPromptActiveTab = tab;
+  renderRatingPromptContent();
+}
+
 function closeRatingPrompt({ submit = true } = {}) {
   const root = state.ratingPromptElement;
   if (!root) {
@@ -1158,15 +1373,18 @@ function closeRatingPrompt({ submit = true } = {}) {
   const bvid = state.ratingPromptBvid;
   const shouldSubmit = submit && !state.ratingPromptSubmitted && !state.ratingOptOut && bvid;
   state.ratingPromptSubmitted = true;
-  const promptItem = state.ratingPromptItem;
+  const promptItem = activeRatingPromptItem();
   root.remove();
   state.ratingPromptElement = null;
   state.ratingPromptItem = null;
+  state.ratingPromptItems = null;
+  state.ratingPromptActiveTab = "current";
   state.ratingPromptItemId = "";
   state.ratingPromptBvid = "";
 
   if (shouldSubmit) {
     submitSongRating({ ...(promptItem || item), bvid }, state.ratingPromptScore);
+    renderPlayerRatingButton();
   }
 }
 
@@ -1174,70 +1392,59 @@ function setRatingOptOut(enabled) {
   state.ratingOptOut = Boolean(enabled);
 }
 
-function openRatingPrompt(item) {
+function openRatingPrompt(item, options = {}) {
   const bvid = String(item?.bvid || "").trim();
   const playId = String(item?.id || bvid).trim();
-  if (!item || !bvid || !playId || state.ratingOptOut || state.ratingPromptSeenPlayIds.has(playId)) {
+  const force = Boolean(options.force);
+  if (!item || !bvid || !playId || state.ratingOptOut || (!force && state.ratingPromptSeenPlayIds.has(playId))) {
     return;
   }
   if (fullscreenElement()) {
     return;
   }
+  const promptItems = ratingPromptItemsForItem(item);
   closeRatingPrompt({ submit: true });
   state.ratingPromptSeenPlayIds.add(playId);
   state.ratingPromptItemId = playId;
-  state.ratingPromptItem = item;
+  state.ratingPromptItems = promptItems;
+  state.ratingPromptActiveTab = "current";
+  state.ratingPromptItem = promptItems.current;
   state.ratingPromptBvid = bvid;
   state.ratingPromptScore = 5;
   state.ratingPromptSubmitted = false;
 
-  const ownerName = String(item.owner_name || "").trim() || t("rating.unknownOwner");
-  const coverUrl = String(item.cover_url || "").trim();
-  const url = ratingItemUrl(item) || `https://www.bilibili.com/video/${bvid}`;
-  const ownerUid = ratingOwnerUid(item);
   const root = document.createElement("div");
   root.className = "rating-modal";
   root.innerHTML = `
     <div class="rating-modal-backdrop" data-rating-close></div>
     <section class="rating-card" role="dialog" aria-modal="true" aria-label="${htmlT("rating.dialogLabel")}">
       <button type="button" class="rating-close" data-rating-close aria-label="${htmlT("rating.closeLabel")}">×</button>
-      <div class="rating-media">
-        ${coverUrl ? `<img class="rating-cover" src="${escapeHtml(coverUrl)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : `<div class="rating-cover rating-cover-empty"></div>`}
-        <div class="rating-copy">
-          <p class="rating-kicker">${htmlT("rating.kicker")}</p>
-          <h2>${htmlT("rating.title")}</h2>
-          <p class="rating-hint">${htmlT("rating.hint")}</p>
-          <p class="rating-owner">${htmlT("rating.owner", { owner: ownerName })}</p>
-          <a class="rating-link" href="${escapeHtml(url)}" target="_blank" rel="noreferrer">${escapeHtml(url)}</a>
-        </div>
-      </div>
+      <div data-rating-content></div>
       <div class="rating-stars" role="radiogroup" aria-label="${htmlT("rating.scoreLabel")}">
         ${[1, 2, 3, 4, 5].map((score) => `<button type="button" data-rating-score="${score}" aria-label="${htmlT("rating.scoreAria", { score })}">★</button>`).join("")}
       </div>
       <div class="rating-actions">
-        <button type="button" class="toolbar-button" data-rating-add-up ${ownerUid ? "" : "disabled"}>${ownerUid ? htmlT("rating.addUp") : htmlT("rating.missingUid")}</button>
+        <button type="button" class="toolbar-button" data-rating-add-up>${htmlT("rating.addUp")}</button>
         <button type="button" class="next-button" data-rating-close>${htmlT("rating.done")}</button>
       </div>
       <label class="rating-opt-out">
         <input type="checkbox" data-rating-opt-out>
         <span>${htmlT("rating.optOut")}</span>
       </label>
+      <div class="rating-tabs" role="tablist" aria-label="${htmlT("rating.dialogLabel")}">
+        <button type="button" data-rating-tab="previous" role="tab" ${promptItems.previous ? "" : "disabled"}>${htmlT("rating.previousTab")}</button>
+        <button type="button" data-rating-tab="current" role="tab">${htmlT("rating.currentTab")}</button>
+      </div>
       <p class="rating-message" data-rating-message></p>
     </section>
   `;
   document.body.appendChild(root);
   state.ratingPromptElement = root;
-  renderRatingStars();
+  renderRatingPromptContent();
 }
 
 function maybeShowRatingPromptForProgress(item, currentTime, duration) {
-  const bvid = String(item?.bvid || "").trim();
-  const seconds = Number(currentTime || 0);
-  const totalSeconds = Number(duration || 0);
-  if (!item || !bvid || !(totalSeconds > 0) || seconds / totalSeconds < 0.8) {
-    return;
-  }
-  openRatingPrompt(item);
+  return;
 }
 
 function handleRatingCurrentItemChange(currentItem) {
@@ -1247,7 +1454,12 @@ function handleRatingCurrentItemChange(currentItem) {
   const currentId = String(currentItem?.id || "");
   if (!currentId || currentId !== state.ratingPromptItemId) {
     closeRatingPrompt({ submit: true });
+    return;
   }
+}
+
+function handleRequesterSelectionChange() {
+  render();
 }
 
 async function apiGet(url, options = {}) {
@@ -1413,6 +1625,21 @@ async function fetchD1Browse({ kind = "name", letter = "", query = "", tag = "",
   return payload.data || { kind, letter: normalizedLetter, query: normalizedQuery, tag: normalizedTag, tags: [], items: [] };
 }
 
+async function fetchPendingReviewItems() {
+  return apiPost("/api/admin-review/pending", {
+    BILIKARA_ADMIN_SECRET: state.bilikaraSecret,
+    limit: 20,
+  });
+}
+
+async function approvePendingReviewItems(bvids) {
+  return apiPost("/api/admin-review/approve", {
+    BILIKARA_ADMIN_SECRET: state.bilikaraSecret,
+    bvids: Array.isArray(bvids) ? bvids : [],
+    limit: 20,
+  });
+}
+
 async function fetchD1CategoryBrowse({ tags = [], query = "", offset = 0, limit = 100 } = {}) {
   const params = new URLSearchParams();
   const normalizedTags = uniqueD1BrowseAliases(
@@ -1490,6 +1717,22 @@ async function fetchGatchaFavlistBrowse(folderId = "", query = "") {
   return payload.data || { folders: [], items: [] };
 }
 
+async function fetchPoolConfig() {
+  const response = await fetch("/api/gatcha/pool-config", {
+    cache: "no-store",
+    headers: clientHeaders(),
+  });
+  const payload = await response.json();
+  if (!response.ok || !payload.ok) {
+    throw new Error(localizedApiMessage(payload.error) || t("gatcha.poolLoadFailed"));
+  }
+  return payload.data || {};
+}
+
+async function savePoolConfig(payload) {
+  return apiPost("/api/gatcha/pool-config", payload);
+}
+
 async function previewGatchaUid(uid) {
   return apiPost("/api/gatcha/uids/preview", { uid: String(uid || "").trim() });
 }
@@ -1559,6 +1802,20 @@ function setDeveloperMode(enabled) {
   state.developerMode = Boolean(enabled);
   if (!state.developerMode) {
     state.bilikaraSecret = "";
+    state.pendingReviewItems = [];
+    state.pendingReviewMessage = "";
+    state.pendingReviewError = "";
+    const activeReviewButton = Array.from(elements.searchSidebarItems || []).find(
+      (button) => button.dataset.target === "review" && button.classList.contains("active"),
+    );
+    if (activeReviewButton) {
+      elements.searchSidebarItems?.forEach((button) => {
+        button.classList.toggle("active", button.dataset.target === "search");
+      });
+      elements.searchModalPlaceholder?.classList.remove("hidden");
+      elements.favlistBrowserView?.classList.add("hidden");
+      elements.searchModalOtherView?.classList.add("hidden");
+    }
   }
   document.body?.classList.toggle("developer-mode", state.developerMode);
   elements.appShell?.classList.toggle("developer-mode", state.developerMode);
@@ -1739,6 +1996,7 @@ async function deleteDeveloperD1Entry(snapshot) {
     bvid: snapshot.bvid,
     BILIKARA_ADMIN_SECRET: state.bilikaraSecret,
   });
+  removePendingReviewItem(snapshot.bvid);
   setAppMessage(`已删除 ${snapshot.bvid} 的 D1 条目。`);
 }
 
@@ -1751,6 +2009,12 @@ async function deleteDeveloperD1EntriesByMid(snapshot) {
     mid,
     BILIKARA_ADMIN_SECRET: state.bilikaraSecret,
   });
+  if (Array.isArray(state.pendingReviewItems) && mid) {
+    state.pendingReviewItems = state.pendingReviewItems.filter((item) => String(item?.mid || "").trim() !== mid);
+    if (elements.searchModalOtherView?.querySelector("[data-pending-review-view]")) {
+      renderPendingReviewView();
+    }
+  }
   const deleted = Number(result?.deleted_count ?? result?.changed ?? 0);
   setAppMessage(`已按 MID ${mid} 删除 ${deleted} 条 D1 条目。`);
 }
@@ -2826,6 +3090,171 @@ async function loadD1Browse({ kind = state.d1BrowseKind || "name", letter = stat
   }
 }
 
+function ensurePendingReviewView() {
+  if (!elements.searchModalOtherView) {
+    return null;
+  }
+  elements.searchModalOtherView.classList.add("search-modal-browser-view");
+  let view = elements.searchModalOtherView.querySelector("[data-pending-review-view]");
+  if (view) {
+    return view;
+  }
+  elements.searchModalOtherView.textContent = "";
+  view = document.createElement("div");
+  view.className = "pending-review-browser";
+  view.dataset.pendingReviewView = "1";
+  view.innerHTML = `
+    <div class="pending-review-head">
+      <div class="pending-review-title-block">
+        <p class="section-tag" data-pending-review-eyebrow></p>
+        <h2 data-pending-review-title></h2>
+      </div>
+      <button type="button" class="toolbar-button" data-pending-review-refresh></button>
+    </div>
+    <div class="search-results pending-review-results hidden" data-pending-review-results></div>
+    <p class="gatcha-message pending-review-message" data-pending-review-message role="status"></p>
+    <div class="pending-review-actions">
+      <button type="button" class="next-button" data-pending-review-approve></button>
+    </div>
+  `;
+  elements.searchModalOtherView.appendChild(view);
+  return view;
+}
+
+function renderPendingReviewView() {
+  const view = ensurePendingReviewView();
+  if (!view) {
+    return;
+  }
+  const eyebrow = view.querySelector("[data-pending-review-eyebrow]");
+  const title = view.querySelector("[data-pending-review-title]");
+  const refreshButton = view.querySelector("[data-pending-review-refresh]");
+  const results = view.querySelector("[data-pending-review-results]");
+  const message = view.querySelector("[data-pending-review-message]");
+  const approveButton = view.querySelector("[data-pending-review-approve]");
+  const items = Array.isArray(state.pendingReviewItems) ? state.pendingReviewItems : [];
+
+  if (eyebrow) {
+    eyebrow.textContent = "D1 REVIEW";
+  }
+  if (title) {
+    title.textContent = t("search.reviewPending");
+  }
+  if (refreshButton) {
+    refreshButton.textContent = t("search.reviewRefresh");
+    refreshButton.disabled = state.pendingReviewLoading || state.pendingReviewApproving;
+  }
+  if (results) {
+    renderSearchResultItems(
+      results,
+      items,
+      state.pendingReviewLoading ? t("search.reviewLoading") : t("search.reviewEmpty"),
+    );
+  }
+  if (message) {
+    let text = state.pendingReviewMessage || "";
+    if (state.pendingReviewError) {
+      text = state.pendingReviewError;
+    } else if (state.pendingReviewLoading) {
+      text = t("search.reviewLoading");
+    } else if (!text && items.length) {
+      text = t("search.reviewFound", {
+        count: items.length,
+        total: state.pendingReviewTotal,
+        exportCount: state.pendingReviewExportCount,
+      });
+    }
+    message.textContent = text;
+    message.classList.toggle("is-error", Boolean(state.pendingReviewError));
+  }
+  if (approveButton) {
+    approveButton.textContent = state.pendingReviewApproving ? t("search.reviewApproving") : t("search.reviewApprove");
+    approveButton.disabled = state.pendingReviewLoading || state.pendingReviewApproving || !items.length;
+  }
+}
+
+async function loadPendingReviewItems() {
+  if (!state.developerMode || !state.bilikaraSecret) {
+    state.pendingReviewItems = [];
+    state.pendingReviewMessage = "";
+    state.pendingReviewError = t("search.reviewNeedDeveloper");
+    renderPendingReviewView();
+    return;
+  }
+  const reviewSeq = state.pendingReviewSeq + 1;
+  state.pendingReviewSeq = reviewSeq;
+  state.pendingReviewLoading = true;
+  state.pendingReviewMessage = "";
+  state.pendingReviewError = "";
+  renderPendingReviewView();
+  try {
+    const payload = await fetchPendingReviewItems();
+    if (state.pendingReviewSeq !== reviewSeq) {
+      return;
+    }
+    state.pendingReviewItems = Array.isArray(payload?.items) ? payload.items : [];
+    state.pendingReviewTotal = Number(payload?.total_pending || 0);
+    state.pendingReviewExportCount = Number(payload?.export_count || 0);
+  } catch (error) {
+    if (state.pendingReviewSeq === reviewSeq) {
+      state.pendingReviewItems = [];
+      state.pendingReviewError = error?.message || t("error.requestFailed");
+    }
+  } finally {
+    if (state.pendingReviewSeq === reviewSeq) {
+      state.pendingReviewLoading = false;
+      renderPendingReviewView();
+    }
+  }
+}
+
+function removePendingReviewItem(bvid) {
+  const normalizedBvid = String(bvid || "").trim();
+  if (!normalizedBvid || !Array.isArray(state.pendingReviewItems)) {
+    return;
+  }
+  const nextItems = state.pendingReviewItems.filter((item) => searchResultBvid(item) !== normalizedBvid);
+  if (nextItems.length === state.pendingReviewItems.length) {
+    return;
+  }
+  state.pendingReviewItems = nextItems;
+  state.pendingReviewTotal = Math.max(0, Number(state.pendingReviewTotal || 0) - 1);
+  if (elements.searchModalOtherView?.querySelector("[data-pending-review-view]")) {
+    renderPendingReviewView();
+  }
+}
+
+async function approvePendingReviewVisibleItems() {
+  if (state.pendingReviewLoading || state.pendingReviewApproving) {
+    return;
+  }
+  const bvids = (Array.isArray(state.pendingReviewItems) ? state.pendingReviewItems : [])
+    .map((item) => searchResultBvid(item))
+    .filter(Boolean);
+  if (!bvids.length) {
+    return;
+  }
+  state.pendingReviewApproving = true;
+  state.pendingReviewMessage = "";
+  state.pendingReviewError = "";
+  renderPendingReviewView();
+  try {
+    const payload = await approvePendingReviewItems(bvids);
+    state.pendingReviewItems = Array.isArray(payload?.items) ? payload.items : [];
+    state.pendingReviewTotal = Number(payload?.total_pending || 0);
+    state.pendingReviewExportCount = Number(payload?.export_count || 0);
+    state.pendingReviewMessage = t("search.reviewApproved", {
+      count: Number(payload?.approved || 0),
+      skipped: Number(payload?.skipped_missing || 0),
+    });
+  } catch (error) {
+    state.pendingReviewError = error?.message || t("error.requestFailed");
+  } finally {
+    state.pendingReviewApproving = false;
+    renderPendingReviewView();
+  }
+}
+
 function ensureCategoryBrowseView() {
   if (!elements.searchModalOtherView) {
     return null;
@@ -3824,6 +4253,7 @@ function render() {
   renderVolumeControls(playbackMode);
   applyStoredVolumeToMountedPlayer();
   renderPlayer(currentItem, playbackMode);
+  renderPlayerRatingButton();
   renderPlayerFullscreenButton();
   applyRemotePlayerControl(data.player_control_command, currentItem, playbackMode);
   renderQueueCurrent(currentItem);
@@ -4496,6 +4926,10 @@ function renderQueueCurrent(currentItem) {
     label: currentState.label,
     title: currentItem.display_title,
     requesterText,
+    cacheProgress: currentItem.cache_progress,
+    cacheSizeBytes: currentItem.cache_size_bytes,
+    cacheDownloadCurrent: currentItem.cache_download_current_bytes,
+    cacheDownloadTotal: currentItem.cache_download_total_bytes,
     language: state.language,
   });
 
@@ -4515,6 +4949,7 @@ function renderQueueCurrent(currentItem) {
     setClassToggle(elements.queueCurrentProgressBadge, "active", currentState.state === "caching");
     setClassToggle(elements.queueCurrentProgressBadge, "ready", currentState.state === "playing");
     setClassToggle(elements.queueCurrentProgressBadge, "failed", currentState.state === "failed");
+    syncCacheProgressBadge(elements.queueCurrentProgressBadge, currentItem, currentState.state === "caching");
   }
 
   syncRetryButton(elements.queueCurrentRetry, currentItem);
@@ -4529,6 +4964,10 @@ function currentStatusForItem(item) {
   }
   if (item.cache_status === "failed") {
     return { state: "failed", label: t("status.failed") };
+  }
+  const progressPercent = cacheProgressPercentForItem(item);
+  if (progressPercent !== null) {
+    return { state: "caching", label: `${progressPercent}%` };
   }
   const size = Number(item.cache_size_bytes || 0);
   if (size > 0) {
@@ -5673,7 +6112,7 @@ function renderAudioVariantBar(currentItem, playbackMode) {
     }
     state.audioVariantBarRenderSignature = signature;
     if (elements.audioVariantBar.childElementCount) {
-      elements.audioVariantBar.innerHTML = "";
+      elements.audioVariantBar.replaceChildren();
     }
     setClassToggle(elements.audioVariantBar, "hidden", true);
     state.audioVariantBarExpanded = false;
@@ -5695,7 +6134,7 @@ function renderAudioVariantBar(currentItem, playbackMode) {
     }
     state.audioVariantBarRenderSignature = signature;
     if (elements.audioVariantBar.childElementCount) {
-      elements.audioVariantBar.innerHTML = "";
+      elements.audioVariantBar.replaceChildren();
     }
     setClassToggle(elements.audioVariantBar, "hidden", true);
     state.audioVariantBarExpanded = false;
@@ -5729,7 +6168,7 @@ function renderAudioVariantBar(currentItem, playbackMode) {
   }
   state.audioVariantBarRenderSignature = signature;
 
-  elements.audioVariantBar.innerHTML = "";
+  elements.audioVariantBar.replaceChildren();
   const list = document.createElement("div");
   list.className = "audio-variant-list";
   variants.forEach((variant) => {
@@ -5753,7 +6192,10 @@ function renderAudioVariantBar(currentItem, playbackMode) {
   toggleButton.dataset.action = "toggle-audio-variants";
   toggleButton.setAttribute("aria-label", state.audioVariantBarExpanded ? t("player.collapseParts") : t("player.expandParts"));
   toggleButton.setAttribute("aria-expanded", String(state.audioVariantBarExpanded));
-  toggleButton.innerHTML = '<span aria-hidden="true">▾</span>';
+  const toggleIcon = document.createElement("span");
+  toggleIcon.setAttribute("aria-hidden", "true");
+  toggleIcon.textContent = "▾";
+  toggleButton.appendChild(toggleIcon);
 
   elements.audioVariantBar.append(list, toggleButton);
   elements.audioVariantBar.classList.remove("is-collapsed", "is-expanded");
@@ -5868,59 +6310,62 @@ function renderPlayer(currentItem, playbackMode) {
   teardownMountedPlayer({ preserveAdvanceDelayOverlay });
 
   if (!currentItem) {
-    elements.playerFrame.innerHTML = `<div class="empty-state"><p>${escapeHtml(t("player.emptyShort"))}</p></div>`;
+    const empty = document.createElement("div");
+    empty.className = "empty-state";
+    const text = document.createElement("p");
+    text.textContent = t("player.emptyShort");
+    empty.appendChild(text);
+    elements.playerFrame.replaceChildren(empty);
     return;
   }
 
   // LEGACY: online embed playback is kept for reference, but normal frontend
   // rendering now passes only the local mode.
   if (playbackMode === "online") {
-    elements.playerFrame.innerHTML = `
-      <iframe
-        src="${escapeHtml(currentItem.embed_url)}"
-        allow="autoplay; fullscreen"
-        allowfullscreen="true"
-        referrerpolicy="origin"
-        sandbox="allow-same-origin allow-scripts allow-popups allow-popups-to-escape-sandbox"
-        title="${escapeHtml(currentItem.display_title)}"
-      ></iframe>
-    `;
+    const iframeSrc = safeHttpUrl(currentItem.embed_url);
+    const iframe = document.createElement("iframe");
+    iframe.src = iframeSrc || "about:blank";
+    iframe.allow = "autoplay; fullscreen";
+    iframe.allowFullscreen = true;
+    iframe.referrerPolicy = "origin";
+    iframe.setAttribute("sandbox", "allow-same-origin allow-scripts allow-popups allow-popups-to-escape-sandbox");
+    iframe.title = String(currentItem.display_title || "");
+    elements.playerFrame.replaceChildren(iframe);
     return;
   }
 
   if (!hasSplitPlayback) {
-    elements.playerFrame.innerHTML = `
-      <div class="empty-state">
-        <p>${escapeHtml(t("player.preparingTracks"))}</p>
-        <p class="empty-hint">${escapeHtml(
-          localizedCacheMessage(currentItem.cache_message, currentItem.cache_status) || t("player.cachingFallback"),
-        )}</p>
-      </div>
-    `;
+    const empty = document.createElement("div");
+    empty.className = "empty-state";
+    const text = document.createElement("p");
+    text.textContent = t("player.preparingTracks");
+    const hint = document.createElement("p");
+    hint.className = "empty-hint";
+    hint.textContent = localizedCacheMessage(currentItem.cache_message, currentItem.cache_status) || t("player.cachingFallback");
+    empty.append(text, hint);
+    elements.playerFrame.replaceChildren(empty);
     return;
   }
 
   const willShowOverlay = hasPendingSongTransitionOverlayForItem(currentItem);
   const isDelaying = state.localAdvanceDelayDeadline > 0 && Date.now() < state.localAdvanceDelayDeadline;
   const shouldAutoplay = !(willShowOverlay || isDelaying);
-  const autoplayAttr = shouldAutoplay ? "autoplay" : "";
 
-  elements.playerFrame.innerHTML = `
-    <video
-      data-player-role="video"
-      controls
-      controlsList="nofullscreen"
-      ${autoplayAttr}
-      playsinline
-      preload="metadata"
-      src="${escapeHtml(selectedVideoUrl)}"
-    ></video>
-    <audio
-      data-player-role="audio"
-      preload="auto"
-      src="${escapeHtml(selectedAudioUrl)}"
-    ></audio>
-  `;
+  const videoElement = document.createElement("video");
+  videoElement.dataset.playerRole = "video";
+  videoElement.controls = true;
+  videoElement.setAttribute("controlsList", "nofullscreen");
+  if (shouldAutoplay) {
+    videoElement.autoplay = true;
+  }
+  videoElement.playsInline = true;
+  videoElement.preload = "metadata";
+  videoElement.src = selectedVideoUrl;
+  const audioElement = document.createElement("audio");
+  audioElement.dataset.playerRole = "audio";
+  audioElement.preload = "auto";
+  audioElement.src = selectedAudioUrl;
+  elements.playerFrame.replaceChildren(videoElement, audioElement);
 
   const video = elements.playerFrame.querySelector('video[data-player-role="video"]');
   const audio = elements.playerFrame.querySelector('audio[data-player-role="audio"]');
@@ -6564,15 +7009,19 @@ function reportPlayerStatusHeartbeat(itemId, video) {
 
 function renderPlaylist(playlist, currentItem, cachePolicy) {
   if (!playlist.length) {
-    const emptyMessage = state.data?.current_item
-      ? `<div class="queue-empty"><p>${htmlT("list.emptyWithCurrentTitle")}</p><p>${htmlT("list.emptyWithCurrentHint")}</p></div>`
-      : `<div class="queue-empty"><p>${htmlT("list.emptyTitle")}</p><p>${htmlT("list.emptyHint")}</p></div>`;
     const signature = `${state.data?.current_item ? "empty-with-current" : "empty"}|${state.language}`;
     if (signature === state.playlistEmptyRenderSignature) {
       return;
     }
     state.playlistEmptyRenderSignature = signature;
-    elements.playlist.innerHTML = emptyMessage;
+    const emptyNode = document.createElement("div");
+    emptyNode.className = "queue-empty";
+    const title = document.createElement("p");
+    title.textContent = state.data?.current_item ? t("list.emptyWithCurrentTitle") : t("list.emptyTitle");
+    const hint = document.createElement("p");
+    hint.textContent = state.data?.current_item ? t("list.emptyWithCurrentHint") : t("list.emptyHint");
+    emptyNode.append(title, hint);
+    elements.playlist.replaceChildren(emptyNode);
     return;
   }
 
@@ -6636,6 +7085,9 @@ function renderPlaylist(playlist, currentItem, cachePolicy) {
       sizeText,
       noteText,
       cacheProgress: item.cache_progress,
+      cacheDownloadCurrent: item.cache_download_current_bytes,
+      cacheDownloadTotal: item.cache_download_total_bytes,
+      progressPercent: cacheProgressPercentForItem(item),
       language: state.language,
     });
     if (node.dataset.dynamicSignature !== dynamicSignature) {
@@ -6645,6 +7097,7 @@ function renderPlaylist(playlist, currentItem, cachePolicy) {
       setClassToggle(badge, "idle", badgeState === "idle");
       setClassToggle(badge, "ready", item.cache_status === "ready");
       setClassToggle(badge, "failed", item.cache_status === "failed");
+      syncCacheProgressBadge(badge, item, badgeState === "active");
       if (badge.style.getPropertyValue("--badge-delay") !== badgeDelay) {
         badge.style.setProperty("--badge-delay", badgeDelay);
       }
@@ -6782,10 +7235,17 @@ function renderHistory(history) {
     return;
   }
   state.historyRenderSignature = signature;
-  elements.historyList.innerHTML = "";
+  elements.historyList.replaceChildren();
 
   if (!history.length) {
-    elements.historyList.innerHTML = `<div class="queue-empty"><p>${htmlT("history.emptyTitle")}</p><p>${htmlT("history.emptyHint")}</p></div>`;
+    const emptyNode = document.createElement("div");
+    emptyNode.className = "queue-empty";
+    const title = document.createElement("p");
+    title.textContent = t("history.emptyTitle");
+    const hint = document.createElement("p");
+    hint.textContent = t("history.emptyHint");
+    emptyNode.append(title, hint);
+    elements.historyList.appendChild(emptyNode);
     return;
   }
 
@@ -6884,7 +7344,41 @@ function formatCacheUsage(cachePolicy) {
   return t("service.cacheUsageDetail", { usage, count: cachedItemCount });
 }
 
+function cacheProgressPercentForItem(item) {
+  if (!item || item.cache_status !== "downloading") {
+    return null;
+  }
+  const totalBytes = Number(item.cache_download_total_bytes || 0);
+  const currentBytes = Number(item.cache_download_current_bytes || 0);
+  if (totalBytes > 0) {
+    return Math.max(0, Math.min(99, Math.round((currentBytes / totalBytes) * 100)));
+  }
+  const cacheProgress = Number(item.cache_progress || 0);
+  if (cacheProgress > 0 && cacheProgress < 100) {
+    return Math.max(0, Math.min(99, Math.round(cacheProgress)));
+  }
+  return null;
+}
+
+function syncCacheProgressBadge(badge, item, isActive) {
+  if (!badge) {
+    return;
+  }
+  const progressPercent = isActive ? cacheProgressPercentForItem(item) : null;
+  const hasProgress = progressPercent !== null;
+  setClassToggle(badge, "has-progress", hasProgress);
+  setClassToggle(badge, "indeterminate", Boolean(isActive && !hasProgress));
+  const progressValue = hasProgress ? String(Math.max(0, Math.min(100, progressPercent))) : "0";
+  if (badge.style.getPropertyValue("--badge-progress-value") !== progressValue) {
+    badge.style.setProperty("--badge-progress-value", progressValue);
+  }
+}
+
 function cacheSizeLabelForItem(item) {
+  const progressPercent = cacheProgressPercentForItem(item);
+  if (progressPercent !== null) {
+    return `${progressPercent}%`;
+  }
   const size = Number(item.cache_size_bytes || 0);
   if (size > 0) {
     return formatCompactBytes(size);
@@ -7410,6 +7904,219 @@ async function confirmGatchaFavlistModal() {
   } finally {
     state.gatchaFavlistSaving = false;
     renderGatchaUidFace();
+  }
+}
+
+function poolConfigFolderId(folder) {
+  return String(folder?.id || folder?.folder_id || "").trim();
+}
+
+function poolConfigSetMessage(message, isError = false) {
+  if (!elements.poolConfigMessage) {
+    return;
+  }
+  elements.poolConfigMessage.textContent = message || "";
+  elements.poolConfigMessage.classList.toggle("is-error", Boolean(isError));
+}
+
+function updatePoolConfigWeightLabel() {
+  const uidWeight = Math.max(0, Math.min(100, Number(elements.poolConfigWeightSlider?.value || 50)));
+  const favlistWeight = 100 - uidWeight;
+  if (elements.poolConfigWeightLabel) {
+    elements.poolConfigWeightLabel.textContent = t("gatcha.poolWeightValue", {
+      uid: uidWeight,
+      favlist: favlistWeight,
+    });
+  }
+}
+
+function renderPoolConfigOption({ type, id, title, meta, checked }) {
+  const label = document.createElement("label");
+  label.className = "selection-option pool-config-option";
+
+  const input = document.createElement("input");
+  input.type = "checkbox";
+  input.name = type === "uid" ? "gatcha-pool-uid" : "gatcha-pool-favlist";
+  input.value = String(id || "");
+  input.checked = Boolean(checked);
+
+  const copy = document.createElement("div");
+  const titleEl = document.createElement("div");
+  titleEl.className = "selection-option-title";
+  titleEl.textContent = title || id;
+  const metaEl = document.createElement("div");
+  metaEl.className = "selection-option-meta";
+  metaEl.textContent = meta || "";
+  copy.append(titleEl, metaEl);
+  label.append(input, copy);
+  return label;
+}
+
+function renderPoolConfigModal() {
+  const data = state.poolConfigData || {};
+  const excludedUids = new Set((Array.isArray(data.excluded_uids) ? data.excluded_uids : []).map(String));
+  const excludedFolders = new Set((Array.isArray(data.excluded_favlist_folders) ? data.excluded_favlist_folders : []).map(String));
+  const uidWeight = Math.max(0, Math.min(100, Number(data.uid_weight ?? 50)));
+
+  if (elements.poolConfigWeightSlider) {
+    elements.poolConfigWeightSlider.value = String(uidWeight);
+    elements.poolConfigWeightSlider.disabled = state.poolConfigSaving;
+  }
+  updatePoolConfigWeightLabel();
+
+  if (elements.poolConfigUidOptions) {
+    elements.poolConfigUidOptions.innerHTML = "";
+    const uids = Array.isArray(data.uid_options) ? data.uid_options : [];
+    if (!uids.length) {
+      const empty = document.createElement("p");
+      empty.className = "pool-config-empty";
+      empty.textContent = t("gatcha.poolEmptyUid");
+      elements.poolConfigUidOptions.appendChild(empty);
+    } else {
+      uids.forEach((owner) => {
+        const uid = String(owner.uid || "").trim();
+        elements.poolConfigUidOptions.appendChild(renderPoolConfigOption({
+          type: "uid",
+          id: uid,
+          title: owner.name || `UID ${uid}`,
+          meta: t("gatcha.poolOptionCount", { count: Number(owner.count || 0) }),
+          checked: uid && !excludedUids.has(uid),
+        }));
+      });
+    }
+  }
+
+  if (elements.poolConfigFavlistOptions) {
+    elements.poolConfigFavlistOptions.innerHTML = "";
+    const folders = Array.isArray(data.favlist_folder_options) ? data.favlist_folder_options : [];
+    if (!folders.length) {
+      const empty = document.createElement("p");
+      empty.className = "pool-config-empty";
+      empty.textContent = t("gatcha.poolEmptyFavlist");
+      elements.poolConfigFavlistOptions.appendChild(empty);
+    } else {
+      folders.forEach((folder) => {
+        const id = poolConfigFolderId(folder);
+        const title = folder.title || t("favlist.folderWithId", { id });
+        const meta = folder.uid
+          ? t("gatcha.poolFavlistMeta", { uid: folder.uid, count: Number(folder.count || folder.media_count || 0) })
+          : t("gatcha.poolOptionCount", { count: Number(folder.count || folder.media_count || 0) });
+        elements.poolConfigFavlistOptions.appendChild(renderPoolConfigOption({
+          type: "favlist",
+          id,
+          title,
+          meta,
+          checked: id && !excludedFolders.has(id),
+        }));
+      });
+    }
+  }
+
+  const hasUidOptions = Boolean(elements.poolConfigUidOptions?.querySelector('input[name="gatcha-pool-uid"]'));
+  const hasFavlistOptions = Boolean(elements.poolConfigFavlistOptions?.querySelector('input[name="gatcha-pool-favlist"]'));
+  [elements.poolConfigUidSelectAll, elements.poolConfigUidSelectNone].forEach((button) => {
+    if (button) button.disabled = state.poolConfigSaving || !hasUidOptions;
+  });
+  [elements.poolConfigFavlistSelectAll, elements.poolConfigFavlistSelectNone].forEach((button) => {
+    if (button) button.disabled = state.poolConfigSaving || !hasFavlistOptions;
+  });
+  if (elements.poolConfigModalReset) {
+    const detailLoaded = Array.isArray(data.uid_options) || Array.isArray(data.favlist_folder_options);
+    elements.poolConfigModalReset.disabled = state.poolConfigSaving || !detailLoaded;
+  }
+  if (elements.poolConfigModalSave) {
+    const detailLoaded = Array.isArray(data.uid_options) || Array.isArray(data.favlist_folder_options);
+    elements.poolConfigModalSave.disabled = state.poolConfigSaving || !detailLoaded;
+    elements.poolConfigModalSave.textContent = state.poolConfigSaving ? t("gatcha.poolSaving") : t("gatcha.poolSave");
+  }
+}
+
+async function openPoolConfigModal() {
+  if (!elements.poolConfigModal || !elements.poolConfigModal.classList.contains("hidden")) {
+    return;
+  }
+  state.poolConfigSaving = false;
+  state.poolConfigData = state.data?.gatcha_pool_config || {};
+  elements.poolConfigModal.classList.remove("hidden");
+  renderPoolConfigModal();
+  poolConfigSetMessage(t("gatcha.poolLoading"));
+  try {
+    state.poolConfigData = await fetchPoolConfig();
+    poolConfigSetMessage("");
+  } catch (error) {
+    poolConfigSetMessage(error.message, true);
+  }
+  renderPoolConfigModal();
+}
+
+function closePoolConfigModal() {
+  state.poolConfigData = null;
+  state.poolConfigSaving = false;
+  elements.poolConfigModal?.classList.add("hidden");
+  poolConfigSetMessage("");
+}
+
+function setPoolConfigChecked(name, checked) {
+  document.querySelectorAll(`input[name="${name}"]`).forEach((input) => {
+    input.checked = Boolean(checked);
+  });
+}
+
+function resetPoolConfigControls() {
+  if (elements.poolConfigWeightSlider) {
+    elements.poolConfigWeightSlider.value = "50";
+  }
+  updatePoolConfigWeightLabel();
+  setPoolConfigChecked("gatcha-pool-uid", true);
+  setPoolConfigChecked("gatcha-pool-favlist", true);
+  poolConfigSetMessage("");
+}
+
+function poolConfigExcludedValues(name) {
+  return [...document.querySelectorAll(`input[name="${name}"]`)]
+    .filter((input) => !input.checked)
+    .map((input) => String(input.value || "").trim())
+    .filter(Boolean);
+}
+
+async function submitPoolConfigModal() {
+  if (state.poolConfigSaving) {
+    return;
+  }
+  const uidWeight = Math.max(0, Math.min(100, Number(elements.poolConfigWeightSlider?.value || 50)));
+  const payload = {
+    uid_weight: uidWeight,
+    favlist_weight: 100 - uidWeight,
+    excluded_uids: poolConfigExcludedValues("gatcha-pool-uid"),
+    excluded_favlist_folders: poolConfigExcludedValues("gatcha-pool-favlist"),
+  };
+  state.poolConfigData = {
+    ...(state.poolConfigData || {}),
+    ...payload,
+  };
+  state.poolConfigSaving = true;
+  renderPoolConfigModal();
+  poolConfigSetMessage(t("gatcha.poolSaving"));
+  try {
+    state.poolConfigData = await savePoolConfig(payload);
+    if (state.data) {
+      state.data.gatcha_pool_config = {
+        uid_weight: state.poolConfigData.uid_weight,
+        favlist_weight: state.poolConfigData.favlist_weight,
+        excluded_uids: state.poolConfigData.excluded_uids || [],
+        excluded_favlist_folders: state.poolConfigData.excluded_favlist_folders || [],
+        updated_at: state.poolConfigData.updated_at || 0,
+      };
+    }
+    closePoolConfigModal();
+    setAppMessage(t("gatcha.poolSaved"));
+  } catch (error) {
+    poolConfigSetMessage(error.message, true);
+  } finally {
+    state.poolConfigSaving = false;
+    if (elements.poolConfigModal && !elements.poolConfigModal.classList.contains("hidden")) {
+      renderPoolConfigModal();
+    }
   }
 }
 
@@ -8551,6 +9258,15 @@ elements.historyToggleButton.addEventListener("click", () => {
   render();
 });
 
+elements.playerRatingButton?.addEventListener("click", () => {
+  const currentItem = state.data?.current_item;
+  if (!currentItem?.bvid || hasSubmittedSongRating(currentItem)) {
+    renderPlayerRatingButton();
+    return;
+  }
+  openRatingPrompt(currentItem, { force: true });
+});
+
 elements.playerFullscreenButton?.addEventListener("click", async () => {
   await togglePlayerFullscreen();
   renderPlayerFullscreenButton();
@@ -8860,6 +9576,46 @@ elements.gatchaFavlistModalConfirm?.addEventListener("click", async () => {
   await confirmGatchaFavlistModal();
 });
 
+elements.poolConfigModalClose?.addEventListener("click", () => {
+  closePoolConfigModal();
+});
+
+elements.poolConfigModalCancel?.addEventListener("click", () => {
+  closePoolConfigModal();
+});
+
+elements.poolConfigModalBackdrop?.addEventListener("click", () => {
+  closePoolConfigModal();
+});
+
+elements.poolConfigWeightSlider?.addEventListener("input", () => {
+  updatePoolConfigWeightLabel();
+});
+
+elements.poolConfigModalReset?.addEventListener("click", () => {
+  resetPoolConfigControls();
+});
+
+elements.poolConfigUidSelectAll?.addEventListener("click", () => {
+  setPoolConfigChecked("gatcha-pool-uid", true);
+});
+
+elements.poolConfigUidSelectNone?.addEventListener("click", () => {
+  setPoolConfigChecked("gatcha-pool-uid", false);
+});
+
+elements.poolConfigFavlistSelectAll?.addEventListener("click", () => {
+  setPoolConfigChecked("gatcha-pool-favlist", true);
+});
+
+elements.poolConfigFavlistSelectNone?.addEventListener("click", () => {
+  setPoolConfigChecked("gatcha-pool-favlist", false);
+});
+
+elements.poolConfigModalSave?.addEventListener("click", async () => {
+  await submitPoolConfigModal();
+});
+
 elements.developerModeTrigger?.addEventListener("click", () => {
   openBilikaraSecretModal();
 });
@@ -9049,6 +9805,9 @@ document.addEventListener("keydown", (event) => {
   if (state.gatchaFavlistIntent) {
     closeGatchaFavlistModal();
   }
+  if (elements.poolConfigModal && !elements.poolConfigModal.classList.contains("hidden")) {
+    closePoolConfigModal();
+  }
   if (state.confirmIntent) {
     closeConfirm();
   }
@@ -9237,6 +9996,11 @@ document.addEventListener("click", async (event) => {
   if (!root || !root.contains(event.target)) {
     return;
   }
+  const tabButton = event.target.closest("[data-rating-tab]");
+  if (tabButton) {
+    setRatingPromptActiveTab(tabButton.dataset.ratingTab || "current");
+    return;
+  }
   const scoreButton = event.target.closest("[data-rating-score]");
   if (scoreButton) {
     state.ratingPromptScore = Math.max(1, Math.min(5, Number(scoreButton.dataset.ratingScore || "5")));
@@ -9253,7 +10017,7 @@ document.addEventListener("click", async (event) => {
   }
   const addUpButton = event.target.closest("[data-rating-add-up]");
   if (addUpButton) {
-    const promptItem = state.ratingPromptItem;
+    const promptItem = activeRatingPromptItem();
     const uid = ratingOwnerUid(promptItem);
     const message = root.querySelector("[data-rating-message]");
     if (!uid) {
@@ -9290,6 +10054,8 @@ function handleRatingFullscreenChange() {
 
 document.addEventListener("fullscreenchange", handleRatingFullscreenChange);
 document.addEventListener("webkitfullscreenchange", handleRatingFullscreenChange);
+
+elements.requesterSelect?.addEventListener("change", handleRequesterSelectionChange);
 
 elements.searchExpandButton?.addEventListener("click", () => {
   if (elements.searchModalPlaceholder && elements.searchCardContent && elements.searchModal) {
@@ -9371,6 +10137,20 @@ elements.searchSidebarItems?.forEach((btn) => {
       elements.favlistBrowserView?.classList.add("hidden");
       elements.searchModalOtherView?.classList.remove("hidden");
       renderCategoryBrowseView();
+    } else if (target === "review") {
+      if (!state.developerMode) {
+        btn.classList.remove("active");
+        const searchButton = Array.from(elements.searchSidebarItems || []).find((item) => item.dataset.target === "search");
+        searchButton?.classList.add("active");
+        elements.searchModalPlaceholder?.classList.remove("hidden");
+        elements.favlistBrowserView?.classList.add("hidden");
+        elements.searchModalOtherView?.classList.add("hidden");
+        return;
+      }
+      elements.searchModalPlaceholder?.classList.add("hidden");
+      elements.favlistBrowserView?.classList.add("hidden");
+      elements.searchModalOtherView?.classList.remove("hidden");
+      loadPendingReviewItems();
     } else {
       elements.searchModalPlaceholder?.classList.add("hidden");
       elements.favlistBrowserView?.classList.add("hidden");
@@ -9433,6 +10213,16 @@ elements.searchModalOtherView?.addEventListener("submit", (event) => {
 });
 
 elements.searchModalOtherView?.addEventListener("click", (event) => {
+  const reviewRefreshButton = event.target.closest("[data-pending-review-refresh]");
+  if (reviewRefreshButton && elements.searchModalOtherView.contains(reviewRefreshButton)) {
+    loadPendingReviewItems();
+    return;
+  }
+  const reviewApproveButton = event.target.closest("[data-pending-review-approve]");
+  if (reviewApproveButton && elements.searchModalOtherView.contains(reviewApproveButton)) {
+    approvePendingReviewVisibleItems();
+    return;
+  }
   const categoryBackButton = event.target.closest("[data-category-browse-back]");
   if (categoryBackButton && elements.searchModalOtherView.contains(categoryBackButton)) {
     state.categoryBrowseSelectedId = "";
@@ -9663,6 +10453,10 @@ elements.favlistSongResults?.addEventListener("click", async (event) => {
 elements.gatchaUidToggle?.addEventListener("click", () => {
   state.gatchaUidVisible = !state.gatchaUidVisible;
   renderGatchaUidFace();
+});
+
+elements.gatchaPoolConfigToggle?.addEventListener("click", async () => {
+  await openPoolConfigModal();
 });
 
 elements.gatchaConfirmButton.addEventListener("click", async () => {
