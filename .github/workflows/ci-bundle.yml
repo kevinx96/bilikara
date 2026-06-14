@@ -94,27 +94,30 @@ jobs:
         run: python build_bundle.py
 
       - name: Setup Node.js
+        if: ${{ false }} # Temporarily disable Tauri build for faster release bundles.
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
       - name: Setup Rust
+        if: ${{ false }} # Temporarily disable Tauri build for faster release bundles.
         uses: dtolnay/rust-toolchain@stable
 
       - name: Build Tauri App
+        if: ${{ false }} # Temporarily disable Tauri build for faster release bundles.
         run: |
           npm install
           npx tauri icon static/pic/icon.png
           npm run build
 
       - name: Inject Tauri into Windows Bundle
-        if: runner.os == 'Windows'
+        if: ${{ false }} # Temporarily disable Tauri build for faster release bundles.
         shell: pwsh
         run: Copy-Item src-tauri/target/release/bilikara.exe -Destination dist/bilikara/bilikara-desktop.exe
 
 
       - name: Inject Tauri into macOS Bundle
-        if: runner.os == 'macOS'
+        if: ${{ false }} # Temporarily disable Tauri build for faster release bundles.
         run: cp -r src-tauri/target/release/bundle/macos/bilikara.app dist/Bilikara-Desktop.app
 
       - name: Resolve bundle archive name
