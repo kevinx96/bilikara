@@ -2,6 +2,7 @@ import os
 import tempfile
 import unittest
 import urllib.error
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -308,6 +309,42 @@ class UpdateCheckTest(unittest.TestCase):
         self.assertTrue(is_auto_update_supported(target={"platform": "macos", "arch": "arm64"}, frozen=True))
         self.assertFalse(is_auto_update_supported(target={"platform": "windows", "arch": "x64"}, frozen=False))
         self.assertFalse(is_auto_update_supported(target={"platform": "linux", "arch": "x64"}, frozen=True))
+
+    def test_safe_extract_zip_rejects_partial_extraction(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            archive_path = root / "update.zip"
+            destination = root / "extracted"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("bilikara/bilikara.exe", b"exe")
+                archive.writestr("bilikara/_internal/runtime.dll", b"dll")
+
+            def partial_extract(self, path, *args, **kwargs):
+                target = Path(path)
+                (target / "bilikara").mkdir(parents=True, exist_ok=True)
+                (target / "bilikara" / "bilikara.exe").write_bytes(b"exe")
+
+            with patch("bilikara.updater.zipfile.ZipFile.extractall", partial_extract):
+                with self.assertRaises(updater.AppUpdateError):
+                    updater._safe_extract_zip(archive_path, destination)
+
+            self.assertFalse(destination.exists())
+            self.assertFalse(list(root.glob(".extracted.extracting-*")))
+
+    def test_safe_extract_zip_extracts_complete_archive(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            archive_path = root / "update.zip"
+            destination = root / "extracted"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("bilikara/bilikara.exe", b"exe")
+                archive.writestr("bilikara/_internal/runtime.dll", b"dll")
+
+            updater._safe_extract_zip(archive_path, destination)
+
+            self.assertEqual((destination / "bilikara" / "bilikara.exe").read_bytes(), b"exe")
+            self.assertEqual((destination / "bilikara" / "_internal" / "runtime.dll").read_bytes(), b"dll")
+            self.assertFalse(list(root.glob(".extracted.extracting-*")))
 
 
     def test_restart_launch_executable_uses_tauri_entry(self):
