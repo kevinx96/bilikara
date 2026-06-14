@@ -527,6 +527,8 @@ def _download_url_to_path(
 
 
 def _safe_extract_zip(zip_path: Path, destination: Path) -> Path:
+    if destination.exists():
+        shutil.rmtree(destination)
     destination.mkdir(parents=True, exist_ok=True)
     destination_root = destination.resolve()
     with zipfile.ZipFile(zip_path) as archive:
@@ -534,7 +536,19 @@ def _safe_extract_zip(zip_path: Path, destination: Path) -> Path:
             member_path = (destination / member.filename).resolve()
             if member_path != destination_root and not str(member_path).startswith(str(destination_root) + os.sep):
                 raise AppUpdateError("更新包路径不安全，已停止安装")
-        archive.extractall(destination)
+        try:
+            archive.extractall(destination)
+            for member in archive.infolist():
+                if not member.filename or member.is_dir():
+                    continue
+                member_path = destination / member.filename
+                if not member_path.is_file():
+                    raise AppUpdateError(f"update archive extraction missed {member.filename}")
+                if member_path.stat().st_size != member.file_size:
+                    raise AppUpdateError(f"update archive extraction size mismatch for {member.filename}")
+        except Exception:
+            shutil.rmtree(destination, ignore_errors=True)
+            raise
     return destination
 
 
