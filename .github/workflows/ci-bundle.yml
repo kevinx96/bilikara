@@ -146,7 +146,9 @@ jobs:
         run: |
           mkdir -p dist_release
           mv dist/bilikara.app dist_release/
-          mv dist/Bilikara-Desktop.app dist_release/
+          if [ -d dist/Bilikara-Desktop.app ]; then
+            mv dist/Bilikara-Desktop.app dist_release/
+          fi
           ditto -c -k --sequesterRsrc dist_release "$BUNDLE_ARCHIVE"
 
       - name: Upload Windows bundle artifact
