@@ -1824,7 +1824,7 @@ class BilikaraHandler(BaseHTTPRequestHandler):
                     if (
                         len(remote_url) > 2048
                         or not remote_url.startswith(
-                            "https://rtc.kevinx96.icu/remote.html#"
+                            "https://rtc-dev.kevinx96.icu/remote.html#"
                         )
                     ):
                         raise ValueError("invalid Internet Remote URL")

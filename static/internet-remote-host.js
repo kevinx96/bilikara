@@ -1,7 +1,7 @@
 (function installInternetRemoteHost() {
   "use strict";
 
-  const SIGNAL_ORIGIN = "https://rtc.kevinx96.icu";
+  const SIGNAL_ORIGIN = "https://rtc-dev.kevinx96.icu";
   const MILLISECONDS_PER_HOUR = 60 * 60 * 1000;
   const DEFAULT_ROOM_LIFETIME_HOURS = 12;
   const MIN_ROOM_LIFETIME_HOURS = 1;

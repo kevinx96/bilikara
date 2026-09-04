@@ -83,6 +83,18 @@ class InternetRemoteFrontendTest(unittest.TestCase):
         self.assertNotIn("?host=", self.host_js)
         self.assertNotIn("?join=", self.host_js)
 
+    def test_test_branch_pins_the_isolated_dev_worker_origin(self):
+        self.assertIn(
+            'const SIGNAL_ORIGIN = "https://rtc-dev.kevinx96.icu"',
+            self.host_js,
+        )
+        server = (ROOT / "bilikara" / "server.py").read_text(encoding="utf-8")
+        self.assertIn(
+            '"https://rtc-dev.kevinx96.icu/remote.html#"',
+            server,
+        )
+        self.assertNotIn('"https://rtc.kevinx96.icu/remote.html#"', server)
+
     def test_mode_labels_exist_in_every_language(self):
         languages = json.loads(
             (ROOT / "static" / "i18n.json").read_text(encoding="utf-8")
