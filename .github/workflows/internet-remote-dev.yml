@@ -1,0 +1,73 @@
+name: Sync Internet Remote Dev
+
+on:
+  push:
+    branches:
+      - codex/rtc-dev
+    paths:
+      - .github/workflows/internet-remote-dev.yml
+      - bilikara/server.py
+      - scripts/sync_internet_remote_assets.ps1
+      - static/**
+      - tests/test_internet_remote_frontend.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: internet-remote-dev-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate-and-dispatch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      WORKER_REPO_TOKEN: ${{ secrets.INTERNET_REMOTE_WORKER_TOKEN }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Validate shared Remote contract
+        run: python -m unittest tests.test_internet_remote_frontend -v
+
+      - name: Check browser scripts
+        run: |
+          node --check static/internet-remote-host.js
+          node --check static/internet-remote-transport.js
+          node --check static/remote-transport-client.js
+          node --check static/remote.js
+          node --check static/remote-queue.js
+          node --check static/song-detail.js
+
+      - name: Dispatch private Worker sync
+        if: env.WORKER_REPO_TOKEN != ''
+        uses: actions/github-script@v8
+        with:
+          github-token: ${{ env.WORKER_REPO_TOKEN }}
+          script: |
+            await github.rest.repos.createDispatchEvent({
+              owner: "kevinx96",
+              repo: "bilikara-internet-remote-worker",
+              event_type: "sync-bilikara-dev",
+              client_payload: {
+                source_ref: context.ref.replace(/^refs\/heads\//u, ""),
+                source_sha: context.sha,
+              },
+            });
+
+      - name: Note missing cross-repository token
+        if: env.WORKER_REPO_TOKEN == ''
+        run: echo "::notice::Validation passed; set INTERNET_REMOTE_WORKER_TOKEN to enable automatic private Worker sync."
