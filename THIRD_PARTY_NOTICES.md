@@ -21,6 +21,23 @@ This file is intended to document known third-party components and legal notices
   existing `url` crate (MIT OR Apache-2.0). No Kirakara Show binary is required.
 - Native discovery uses the existing `socket2` 0.6.5 crate (MIT OR Apache-2.0).
 
+## Pure K / DolphinStar authorization adaptation
+
+- Sources: bilikara-next (MIT), commit `7750dca707286e74616a7e08ed5df506b9809b6f`,
+  `rust-runtime/src/native_host/purek.rs`, `purek/{protocol,health,trace,tests}.rs`,
+  with historical behavior from `dd88c12`, `3c8a129`, and `0870f2b`.
+  Copyright (c) 2026 bilikara contributors; permission notice retained in `LICENSE`.
+- Sources: [ChunK-Helper](https://github.com/FMPeach/ChunK-Helper) (MIT),
+  local reference commit `3b00533af18c4938285ded40ca12829c0e89ed9e`,
+  `src/PureKBridge.Core/Qr/PureKQrParser.cs`,
+  `src/PureKBridge.Core/PureK/{DeviceAuthorizationClient,ConnectionServices}.cs`,
+  and `src/PureKBridge.Core/Network/{RendererClient,SsdpAdvertisement,RendererHealthMonitor}.cs`.
+  Copyright (c) 2026 键盘Office; complete permission notice retained in
+  `third_party/ChunK-Helper-LICENSE.txt`.
+- Adaptation: Rust QR policy, authorization lifecycle, health monitoring and
+  loopback fixtures in `rust-runtime/src/dlna/purek/`. These share the DLNA
+  XML/SOAP and control layer; no C# runtime or vendor SDK is bundled.
+
 ## Experimental automatic volume
 
 The shared Rust runtime uses [ebur128 0.1.10](https://github.com/sdroege/ebur128)

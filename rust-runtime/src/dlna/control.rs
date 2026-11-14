@@ -7,8 +7,8 @@ use super::*;
 use dlna_policy::{
     AV_TRANSPORT, CONNECTION_MANAGER, FileMetadata, PositionInfo, RENDERING_CONTROL,
     ServiceEndpoint, TransportState, build_didl, choose_mpeg_ts_protocol_info, format_upnp_time,
-    lan_url, parse_position_info, parse_sink_protocol_info, parse_transport_info, service_version,
-    soap_envelope, validate_route_source, validate_soap_response,
+    lan_url, lan_web_url, parse_position_info, parse_sink_protocol_info, parse_transport_info,
+    service_version, soap_envelope, validate_route_source, validate_soap_response,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,7 +77,7 @@ impl ControlClient {
         timeout: Duration,
         lookup: fn(Ipv4Addr) -> Result<Ipv4Addr, DlnaError>,
     ) -> Result<Self, DlnaError> {
-        let (_, address) = lan_url(&renderer.description.location, policy)?;
+        let (_, address) = lan_web_url(&renderer.description.location, policy)?;
         validate_route_source(renderer.local_address, interfaces, policy)?;
         // A valid interface fallback must survive VPN/TUN route changes.
         // Binding the chosen local source is the transport constraint.
@@ -110,7 +110,7 @@ impl ControlClient {
                 if service_version(&service.service_type, prefix).is_none() {
                     return Err(PolicyError::InvalidService.into());
                 }
-                if lan_url(&service.control_url, policy)?.1 != address {
+                if lan_web_url(&service.control_url, policy)?.1 != address {
                     return Err(PolicyError::ExternalControl.into());
                 }
             }
@@ -142,7 +142,7 @@ impl ControlClient {
             }
             let endpoint = endpoint.ok_or_else(|| DlnaError::new(ErrorCode::Unavailable))?;
             let body = soap_envelope(&endpoint.service_type, action, args)?;
-            let (url, _) = lan_url(&endpoint.control_url, self.policy)?;
+            let (url, _) = lan_web_url(&endpoint.control_url, self.policy)?;
             let reply = http_request(
                 &self.client,
                 url,
