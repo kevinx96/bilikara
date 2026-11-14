@@ -260,7 +260,8 @@ fn actual_http_soap_retries_metadata_and_preserves_xml_arguments() {
 
 #[test]
 fn metadata_retry_is_bounded_and_does_not_retry_transport_errors() {
-    for reply in [Reply::reset(SoapAction::SetAVTransportURI)] {
+    {
+        let reply = Reply::reset(SoapAction::SetAVTransportURI);
         let fixture = Fixture::start(vec![Reply::ok(SoapAction::Stop), reply]);
         let client = fixture_client(&fixture, HTTP_TIMEOUT);
         let uri = format!("http://{}/cast.ts", fixture.address);
@@ -664,4 +665,37 @@ fn lebo_uses_the_same_control_sequence_and_untrusted_routes_are_rejected() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn selected_local_interface_is_used_even_when_the_route_changes_to_tun() {
+    let fixture = Fixture::start(vec![Reply::ok(SoapAction::Play)]);
+    let mut renderer = fixture.renderer();
+    renderer.context.source = DiscoverySource::SearchResponse;
+    renderer.context.route = Some(RouteFacts {
+        selection: Some(LocalSourceKind::ReplyInterface),
+        routed_source_is_local: Some(false),
+        route_matches_selected: Some(false),
+        route_matches_reply: Some(false),
+    });
+    let client = ControlClient::with_route_lookup(
+        renderer,
+        &[Ipv4Addr::LOCALHOST],
+        NetworkPolicy::LoopbackFixture,
+        HTTP_TIMEOUT,
+        |_| Ok(Ipv4Addr::new(198, 18, 0, 1)),
+    )
+    .unwrap();
+    let operation = run(client.play(&CancellationToken::new()));
+    operation.result.unwrap();
+    let context = operation.stages[0].context.as_ref().unwrap();
+    assert_eq!(
+        context.route.as_ref().unwrap().selection,
+        Some(LocalSourceKind::ReplyInterface)
+    );
+    assert_eq!(
+        context.route.as_ref().unwrap().route_matches_selected,
+        Some(false)
+    );
+    assert_eq!(fixture.join()[0].peer.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
 }

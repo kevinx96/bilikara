@@ -3,6 +3,10 @@
 use super::*;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+};
 use std::thread::{self, JoinHandle};
 
 pub fn run<T>(future: impl std::future::Future<Output = T>) -> T {
@@ -220,6 +224,67 @@ impl Fixture {
             )
             .unwrap(),
             local_address: Ipv4Addr::LOCALHOST,
+            context: DeviceContext::new(
+                DiscoverySource::Manual,
+                &format!("http://{}/description.xml", self.address),
+                "uuid:fixture",
+                "",
+            ),
+        }
+    }
+}
+
+/// Counts every actual HTTP fetch, including unexpected duplicate requests.
+/// Drop stops and joins the bounded listener; tests never detach a server.
+pub struct CountingFixture {
+    pub address: SocketAddr,
+    requests: Arc<AtomicUsize>,
+    stop: Arc<AtomicBool>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl CountingFixture {
+    pub fn start(reply: Reply) -> Self {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let count = requests.clone();
+        let stopping = stop.clone();
+        let worker = thread::spawn(move || {
+            while !stopping.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((mut stream, peer)) => {
+                        let request = read_request(&mut stream, peer);
+                        assert!(request.headers.starts_with("GET "));
+                        count.fetch_add(1, Ordering::SeqCst);
+                        write_reply(stream, reply.clone());
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(2))
+                    }
+                    Err(error) => panic!("counting fixture: {error}"),
+                }
+            }
+        });
+        Self {
+            address,
+            requests,
+            stop,
+            worker: Some(worker),
+        }
+    }
+    pub fn count(&self) -> usize {
+        self.requests.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for CountingFixture {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(worker) = self.worker.take() {
+            worker.join().unwrap();
         }
     }
 }

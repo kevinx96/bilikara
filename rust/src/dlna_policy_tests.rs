@@ -587,3 +587,39 @@ fn times_handle_fraction_unavailable_and_overflow() {
         assert_eq!(parse_upnp_time(raw), Err(PolicyError::InvalidTime), "{raw}");
     }
 }
+#[test]
+fn local_source_falls_back_from_nonlocal_or_tun_routes_to_reply_interface() {
+    let target = Ipv4Addr::new(192, 168, 1, 20);
+    let local = Ipv4Addr::new(192, 168, 1, 5);
+    let tun = Ipv4Addr::new(198, 18, 0, 1);
+    for (routed, interfaces) in [
+        (Some(Ipv4Addr::new(10, 7, 0, 2)), vec![local]),
+        (Some(tun), vec![local, tun]),
+        (None, vec![local]),
+    ] {
+        assert_eq!(
+            select_local_source(target, routed, Some(local), &interfaces, NetworkPolicy::Lan),
+            Ok(LocalSource {
+                address: local,
+                kind: LocalSourceKind::ReplyInterface
+            })
+        );
+        assert_eq!(
+            select_local_source(target, routed, None, &interfaces, NetworkPolicy::Lan),
+            Ok(LocalSource {
+                address: local,
+                kind: LocalSourceKind::SameSubnet
+            })
+        );
+    }
+    assert_eq!(
+        select_local_source(target, Some(local), Some(tun), &[local], NetworkPolicy::Lan)
+            .unwrap()
+            .kind,
+        LocalSourceKind::Route
+    );
+    assert_eq!(
+        select_local_source(target, Some(tun), Some(tun), &[tun], NetworkPolicy::Lan),
+        Err(PolicyError::RouteNotLocal)
+    );
+}

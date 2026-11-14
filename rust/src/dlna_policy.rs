@@ -125,6 +125,56 @@ pub fn validate_route_source(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LocalSourceKind {
+    Route,
+    ReplyInterface,
+    SameSubnet,
+    Explicit,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LocalSource {
+    pub address: Ipv4Addr,
+    pub kind: LocalSourceKind,
+}
+
+/// Prefer the OS route, then the proven receiving interface (PR #120), then
+/// a local /24 for unsolicited NOTIFY/manual URLs. Every choice must be local.
+pub fn select_local_source(
+    target: Ipv4Addr,
+    routed: Option<Ipv4Addr>,
+    reply_on: Option<Ipv4Addr>,
+    interfaces: &[Ipv4Addr],
+    policy: NetworkPolicy,
+) -> Result<LocalSource, PolicyError> {
+    if !policy.allows(target) {
+        return Err(PolicyError::AddressNotAllowed);
+    }
+    let valid = |source| validate_route_source(source, interfaces, policy).ok();
+    if let Some(address) = routed.and_then(valid) {
+        return Ok(LocalSource {
+            address,
+            kind: LocalSourceKind::Route,
+        });
+    }
+    if let Some(address) = reply_on.and_then(valid) {
+        return Ok(LocalSource {
+            address,
+            kind: LocalSourceKind::ReplyInterface,
+        });
+    }
+    interfaces
+        .iter()
+        .copied()
+        .find(|source| source.octets()[..3] == target.octets()[..3] && valid(*source).is_some())
+        .map(|address| LocalSource {
+            address,
+            kind: LocalSourceKind::SameSubnet,
+        })
+        .ok_or(PolicyError::RouteNotLocal)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SsdpChannel {
     SearchResponse,
     Notify,

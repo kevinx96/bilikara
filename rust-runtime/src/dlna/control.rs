@@ -55,18 +55,46 @@ impl ControlClient {
         )
     }
 
-    fn with_policy(
+    pub(super) fn with_policy(
         renderer: Renderer,
         interfaces: &[Ipv4Addr],
         policy: NetworkPolicy,
         timeout: Duration,
     ) -> Result<Self, DlnaError> {
+        Self::with_route_lookup(
+            renderer,
+            interfaces,
+            policy,
+            timeout,
+            super::discovery::system_route_source,
+        )
+    }
+
+    fn with_route_lookup(
+        mut renderer: Renderer,
+        interfaces: &[Ipv4Addr],
+        policy: NetworkPolicy,
+        timeout: Duration,
+        lookup: fn(Ipv4Addr) -> Result<Ipv4Addr, DlnaError>,
+    ) -> Result<Self, DlnaError> {
         let (_, address) = lan_url(&renderer.description.location, policy)?;
         validate_route_source(renderer.local_address, interfaces, policy)?;
-        let route = super::discovery::route_source_on(address, interfaces, policy)?;
-        if route != renderer.local_address {
-            return Err(PolicyError::RouteNotLocal.into());
-        }
+        // A valid interface fallback must survive VPN/TUN route changes.
+        // Binding the chosen local source is the transport constraint.
+        let routed = lookup(address).ok();
+        let previous = renderer.context.route.take();
+        renderer.context.route = Some(RouteFacts {
+            selection: Some(
+                previous
+                    .as_ref()
+                    .and_then(|r| r.selection)
+                    .unwrap_or(LocalSourceKind::Explicit),
+            ),
+            routed_source_is_local: routed
+                .map(|source| validate_route_source(source, interfaces, policy).is_ok()),
+            route_matches_selected: routed.map(|source| source == renderer.local_address),
+            route_matches_reply: previous.and_then(|r| r.route_matches_reply),
+        });
         for (service, prefix) in [
             (Some(&renderer.description.av_transport), AV_TRANSPORT),
             (
@@ -149,9 +177,11 @@ impl ControlClient {
         .await;
         let mut stage = StageResult::new(Stage::Action(action), since, status, &result);
         stage.nonconforming_body = nonconforming_body;
+        stage.context = Some(self.renderer.context.clone());
         Operation {
             result,
             stages: vec![stage],
+            dropped_stages: 0,
         }
     }
 
@@ -192,7 +222,11 @@ impl ControlClient {
     ) -> Operation<StartResult> {
         let mut stages = Vec::new();
         let result = self.start_inner(request, cancel, &mut stages).await;
-        Operation { result, stages }
+        Operation {
+            result,
+            stages,
+            dropped_stages: 0,
+        }
     }
 
     async fn start_inner(
@@ -319,13 +353,17 @@ impl ControlClient {
         {
             let result = Err(error);
             return Operation {
-                stages: vec![StageResult::new(
-                    Stage::Action(SoapAction::SetAVTransportURI),
-                    Instant::now(),
-                    None,
-                    &result,
-                )],
+                stages: vec![
+                    StageResult::new(
+                        Stage::Action(SoapAction::SetAVTransportURI),
+                        Instant::now(),
+                        None,
+                        &result,
+                    )
+                    .for_device(&self.renderer.context),
+                ],
                 result,
+                dropped_stages: 0,
             };
         }
         unit(
@@ -402,6 +440,7 @@ fn unit(operation: Operation<String>) -> Operation<()> {
     Operation {
         result: operation.result.map(|_| ()),
         stages: operation.stages,
+        dropped_stages: operation.dropped_stages,
     }
 }
 
@@ -422,6 +461,7 @@ fn parsed<T>(
     Operation {
         result,
         stages: operation.stages,
+        dropped_stages: operation.dropped_stages,
     }
 }
 

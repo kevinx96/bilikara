@@ -6,14 +6,14 @@
 use super::*;
 use dlna_policy::{
     AdvertisementKind, SsdpChannel, SsdpMessage, accept_advertisement, canonical_usn, lan_url,
-    parse_description, parse_ssdp, validate_route_source,
+    parse_description, parse_ssdp, select_local_source, validate_route_source,
 };
 use socket2::{Domain, Protocol, Socket, Type};
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::net::{SocketAddr, UdpSocket as StdUdpSocket};
 use tokio::net::UdpSocket;
-use tokio::task::JoinSet;
+use tokio::task::{AbortHandle, JoinSet};
 
 const MULTICAST: Ipv4Addr = Ipv4Addr::new(239, 255, 255, 250);
 const SSDP_PORT: u16 = 1900;
@@ -21,6 +21,10 @@ pub const SEARCH_WINDOW: Duration = Duration::from_secs(40);
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 const SEND_INTERVAL: Duration = Duration::from_millis(80);
 const DESCRIPTION_RETRY: Duration = Duration::from_secs(1);
+const FAILURE_TTL: Duration = Duration::from_secs(45);
+const CANDIDATE_TTL: Duration = Duration::from_secs(60);
+const MAX_FAILURES: usize = 512;
+const MAX_DESCRIPTION_ATTEMPTS: u8 = 3;
 const MAX_LOCATIONS: usize = 128;
 const DESCRIPTION_WORKERS: usize = 8;
 const MAX_STAGES: usize = 512;
@@ -37,6 +41,8 @@ const SEARCH_TARGETS: [&str; 6] = [
 pub enum DiscoveryUpdate {
     Renderers(Vec<Renderer>),
     Stage(StageResult),
+    /// Cumulative number omitted from the returned bounded stage buffer.
+    StagesDropped(usize),
 }
 
 /// A bounded 40-second scan; publish receives incremental snapshots and stage
@@ -67,6 +73,10 @@ pub(super) fn route_source_on(
     interfaces: &[Ipv4Addr],
     policy: NetworkPolicy,
 ) -> Result<Ipv4Addr, DlnaError> {
+    validate_route_source(system_route_source(target)?, interfaces, policy).map_err(Into::into)
+}
+
+pub(super) fn system_route_source(target: Ipv4Addr) -> Result<Ipv4Addr, DlnaError> {
     // UDP connect consults the OS routing table without sending any packet.
     let socket = StdUdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
         .map_err(|_| DlnaError::new(ErrorCode::RouteUnavailable))?;
@@ -78,9 +88,7 @@ pub(super) fn route_source_on(
         .map_err(|_| DlnaError::new(ErrorCode::RouteUnavailable))?
         .ip()
     {
-        IpAddr::V4(address) => {
-            validate_route_source(address, interfaces, policy).map_err(Into::into)
-        }
+        IpAddr::V4(address) => Ok(address),
         _ => Err(DlnaError::new(ErrorCode::RouteUnavailable)),
     }
 }
@@ -109,43 +117,89 @@ async fn load_on(
     cancel: &CancellationToken,
 ) -> Operation<Renderer> {
     let since = Instant::now();
+    let mut context = DeviceContext::new(DiscoverySource::Manual, location, usn, server);
     let route = if cancel.is_cancelled() {
         Err(DlnaError::new(ErrorCode::Cancelled))
     } else {
         lan_url(location, policy)
             .map_err(DlnaError::from)
-            .and_then(|(_, address)| route_source_on(address, interfaces, policy))
+            .and_then(|(_, address)| {
+                choose_source(
+                    address,
+                    None,
+                    interfaces,
+                    policy,
+                    system_route_source,
+                    &mut context,
+                )
+            })
     };
-    let stages = vec![StageResult::new(Stage::Route, since, None, &route)];
+    let stages = vec![StageResult::new(Stage::Route, since, None, &route).for_device(&context)];
     let local = match route {
         Ok(local) => local,
         Err(error) => {
             return Operation {
                 result: Err(error),
                 stages,
+                dropped_stages: 0,
             };
         }
     };
-    let mut operation =
-        load_description(location, usn, server, local, policy, timeout, cancel).await;
+    let input = DescriptionRequest {
+        location: location.to_owned(),
+        usn: usn.to_owned(),
+        server: server.to_owned(),
+        local,
+        context,
+        attempt: 1,
+    };
+    let mut operation = load_description(http_client(local, timeout), input, policy, cancel).await;
     operation.stages.splice(0..0, stages);
     operation
 }
 
-async fn load_description(
-    location: &str,
-    usn: &str,
-    server: &str,
-    local: Ipv4Addr,
+fn choose_source(
+    target: Ipv4Addr,
+    reply_on: Option<Ipv4Addr>,
+    interfaces: &[Ipv4Addr],
     policy: NetworkPolicy,
-    timeout: Duration,
+    lookup: fn(Ipv4Addr) -> Result<Ipv4Addr, DlnaError>,
+    context: &mut DeviceContext,
+) -> Result<Ipv4Addr, DlnaError> {
+    let routed = lookup(target).ok();
+    let selected = select_local_source(target, routed, reply_on, interfaces, policy);
+    context.route = Some(RouteFacts {
+        selection: selected.as_ref().ok().map(|source| source.kind),
+        routed_source_is_local: routed
+            .map(|source| validate_route_source(source, interfaces, policy).is_ok()),
+        route_matches_selected: routed
+            .zip(selected.as_ref().ok())
+            .map(|(route, selected)| route == selected.address),
+        route_matches_reply: routed.zip(reply_on).map(|(route, reply)| route == reply),
+    });
+    selected.map(|source| source.address).map_err(Into::into)
+}
+
+struct DescriptionRequest {
+    location: String,
+    usn: String,
+    server: String,
+    local: Ipv4Addr,
+    context: DeviceContext,
+    attempt: u8,
+}
+
+async fn load_description(
+    client: Result<reqwest::Client, DlnaError>,
+    input: DescriptionRequest,
+    policy: NetworkPolicy,
     cancel: &CancellationToken,
 ) -> Operation<Renderer> {
     let since = Instant::now();
     let mut status = None;
     let result = async {
-        let client = http_client(local, timeout)?;
-        let (url, _) = lan_url(location, policy)?;
+        let client = client?;
+        let (url, _) = lan_url(&input.location, policy)?;
         let reply = http_request(
             &client,
             url,
@@ -158,18 +212,35 @@ async fn load_description(
         if !(200..300).contains(&reply.status) {
             return Err(DlnaError::new(ErrorCode::HttpStatus).status(reply.status));
         }
-        let description = parse_description(&reply.body, location, usn, server, policy)
-            .map_err(|error| DlnaError::from(error).status(reply.status))?;
+        let description = parse_description(
+            &reply.body,
+            &input.location,
+            &input.usn,
+            &input.server,
+            policy,
+        )
+        .map_err(|error| DlnaError::from(error).status(reply.status))?;
+        let mut context = input.context.clone();
+        context.udn_hash = (description.id != description.location)
+            .then(|| identifier_hash(&canonical_usn(&description.id)));
         Ok(Renderer {
             description,
-            local_address: local,
+            local_address: input.local,
+            context,
         })
     }
     .await;
-    let stage = StageResult::new(Stage::Description, since, status, &result);
+    let context = result
+        .as_ref()
+        .map(|renderer| &renderer.context)
+        .unwrap_or(&input.context);
+    let mut stage =
+        StageResult::new(Stage::Description, since, status, &result).for_device(context);
+    stage.attempt = input.attempt;
     Operation {
         result,
         stages: vec![stage],
+        dropped_stages: 0,
     }
 }
 
@@ -177,6 +248,7 @@ struct Options {
     window: Duration,
     destination: SocketAddr,
     notify_port: u16,
+    route_lookup: fn(Ipv4Addr) -> Result<Ipv4Addr, DlnaError>,
 }
 impl Default for Options {
     fn default() -> Self {
@@ -184,6 +256,7 @@ impl Default for Options {
             window: SEARCH_WINDOW,
             destination: (MULTICAST, SSDP_PORT).into(),
             notify_port: SSDP_PORT,
+            route_lookup: system_route_source,
         }
     }
 }
@@ -277,12 +350,9 @@ async fn discover_on(
     mut publish: impl FnMut(DiscoveryUpdate),
 ) -> Operation<Vec<Renderer>> {
     let since = Instant::now();
-    let mut stages = Vec::new();
+    let mut stages = StageLog::default();
     let mut record = |stage: StageResult| {
-        publish(DiscoveryUpdate::Stage(stage.clone()));
-        if stages.len() < MAX_STAGES {
-            stages.push(stage);
-        }
+        record(stage, &mut publish, &mut stages);
     };
     let result = if cancel.is_cancelled() {
         Err(DlnaError::new(ErrorCode::Cancelled))
@@ -308,8 +378,13 @@ async fn discover_on(
     };
     let stage = StageResult::new(Stage::Discovery, since, None, &result);
     publish(DiscoveryUpdate::Stage(stage.clone()));
-    stages.push(stage);
-    Operation { result, stages }
+    // record() reserves the last buffer slot for this scan-wide result.
+    stages.entries.push(stage);
+    Operation {
+        result,
+        stages: stages.entries,
+        dropped_stages: stages.dropped,
+    }
 }
 
 struct Candidate {
@@ -319,9 +394,64 @@ struct Candidate {
     helper: Option<Ipv4Addr>,
     local: Ipv4Addr,
     renderer: Option<Renderer>,
-    retry_at: Option<Instant>,
-    pending: bool,
-    loading_since: Option<Instant>,
+    context: DeviceContext,
+    attempt: u8,
+    last_seen: u64,
+    expires: Instant,
+    loading: Option<(Instant, AbortHandle)>,
+}
+
+impl Candidate {
+    fn abort(&self) {
+        if let Some((_, task)) = &self.loading {
+            task.abort();
+        }
+    }
+}
+
+struct Failure {
+    attempt: u8,
+    terminal: bool,
+    retry_at: Instant,
+    expires: Instant,
+}
+
+impl Failure {
+    fn new(error: &DlnaError, attempt: u8, now: Instant) -> Self {
+        // Only transport and temporary server failures can change on retry.
+        let transient = error.is_network()
+            || error
+                .http_status
+                .is_some_and(|s| s == 408 || s == 429 || (500..600).contains(&s));
+        Self {
+            attempt,
+            terminal: !transient || attempt >= MAX_DESCRIPTION_ATTEMPTS,
+            retry_at: now + DESCRIPTION_RETRY * (1 << (attempt.saturating_sub(1).min(5))),
+            expires: now + FAILURE_TTL,
+        }
+    }
+    fn permits(&self, now: Instant) -> bool {
+        !self.terminal && now >= self.retry_at
+    }
+}
+
+fn expire_entries(
+    candidates: &mut HashMap<String, Candidate>,
+    failures: &mut HashMap<String, Failure>,
+    now: Instant,
+) -> bool {
+    failures.retain(|_, failure| now < failure.expires);
+    let mut changed = false;
+    candidates.retain(|_, candidate| {
+        if now >= candidate.expires {
+            candidate.abort();
+            changed |= candidate.renderer.is_some();
+            false
+        } else {
+            true
+        }
+    });
+    changed
 }
 
 struct Seen {
@@ -370,15 +500,28 @@ fn snapshot(candidates: &HashMap<String, Candidate>) -> Vec<Renderer> {
     renderers
 }
 
-fn record(
-    stage: StageResult,
-    publish: &mut impl FnMut(DiscoveryUpdate),
-    stages: &mut Vec<StageResult>,
-) {
-    // Bound diagnostic work as well as storage on noisy networks.
-    if stages.len() < MAX_STAGES {
-        publish(DiscoveryUpdate::Stage(stage.clone()));
-        stages.push(stage);
+#[derive(Default)]
+struct StageLog {
+    entries: Vec<StageResult>,
+    dropped: usize,
+}
+
+#[cfg(test)]
+impl std::ops::Deref for StageLog {
+    type Target = [StageResult];
+    fn deref(&self) -> &Self::Target {
+        &self.entries
+    }
+}
+
+fn record(stage: StageResult, publish: &mut impl FnMut(DiscoveryUpdate), stages: &mut StageLog) {
+    // Bound retained storage without hiding later devices from live consumers.
+    publish(DiscoveryUpdate::Stage(stage.clone()));
+    if stages.entries.len() < MAX_STAGES - 1 {
+        stages.entries.push(stage);
+    } else {
+        stages.dropped += 1;
+        publish(DiscoveryUpdate::StagesDropped(stages.dropped));
     }
 }
 
@@ -386,16 +529,15 @@ fn interrupted_descriptions(
     candidates: &HashMap<String, Candidate>,
     code: ErrorCode,
     publish: &mut impl FnMut(DiscoveryUpdate),
-    stages: &mut Vec<StageResult>,
+    stages: &mut StageLog,
 ) {
     for candidate in candidates.values() {
-        if let Some(since) = candidate.loading_since {
+        if let Some((since, _)) = &candidate.loading {
             let result: Result<(), _> = Err(DlnaError::new(code));
-            record(
-                StageResult::new(Stage::Description, since, None, &result),
-                publish,
-                stages,
-            );
+            let mut stage = StageResult::new(Stage::Description, *since, None, &result)
+                .for_device(&candidate.context);
+            stage.attempt = candidate.attempt;
+            record(stage, publish, stages);
         }
     }
 }
@@ -407,15 +549,18 @@ async fn collect_renderers(
     sockets: Sockets,
     cancel: &CancellationToken,
     publish: &mut impl FnMut(DiscoveryUpdate),
-    stages: &mut Vec<StageResult>,
+    stages: &mut StageLog,
 ) -> Result<Vec<Renderer>, DlnaError> {
     let deadline = Instant::now() + options.window;
     let mut send_at = Instant::now();
     let mut targets = SEARCH_TARGETS.into_iter();
     let mut candidates = HashMap::<String, Candidate>::new();
+    let mut failures = HashMap::<String, Failure>::new();
+    let mut clients = HashMap::new();
     let mut jobs = JoinSet::new();
     let mut events = Vec::new();
     let mut load_id = 0;
+    let mut seen_id = 0;
     loop {
         tokio::select! {
             biased;
@@ -454,7 +599,7 @@ async fn collect_renderers(
         for channel in &sockets.search {
             receive_packets(&channel.socket, Some(channel.interface), &mut events);
         }
-        let mut changed = false;
+        let mut changed = expire_entries(&mut candidates, &mut failures, Instant::now());
         for Seen {
             message,
             sender,
@@ -473,6 +618,9 @@ async fn collect_renderers(
                         || candidate.helper == Some(sender);
                     let remove = matches_id && matches_sender;
                     changed |= remove && candidate.renderer.is_some();
+                    if remove {
+                        candidate.abort();
+                    }
                     !remove
                 });
                 continue;
@@ -480,6 +628,12 @@ async fn collect_renderers(
             let Some(location) = message.location else {
                 continue;
             };
+            let source = if reply_on.is_some() {
+                DiscoverySource::SearchResponse
+            } else {
+                DiscoverySource::Notify
+            };
+            let mut context = DeviceContext::new(source, &location, &message.usn, &message.server);
             let since = Instant::now();
             let accepted = accept_advertisement(&location, sender, reply_on, interfaces, policy)
                 .map_err(DlnaError::from);
@@ -487,7 +641,8 @@ async fn collect_renderers(
                 Ok(value) => value,
                 Err(error) => {
                     record(
-                        StageResult::new(Stage::Advertisement, since, None, &Err::<(), _>(error)),
+                        StageResult::new(Stage::Advertisement, since, None, &Err::<(), _>(error))
+                            .for_device(&context),
                         publish,
                         stages,
                     );
@@ -495,14 +650,22 @@ async fn collect_renderers(
                 }
             };
             let location = accepted.url.to_string();
+            seen_id += 1;
             if let Some(candidate) = candidates.get_mut(&location) {
+                candidate.last_seen = seen_id;
+                candidate.expires = Instant::now() + CANDIDATE_TTL;
                 candidate.helper = accepted.helper.or(candidate.helper);
                 if candidate.usn.is_empty() {
                     candidate.usn = message.usn;
                 }
                 if !message.server.is_empty() {
                     candidate.server = message.server;
+                    candidate.context.server = candidate.server.chars().take(256).collect();
                     if let Some(renderer) = candidate.renderer.as_mut() {
+                        renderer
+                            .context
+                            .server
+                            .clone_from(&candidate.context.server);
                         let description = &mut renderer.description;
                         let vendor = dlna_policy::vendor_class(&[
                             &description.manufacturer,
@@ -517,13 +680,38 @@ async fn collect_renderers(
                 }
                 continue;
             }
+            let attempt = if let Some(failure) = failures.get(&location) {
+                if !failure.permits(Instant::now()) {
+                    continue;
+                }
+                failure.attempt + 1
+            } else {
+                1
+            };
             if candidates.len() >= MAX_LOCATIONS {
-                continue;
+                // Protect confirmed renderers first; preempt the oldest pending
+                // candidate, including its HTTP task, so a flood cannot pin slots.
+                if let Some(oldest) = candidates
+                    .iter()
+                    .min_by_key(|(_, c)| (c.renderer.is_some(), c.loading.is_none(), c.last_seen))
+                    .map(|(location, _)| location.clone())
+                    && let Some(candidate) = candidates.remove(&oldest)
+                {
+                    candidate.abort();
+                    changed |= candidate.renderer.is_some();
+                }
             }
             let since = Instant::now();
-            let route = route_source_on(accepted.address, interfaces, policy);
+            let route = choose_source(
+                accepted.address,
+                reply_on,
+                interfaces,
+                policy,
+                options.route_lookup,
+                &mut context,
+            );
             record(
-                StageResult::new(Stage::Route, since, None, &route),
+                StageResult::new(Stage::Route, since, None, &route).for_device(&context),
                 publish,
                 stages,
             );
@@ -538,55 +726,93 @@ async fn collect_renderers(
                     helper: accepted.helper,
                     local,
                     renderer: None,
-                    retry_at: None,
-                    pending: true,
-                    loading_since: None,
+                    context,
+                    attempt,
+                    last_seen: seen_id,
+                    expires: Instant::now() + CANDIDATE_TTL,
+                    loading: None,
                 },
             );
         }
-        while let Some(Ok((location, id, operation))) = jobs.try_join_next() {
+        while let Some(completed) = jobs.try_join_next() {
+            let Ok((location, id, operation)) = completed else {
+                continue;
+            };
             let operation: Operation<Renderer> = operation;
+            if !candidates.get(&location).is_some_and(|c| c.load_id == id) {
+                continue;
+            }
             for stage in operation.stages {
                 record(stage, publish, stages);
             }
-            if let Some(candidate) = candidates.get_mut(&location)
-                && candidate.load_id == id
-            {
-                candidate.pending = false;
-                candidate.loading_since = None;
-                changed |= operation.result.is_ok();
-                candidate.retry_at = operation
-                    .result
-                    .is_err()
-                    .then(|| Instant::now() + DESCRIPTION_RETRY);
-                candidate.renderer = operation.result.ok();
+            if let Ok(mut renderer) = operation.result {
+                let candidate = candidates.get_mut(&location).expect("matched load id");
+                candidate.loading = None;
+                // A later announcement can supply a SERVER header while HTTP
+                // is in flight. Preserve it without changing the correlation key.
+                renderer
+                    .context
+                    .server
+                    .clone_from(&candidate.context.server);
+                renderer.description.vendor_class = dlna_policy::vendor_class(&[
+                    &renderer.description.manufacturer,
+                    &renderer.description.model_name,
+                    &renderer.description.model_description,
+                    &renderer.description.name,
+                    &candidate.server,
+                ]);
+                candidate.context = renderer.context.clone();
+                candidate.renderer = Some(renderer);
+                failures.remove(&location);
+                changed = true;
+            } else if let Err(error) = operation.result {
+                let candidate = candidates.remove(&location).expect("matched load id");
+                if failures.len() >= MAX_FAILURES
+                    && let Some(oldest) = failures
+                        .iter()
+                        .min_by_key(|(_, f)| f.expires)
+                        .map(|(key, _)| key.clone())
+                {
+                    failures.remove(&oldest);
+                }
+                failures.insert(
+                    location,
+                    Failure::new(&error, candidate.attempt, Instant::now()),
+                );
             }
         }
-        for (location, candidate) in &mut candidates {
+        // Most recently advertised candidates enter the bounded worker pool
+        // first. Old queued junk must not delay a newly received real renderer.
+        let mut queued: Vec<_> = candidates
+            .iter()
+            .filter(|(_, c)| c.renderer.is_none() && c.loading.is_none())
+            .map(|(location, c)| (c.last_seen, location.clone()))
+            .collect();
+        queued.sort_unstable_by(|a, b| b.cmp(a));
+        for (_, location) in queued {
             if jobs.len() >= DESCRIPTION_WORKERS {
                 break;
             }
-            if candidate.pending && candidate.retry_at.is_none()
-                || candidate.retry_at.is_some_and(|at| Instant::now() >= at)
-            {
-                let location = location.clone();
-                let usn = candidate.usn.clone();
-                let server = candidate.server.clone();
-                let local = candidate.local;
+            if let Some(candidate) = candidates.get_mut(&location) {
+                let input = DescriptionRequest {
+                    location: location.clone(),
+                    usn: candidate.usn.clone(),
+                    server: candidate.server.clone(),
+                    local: candidate.local,
+                    context: candidate.context.clone(),
+                    attempt: candidate.attempt,
+                };
+                let client = clients
+                    .entry(candidate.local)
+                    .or_insert_with(|| http_client(candidate.local, HTTP_TIMEOUT))
+                    .clone();
                 let id = candidate.load_id;
                 let cancel = cancel.clone();
-                let timeout = deadline
-                    .saturating_duration_since(Instant::now())
-                    .min(HTTP_TIMEOUT);
-                candidate.pending = false;
-                candidate.retry_at = None;
-                candidate.loading_since = Some(Instant::now());
-                jobs.spawn(async move {
-                    let operation =
-                        load_description(&location, &usn, &server, local, policy, timeout, &cancel)
-                            .await;
+                let task = jobs.spawn(async move {
+                    let operation = load_description(client, input, policy, &cancel).await;
                     (location, id, operation)
                 });
+                candidate.loading = Some((Instant::now(), task));
             }
         }
         if changed {

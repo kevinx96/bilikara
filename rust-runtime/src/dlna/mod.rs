@@ -11,7 +11,8 @@ mod test_support;
 pub use bilikara_rust::dlna_policy;
 pub use tokio_util::sync::CancellationToken;
 
-use dlna_policy::{NetworkPolicy, PolicyError, RendererDescription, SoapAction};
+use dlna_policy::{LocalSourceKind, NetworkPolicy, PolicyError, RendererDescription, SoapAction};
+use sha2::{Digest, Sha256};
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::{Duration, Instant};
 use url::Url;
@@ -21,8 +22,64 @@ pub const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Renderer {
     pub description: RendererDescription,
-    /// Route-selected source, verified against OS interface facts.
+    /// Selected source (including interface fallback), verified as local.
     pub local_address: Ipv4Addr,
+    pub context: DeviceContext,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiscoverySource {
+    SearchResponse,
+    Notify,
+    Manual,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RouteFacts {
+    pub selection: Option<LocalSourceKind>,
+    pub routed_source_is_local: Option<bool>,
+    pub route_matches_selected: Option<bool>,
+    pub route_matches_reply: Option<bool>,
+}
+
+/// Correlates stages without exposing LOCATION, addresses or raw USN/UDN.
+/// SERVER is untrusted, truncated metadata; diagnostic exporters must redact
+/// embedded identifiers just as they do manufacturer/model/friendlyName.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeviceContext {
+    /// SHA-256 first 16 bytes, from canonical advertised USN or normalized URL.
+    /// Remains unchanged when a missing UDN is learned from the description.
+    pub device_key: String,
+    pub udn_hash: Option<String>,
+    pub source: DiscoverySource,
+    pub server: String,
+    pub route: Option<RouteFacts>,
+}
+
+fn identifier_hash(value: &str) -> String {
+    Sha256::digest(value.as_bytes())[..16]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+impl DeviceContext {
+    fn new(source: DiscoverySource, location: &str, usn: &str, server: &str) -> Self {
+        let usn = dlna_policy::canonical_usn(usn);
+        let udn_hash = (!usn.is_empty()).then(|| identifier_hash(&usn));
+        Self {
+            device_key: udn_hash.clone().unwrap_or_else(|| {
+                Url::parse(location).map_or_else(
+                    |_| identifier_hash(location),
+                    |url| identifier_hash(url.as_str()),
+                )
+            }),
+            udn_hash,
+            source,
+            server: server.chars().take(256).collect(),
+            route: None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -186,6 +243,8 @@ pub struct StageResult {
     pub disposition: Disposition,
     /// Successful no-value acknowledgements may have an empty or vendor body.
     pub nonconforming_body: Option<PolicyError>,
+    /// None only for scan-wide socket/search stages.
+    pub context: Option<DeviceContext>,
 }
 
 impl StageResult {
@@ -204,7 +263,12 @@ impl StageResult {
             result: result.as_ref().map(|_| ()).map_err(Clone::clone),
             disposition: Disposition::Applied,
             nonconforming_body: None,
+            context: None,
         }
+    }
+    fn for_device(mut self, context: &DeviceContext) -> Self {
+        self.context = Some(context.clone());
+        self
     }
 }
 
@@ -213,6 +277,8 @@ impl StageResult {
 pub struct Operation<T> {
     pub result: Result<T, DlnaError>,
     pub stages: Vec<StageResult>,
+    /// Retention limit reached; live discovery stages are still published.
+    pub dropped_stages: usize,
 }
 
 pub(crate) fn local_ipv4(policy: NetworkPolicy) -> Vec<Ipv4Addr> {

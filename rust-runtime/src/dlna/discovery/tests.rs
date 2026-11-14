@@ -25,7 +25,7 @@ fn deeply_nested_description_from_notify_returns_structured_error() {
                     )
                     .await
                     .unwrap();
-                let mut stages = Vec::new();
+                let mut stages = StageLog::default();
                 let result = collect_renderers(
                     &[Ipv4Addr::LOCALHOST],
                     NetworkPolicy::LoopbackFixture,
@@ -60,6 +60,7 @@ fn options(destination: SocketAddr, window: Duration) -> Options {
         window,
         destination,
         notify_port: 0,
+        ..Options::default()
     }
 }
 
@@ -120,6 +121,16 @@ fn msearch_visits_each_interface_and_all_targets_without_vendor_filtering() {
             dlna_policy::VendorClass::Generic
         );
         assert_eq!(renderers[0].local_address, local);
+        assert_eq!(renderers[0].context.source, DiscoverySource::SearchResponse);
+        assert_eq!(renderers[0].context.server, "Example/1.0");
+        assert!(
+            operation
+                .stages
+                .iter()
+                .filter(|stage| matches!(stage.stage, Stage::Route | Stage::Description))
+                .all(|stage| stage.context.as_ref().unwrap().device_key
+                    == renderers[0].context.device_key)
+        );
         assert!(
             updates
                 .iter()
@@ -153,7 +164,7 @@ fn unsolicited_notify_loads_a_description_and_withdraws_before_search_ends() {
         let trigger = cancel.clone();
         let (published, mut snapshots) = tokio::sync::mpsc::unbounded_channel();
         let worker = tokio::spawn(async move {
-            let mut stages = Vec::new();
+            let mut stages = StageLog::default();
             collect_renderers(
                 &[Ipv4Addr::LOCALHOST],
                 NetworkPolicy::LoopbackFixture,
@@ -184,6 +195,7 @@ fn unsolicited_notify_loads_a_description_and_withdraws_before_search_ends() {
             .unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].description.name, "Notify Only");
+        assert_eq!(found[0].context.source, DiscoverySource::Notify);
         let byebye =
             b"NOTIFY * HTTP/1.1\r\nNTS: ssdp:byebye\r\nUSN: uuid:fixture::upnp:rootdevice\r\n\r\n";
         let spoof = UdpSocket::bind((Ipv4Addr::new(127, 0, 0, 2), 0))
@@ -254,6 +266,7 @@ fn no_interfaces_and_notify_port_conflicts_degrade_without_panicking() {
                 window: Duration::from_millis(60),
                 destination: destination.local_addr().unwrap(),
                 notify_port: port,
+                ..Options::default()
             },
             &CancellationToken::new(),
             |_| {},
@@ -332,7 +345,7 @@ fn cancelling_discovery_with_a_pending_description_returns_within_100ms() {
         let cancel = CancellationToken::new();
         let trigger = cancel.clone();
         let worker = tokio::spawn(async move {
-            let mut stages = Vec::new();
+            let mut stages = StageLog::default();
             let result = collect_renderers(
                 &[Ipv4Addr::LOCALHOST],
                 NetworkPolicy::LoopbackFixture,
@@ -372,7 +385,7 @@ fn cancelling_discovery_with_a_pending_description_returns_within_100ms() {
 }
 
 #[test]
-fn failed_descriptions_retry_and_withdrawn_inflight_results_do_not_reappear() {
+fn failed_descriptions_retry_only_on_later_advertisements_and_byebye_aborts_inflight() {
     let fixture = Fixture::start(vec![
         Reply::raw(None, 503, "busy"),
         Reply::raw(None, 200, description("Ready", "")),
@@ -383,15 +396,14 @@ fn failed_descriptions_retry_and_withdrawn_inflight_results_do_not_reappear() {
         let address = notify.local_addr().unwrap();
         let sender = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let mut updates = Vec::new();
-        sender
-            .send_to(
-                format!("NOTIFY * HTTP/1.1\r\nNTS: ssdp:alive\r\nLOCATION: {location}\r\n\r\n")
-                    .as_bytes(),
-                address,
-            )
-            .await
-            .unwrap();
-        let mut stages = Vec::new();
+        let packet =
+            format!("NOTIFY * HTTP/1.1\r\nNTS: ssdp:alive\r\nLOCATION: {location}\r\n\r\n");
+        let announcer = tokio::spawn(async move {
+            sender.send_to(packet.as_bytes(), address).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(1200)).await;
+            sender.send_to(packet.as_bytes(), address).await.unwrap();
+        });
+        let mut stages = StageLog::default();
         let result = collect_renderers(
             &[Ipv4Addr::LOCALHOST],
             NetworkPolicy::LoopbackFixture,
@@ -413,6 +425,7 @@ fn failed_descriptions_retry_and_withdrawn_inflight_results_do_not_reappear() {
                 .iter()
                 .any(|s| s.stage == Stage::Description && s.http_status == Some(503))
         );
+        announcer.await.unwrap();
     });
     fixture.join();
 
@@ -445,7 +458,7 @@ fn failed_descriptions_retry_and_withdrawn_inflight_results_do_not_reappear() {
             },
             &CancellationToken::new(),
             &mut |_| {},
-            &mut Vec::new(),
+            &mut StageLog::default(),
         )
         .await
         .unwrap();
@@ -497,4 +510,439 @@ fn description_size_limits_and_redirects_are_recorded_without_following() {
     .unwrap_err();
     assert_eq!(error.http_status, Some(302));
     fixture.join();
+}
+
+fn nonlocal_route(_: Ipv4Addr) -> Result<Ipv4Addr, DlnaError> {
+    Ok(Ipv4Addr::new(10, 7, 0, 2))
+}
+fn tun_route(_: Ipv4Addr) -> Result<Ipv4Addr, DlnaError> {
+    Ok(Ipv4Addr::new(198, 18, 0, 1))
+}
+
+#[test]
+fn msearch_reply_interface_survives_nonlocal_and_virtual_routes() {
+    for lookup in [nonlocal_route as fn(_) -> _, tun_route] {
+        let fixture = Fixture::start(vec![Reply::raw(None, 200, description("Fallback TV", ""))]);
+        let location = format!("http://{}/device.xml", fixture.address);
+        run(async {
+            let udp = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+            let destination = udp.local_addr().unwrap();
+            let responder = tokio::spawn(async move {
+                let mut buffer = [0; 2048];
+                let (_, peer) = udp.recv_from(&mut buffer).await.unwrap();
+                udp.send_to(format!("HTTP/1.1 200 OK\r\nLOCATION: {location}\r\nUSN: uuid:fixture\r\nSERVER: Fallback/1\r\n\r\n").as_bytes(), peer).await.unwrap();
+            });
+            let operation = discover_on(
+                vec![Ipv4Addr::LOCALHOST],
+                NetworkPolicy::LoopbackFixture,
+                Options {
+                    route_lookup: lookup,
+                    ..options(destination, Duration::from_millis(300))
+                },
+                &CancellationToken::new(),
+                |_| {},
+            )
+            .await;
+            let renderers = operation.result.unwrap();
+            assert_eq!(renderers.len(), 1);
+            assert_eq!(renderers[0].local_address, Ipv4Addr::LOCALHOST);
+            let route = renderers[0].context.route.as_ref().unwrap();
+            assert_eq!(route.selection, Some(LocalSourceKind::ReplyInterface));
+            assert_eq!(route.routed_source_is_local, Some(false));
+            assert_eq!(route.route_matches_reply, Some(false));
+            assert_eq!(route.route_matches_selected, Some(false));
+            assert!(
+                operation
+                    .stages
+                    .iter()
+                    .filter(|s| matches!(s.stage, Stage::Route | Stage::Description))
+                    .all(|s| s.context.as_ref().unwrap().device_key
+                        == renderers[0].context.device_key)
+            );
+            responder.await.unwrap();
+        });
+        assert_eq!(fixture.join().len(), 1);
+    }
+}
+
+#[test]
+fn location_flood_does_not_hide_a_later_real_renderer() {
+    let fixture = Fixture::start(vec![Reply::raw(None, 200, description("Real TV", ""))]);
+    let location = format!("http://{}/device.xml", fixture.address);
+    // Reserve and release an unused TCP port; do not rely on any machine NIC.
+    let unused = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let closed_port = unused.local_addr().unwrap().port();
+    drop(unused);
+    run(async {
+        let notify = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let address = notify.local_addr().unwrap();
+        let sender = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let announcer = tokio::spawn(async move {
+            for index in 0..130 {
+                sender.send_to(format!("NOTIFY * HTTP/1.1\r\nNTS: ssdp:alive\r\nLOCATION: http://127.0.0.1:{closed_port}/fake{index}.xml\r\n\r\n").as_bytes(), address).await.unwrap();
+                if index % 32 == 31 {
+                    tokio::time::sleep(Duration::from_millis(30)).await;
+                }
+            }
+            for _ in 0..5 {
+                sender.send_to(format!("NOTIFY * HTTP/1.1\r\nNTS: ssdp:alive\r\nLOCATION: {location}\r\nUSN: uuid:fixture\r\n\r\n").as_bytes(), address).await.unwrap();
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        });
+        let renderers = collect_renderers(
+            &[Ipv4Addr::LOCALHOST],
+            NetworkPolicy::LoopbackFixture,
+            options(address, Duration::from_millis(2500)),
+            Sockets {
+                search: Vec::new(),
+                notify: Some(notify),
+            },
+            &CancellationToken::new(),
+            &mut |_| {},
+            &mut StageLog::default(),
+        )
+        .await
+        .unwrap();
+        announcer.await.unwrap();
+        assert_eq!(renderers.len(), 1);
+        assert_eq!(renderers[0].description.name, "Real TV");
+    });
+    assert_eq!(fixture.join().len(), 1);
+}
+
+#[test]
+fn full_candidate_pool_preempts_stalled_http_for_a_later_renderer() {
+    let fixture = Fixture::start(vec![Reply::raw(
+        None,
+        200,
+        description("Responsive TV", ""),
+    )]);
+    let location = format!("http://{}/device.xml", fixture.address);
+    run(async {
+        let stalled = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let stalled_address = stalled.local_addr().unwrap();
+        let stop = CancellationToken::new();
+        let stopping = stop.clone();
+        let server = tokio::spawn(async move {
+            let mut connections = Vec::new();
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = stopping.cancelled() => break,
+                    connection = stalled.accept() => {
+                        connections.push(connection.unwrap().0);
+                        assert!(connections.len() <= 32);
+                    }
+                }
+            }
+        });
+        let notify = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let address = notify.local_addr().unwrap();
+        let sender = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let announcer = tokio::spawn(async move {
+            for index in 0..130 {
+                sender.send_to(format!("NOTIFY * HTTP/1.1\r\nNTS: ssdp:alive\r\nLOCATION: http://{stalled_address}/fake{index}.xml\r\n\r\n").as_bytes(), address).await.unwrap();
+                if index % 32 == 31 {
+                    tokio::time::sleep(Duration::from_millis(40)).await;
+                }
+            }
+            sender
+                .send_to(
+                    format!("NOTIFY * HTTP/1.1\r\nNTS: ssdp:alive\r\nLOCATION: {location}\r\n\r\n")
+                        .as_bytes(),
+                    address,
+                )
+                .await
+                .unwrap();
+        });
+        let result = collect_renderers(
+            &[Ipv4Addr::LOCALHOST],
+            NetworkPolicy::LoopbackFixture,
+            options(address, Duration::from_millis(1000)),
+            Sockets {
+                search: Vec::new(),
+                notify: Some(notify),
+            },
+            &CancellationToken::new(),
+            &mut |_| {},
+            &mut StageLog::default(),
+        )
+        .await
+        .unwrap();
+        announcer.await.unwrap();
+        stop.cancel();
+        server.await.unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].description.name, "Responsive TV");
+    });
+    fixture.join();
+}
+
+#[test]
+fn single_nonrenderer_advertisement_fetches_only_once_in_4500ms() {
+    let source =
+        description("Media Server", "").replace("device:MediaRenderer:1", "device:MediaServer:1");
+    let fixture = CountingFixture::start(Reply::raw(None, 200, source));
+    let location = format!("http://{}/server.xml", fixture.address);
+    run(async {
+        let notify = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let address = notify.local_addr().unwrap();
+        let sender = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        sender
+            .send_to(
+                format!("NOTIFY * HTTP/1.1\r\nNTS: ssdp:alive\r\nLOCATION: {location}\r\n\r\n")
+                    .as_bytes(),
+                address,
+            )
+            .await
+            .unwrap();
+        let mut stages = StageLog::default();
+        let result = collect_renderers(
+            &[Ipv4Addr::LOCALHOST],
+            NetworkPolicy::LoopbackFixture,
+            options(address, Duration::from_millis(4500)),
+            Sockets {
+                search: Vec::new(),
+                notify: Some(notify),
+            },
+            &CancellationToken::new(),
+            &mut |_| {},
+            &mut stages,
+        )
+        .await
+        .unwrap();
+        assert!(result.is_empty());
+        assert_eq!(
+            stages
+                .iter()
+                .filter(|s| s.stage == Stage::Description)
+                .count(),
+            1
+        );
+    });
+    assert_eq!(fixture.count(), 1);
+}
+
+#[test]
+fn repeated_terminal_or_single_transient_advertisements_do_not_refetch() {
+    for (status, source, repeats) in [
+        (
+            200,
+            description("Media Server", "")
+                .replace("device:MediaRenderer:1", "device:MediaServer:1"),
+            true,
+        ),
+        (503, "busy".to_owned(), false),
+    ] {
+        let fixture = CountingFixture::start(Reply::raw(None, status, source));
+        let location = format!("http://{}/server.xml", fixture.address);
+        run(async {
+            let notify = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+            let address = notify.local_addr().unwrap();
+            let sender = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+            let announcer = tokio::spawn(async move {
+                for index in 0..9 {
+                    if index == 0 || repeats {
+                        sender.send_to(format!("NOTIFY * HTTP/1.1\r\nNTS: ssdp:alive\r\nLOCATION: {location}\r\n\r\n").as_bytes(), address).await.unwrap();
+                    }
+                    tokio::time::sleep(Duration::from_millis(150)).await;
+                }
+            });
+            collect_renderers(
+                &[Ipv4Addr::LOCALHOST],
+                NetworkPolicy::LoopbackFixture,
+                options(address, Duration::from_millis(1500)),
+                Sockets {
+                    search: Vec::new(),
+                    notify: Some(notify),
+                },
+                &CancellationToken::new(),
+                &mut |_| {},
+                &mut StageLog::default(),
+            )
+            .await
+            .unwrap();
+            announcer.await.unwrap();
+        });
+        assert_eq!(fixture.count(), 1);
+    }
+}
+
+#[test]
+fn failed_candidate_backoff_is_bounded_and_negative_entries_expire() {
+    let now = Instant::now();
+    for attempt in 1..=3 {
+        let failure = Failure::new(&DlnaError::new(ErrorCode::Connect), attempt, now);
+        assert!(!failure.permits(now));
+        assert_eq!(
+            failure.retry_at.duration_since(now),
+            Duration::from_secs(1 << (attempt - 1))
+        );
+        assert_eq!(failure.permits(failure.retry_at), attempt < 3);
+        assert_eq!(failure.expires, now + FAILURE_TTL);
+    }
+    for code in [
+        PolicyError::NotRenderer,
+        PolicyError::MissingAvTransport,
+        PolicyError::ExternalControl,
+        PolicyError::InvalidXml,
+        PolicyError::TooDeep,
+        PolicyError::TooLarge,
+    ] {
+        let failure = Failure::new(&code.into(), 1, now);
+        assert!(!failure.permits(now + Duration::from_secs(30)));
+    }
+    let mut failures = HashMap::from([(
+        "negative".to_owned(),
+        Failure::new(&PolicyError::NotRenderer.into(), 1, now),
+    )]);
+    let mut candidates = HashMap::from([(
+        "queued".to_owned(),
+        Candidate {
+            load_id: 1,
+            usn: String::new(),
+            server: String::new(),
+            helper: None,
+            local: Ipv4Addr::LOCALHOST,
+            renderer: None,
+            context: DeviceContext::new(DiscoverySource::Notify, "unused", "", ""),
+            attempt: 1,
+            last_seen: 1,
+            expires: now + CANDIDATE_TTL,
+            loading: None,
+        },
+    )]);
+    expire_entries(&mut candidates, &mut failures, now + FAILURE_TTL);
+    assert!(failures.is_empty());
+    assert_eq!(candidates.len(), 1);
+    expire_entries(&mut candidates, &mut failures, now + CANDIDATE_TTL);
+    assert!(candidates.is_empty());
+}
+
+#[test]
+fn manual_device_context_correlates_description_and_control_without_raw_identifiers() {
+    for id in ["uuid:first-room", "uuid:second-room"] {
+        let fixture = Fixture::start(vec![
+            Reply::raw(None, 200, description("TV", "").replace("uuid:fixture", id)),
+            Reply::ok(SoapAction::Play),
+        ]);
+        let location = format!("http://{}/device.xml", fixture.address);
+        let server = format!("Vendor/1 {}", "服".repeat(300));
+        let operation = run(load_on(
+            &location,
+            "",
+            &server,
+            &[Ipv4Addr::LOCALHOST],
+            NetworkPolicy::LoopbackFixture,
+            HTTP_TIMEOUT,
+            &CancellationToken::new(),
+        ));
+        let renderer = operation.result.unwrap();
+        let context = &renderer.context;
+        assert_eq!(context.source, DiscoverySource::Manual);
+        assert_eq!(context.server.chars().count(), 256);
+        assert_eq!(context.device_key.len(), 32);
+        assert_eq!(context.udn_hash.as_ref().unwrap().len(), 32);
+        assert_ne!(&context.device_key, context.udn_hash.as_ref().unwrap());
+        for stage in operation.stages {
+            assert_eq!(
+                stage.context.as_ref().unwrap().device_key,
+                context.device_key
+            );
+        }
+        let diagnostic = format!("{context:?}");
+        assert!(!diagnostic.contains("127.0.0.1"));
+        assert!(!diagnostic.contains(&location));
+        assert!(!diagnostic.contains(id));
+        let context = context.clone();
+        let client = control::ControlClient::with_policy(
+            renderer,
+            &[Ipv4Addr::LOCALHOST],
+            NetworkPolicy::LoopbackFixture,
+            HTTP_TIMEOUT,
+        )
+        .unwrap();
+        let playing = run(client.play(&CancellationToken::new()));
+        playing.result.unwrap();
+        assert_eq!(
+            playing.stages[0].context.as_ref().unwrap().device_key,
+            context.device_key
+        );
+        assert_eq!(
+            playing.stages[0].context.as_ref().unwrap().udn_hash,
+            context.udn_hash
+        );
+        assert_eq!(fixture.join().len(), 2);
+    }
+}
+
+#[test]
+fn missing_udn_keeps_the_url_correlation_key_without_claiming_a_udn_hash() {
+    let source = description("No UDN", "").replace("<UDN>uuid:fixture</UDN>", "");
+    let fixture = Fixture::start(vec![Reply::raw(None, 200, source)]);
+    let location = format!("http://{}/device.xml", fixture.address);
+    let operation = run(load_on(
+        &location,
+        "",
+        "",
+        &[Ipv4Addr::LOCALHOST],
+        NetworkPolicy::LoopbackFixture,
+        HTTP_TIMEOUT,
+        &CancellationToken::new(),
+    ));
+    let renderer = operation.result.unwrap();
+    assert!(renderer.context.udn_hash.is_none());
+    assert!(
+        operation
+            .stages
+            .iter()
+            .all(|stage| stage.context.as_ref().unwrap().device_key == renderer.context.device_key)
+    );
+    fixture.join();
+}
+
+#[test]
+fn stage_retention_overflow_counts_drops_and_still_publishes_later_devices() {
+    let context = DeviceContext::new(
+        DiscoverySource::Notify,
+        "http://192.168.1.2/device",
+        "uuid:early",
+        "Early/1",
+    );
+    let late = DeviceContext::new(
+        DiscoverySource::SearchResponse,
+        "http://192.168.1.3/device",
+        "uuid:late",
+        "Late/1",
+    );
+    let mut log = StageLog::default();
+    let mut updates = Vec::new();
+    for _ in 0..MAX_STAGES {
+        record(
+            StageResult::new(Stage::Route, Instant::now(), None, &Ok::<_, DlnaError>(()))
+                .for_device(&context),
+            &mut |u| updates.push(u),
+            &mut log,
+        );
+    }
+    record(
+        StageResult::new(
+            Stage::Description,
+            Instant::now(),
+            Some(200),
+            &Ok::<_, DlnaError>(()),
+        )
+        .for_device(&late),
+        &mut |u| updates.push(u),
+        &mut log,
+    );
+    assert_eq!(log.entries.len(), MAX_STAGES - 1);
+    assert_eq!(log.dropped, 2);
+    assert!(updates.iter().any(|u| matches!(u, DiscoveryUpdate::Stage(stage) if stage.context.as_ref().is_some_and(|c| c.device_key == late.device_key))));
+    assert!(matches!(
+        updates.last(),
+        Some(DiscoveryUpdate::StagesDropped(2))
+    ));
 }
