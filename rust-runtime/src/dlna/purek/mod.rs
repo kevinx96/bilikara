@@ -9,6 +9,9 @@
 //! on exit/replacement. Token and room values must never enter snapshots.
 //! A command worker may instead schedule `poll_health` and `renew_announcement`
 //! using `health_interval` and `announcement_delay`, keeping commands serialized.
+//! T5 must await `Session::release` on application shutdown, generation
+//! replacement and self-test cancellation before dropping the lease. Drop does
+//! not perform network cleanup; cancelling `maintain` must also be awaited.
 
 mod health;
 mod protocol;
@@ -323,6 +326,10 @@ impl PureKClient {
         let original_host = matches!(room.description.host(), Some(url::Host::Domain(_)))
             .then(|| room.description.host_str().unwrap_or_default().to_owned());
         let mut location = room.description.clone();
+        // IPv4 pinning also makes the IP the TLS authority. DNS-only HTTPS
+        // certificates are unsupported here; hostname-preserving pinning needs
+        // coordinated support in this transport and T2 control. Verification
+        // remains enabled.
         location.set_host(Some(&target.to_string())).map_err(|_| {
             PureKError::new(
                 PureKErrorCode::AddressNotAllowed,
@@ -429,6 +436,8 @@ struct Registration {
 }
 
 /// Ephemeral I/O lease, owned by the AppState worker; never serialize it.
+/// T5 must await [`Session::release`] before dropping an active lease on exit,
+/// generation replacement or self-test cancellation. There is no async Drop.
 #[must_use = "Run maintain or await release when the admitted worker exits"]
 pub struct Session {
     client: PureKClient,

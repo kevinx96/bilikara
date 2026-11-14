@@ -105,6 +105,9 @@ impl Room {
         // without sending QR room/bill parameters to HTTP or multicast peers.
         description.set_query(None);
         description.set_fragment(None);
+        // Intentional production policy: confirmation never permits public
+        // literals or public DNS answers, keeping registration tokens on LAN.
+        // Hostname confirmation only admits resolution to allowed IPv4 addresses.
         let class = match description.host() {
             Some(url::Host::Ipv4(address)) => address_class(address, policy).ok_or_else(invalid)?,
             Some(url::Host::Domain(host))
@@ -226,6 +229,8 @@ fn query(url: &Url) -> Result<HashMap<String, String>, PureKError> {
 }
 
 /// Percent-decode exactly once; only raw '+' in a name is a form space.
+/// Malformed escapes remain errors, unlike ChunK's Uri.UnescapeDataString.
+/// Keep this strict interpretation until actual InvalidQr samples justify it.
 fn decode(value: &str, form: bool) -> Result<String, PureKError> {
     let mut bytes = Vec::with_capacity(value.len());
     let mut input = value.bytes();

@@ -216,6 +216,11 @@ impl Session {
                 ));
             }
             let local = registration.local.to_string();
+            // Keep T2/Kirakara's XML declaration and quoted UTF-8 Content-Type
+            // so authorization shares the tested SOAP transport. ChunK's
+            // XDocument.ToString omits the declaration, and its StringContent
+            // uses charset=utf-8 without quotes. This is an intentional wire
+            // difference for T8 to record when investigating parser failures.
             let body = soap_envelope(
                 &endpoint.service_type,
                 SoapAction::SetDeviceAuthorization,
@@ -329,6 +334,8 @@ impl Session {
 
     /// Idempotent, bounded cleanup, independent of the cancelled work token.
     /// Cleanup failures remain in stages; they do not keep a local lease alive.
+    /// T5 must await this on application shutdown, generation replacement and
+    /// self-test cancellation. Dropping the lease alone sends no revocation.
     pub async fn release(&mut self) -> PureKOperation<()> {
         self.closed = true;
         let Some(registration) = self.registration.take() else {

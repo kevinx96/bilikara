@@ -234,7 +234,10 @@ fn auth_unlocks_avtransport_then_t2_control_and_release_use_real_endpoints() {
 }
 
 #[test]
-fn authorization_soap_matches_chunk_kirakara_xml_and_headers_byte_for_byte() {
+fn authorization_soap_uses_kirakara_envelope_and_chunk_action_arguments() {
+    // Check T2/Kirakara SOAP bytes with ChunK's action argument names. ChunK's
+    // own serializer omits the XML declaration and uses an unquoted charset;
+    // this fixture does not claim byte-for-byte equality with that request.
     let fixture = Fixture::start(vec![
         device("uuid:fixture", false),
         authorized(),

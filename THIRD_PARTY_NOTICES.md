@@ -30,8 +30,8 @@ This file is intended to document known third-party components and legal notices
 - Sources: [ChunK-Helper](https://github.com/FMPeach/ChunK-Helper) (MIT),
   local reference commit `3b00533af18c4938285ded40ca12829c0e89ed9e`,
   `src/PureKBridge.Core/Qr/PureKQrParser.cs`,
-  `PureK/{DeviceAuthorizationClient,ConnectionServices}.cs`, and
-  `Network/{RendererClient,SsdpAdvertisement,RendererHealthMonitor}.cs`.
+  `src/PureKBridge.Core/PureK/{DeviceAuthorizationClient,ConnectionServices}.cs`,
+  and `src/PureKBridge.Core/Network/{RendererClient,SsdpAdvertisement,RendererHealthMonitor}.cs`.
   Copyright (c) 2026 键盘Office; complete permission notice retained in
   `third_party/ChunK-Helper-LICENSE.txt`.
 - Adaptation: Rust QR policy, authorization lifecycle, health monitoring and
