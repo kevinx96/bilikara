@@ -60,13 +60,23 @@ impl NetworkPolicy {
 }
 
 pub fn lan_url(value: &str, policy: NetworkPolicy) -> Result<(Url, Ipv4Addr), PolicyError> {
+    let result = lan_web_url(value, policy)?;
+    if result.0.scheme() != "http" {
+        return Err(PolicyError::InvalidUrl);
+    }
+    Ok(result)
+}
+
+/// QR-directed receivers may use HTTPS. Discovery keeps its HTTP-only contract.
+/// Both variants require literal, allowed IPv4 addresses and no credentials.
+pub fn lan_web_url(value: &str, policy: NetworkPolicy) -> Result<(Url, Ipv4Addr), PolicyError> {
     let uri = Url::parse(value).map_err(|_| PolicyError::InvalidUrl)?;
     let address = uri
         .host_str()
         .and_then(|host| host.parse::<Ipv4Addr>().ok())
         .filter(|&address| policy.allows(address))
         .ok_or(PolicyError::AddressNotAllowed)?;
-    if uri.scheme() != "http"
+    if !matches!(uri.scheme(), "http" | "https")
         || !uri.username().is_empty()
         || uri.password().is_some()
         || uri.fragment().is_some()
@@ -523,6 +533,7 @@ pub fn build_didl(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SoapAction {
     GetProtocolInfo,
+    SetDeviceAuthorization,
     Stop,
     SetAVTransportURI,
     Play,
@@ -538,6 +549,7 @@ impl SoapAction {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::GetProtocolInfo => "GetProtocolInfo",
+            Self::SetDeviceAuthorization => "SetDeviceAuthorization",
             Self::Stop => "Stop",
             Self::SetAVTransportURI => "SetAVTransportURI",
             Self::Play => "Play",
@@ -574,7 +586,8 @@ pub fn soap_envelope(
     ))
 }
 
-fn bounded_xml(source: &str, limit: usize) -> Result<Document<'_>, PolicyError> {
+/// Shared XML entry point, including the iterative 64-level depth preflight.
+pub fn bounded_xml(source: &str, limit: usize) -> Result<Document<'_>, PolicyError> {
     if source.len() > limit {
         return Err(PolicyError::TooLarge);
     }
