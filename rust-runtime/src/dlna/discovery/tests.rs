@@ -3,6 +3,58 @@
 use super::*;
 use crate::dlna::test_support::*;
 
+#[test]
+fn deeply_nested_description_from_notify_returns_structured_error() {
+    let source = format!("<root>{}{}</root>", "<a>".repeat(5000), "</a>".repeat(5000));
+    let fixture = Fixture::start(vec![Reply::raw(None, 200, source)]);
+    let location = format!("http://{}/deep.xml", fixture.address);
+    std::thread::Builder::new()
+        .stack_size(2 * 1024 * 1024)
+        .spawn(move || {
+            run(async {
+                let notify = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+                let target = notify.local_addr().unwrap();
+                let sender = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+                sender
+                    .send_to(
+                        format!(
+                            "NOTIFY * HTTP/1.1\r\nNTS: ssdp:alive\r\nLOCATION: {location}\r\n\r\n"
+                        )
+                        .as_bytes(),
+                        target,
+                    )
+                    .await
+                    .unwrap();
+                let mut stages = Vec::new();
+                let result = collect_renderers(
+                    &[Ipv4Addr::LOCALHOST],
+                    NetworkPolicy::LoopbackFixture,
+                    options(target, Duration::from_millis(300)),
+                    Sockets {
+                        search: Vec::new(),
+                        notify: Some(notify),
+                    },
+                    &CancellationToken::new(),
+                    &mut |_| {},
+                    &mut stages,
+                )
+                .await
+                .unwrap();
+                assert!(result.is_empty());
+                assert!(stages.iter().any(|stage| {
+                    stage.stage == Stage::Description
+                        && stage.result.as_ref().is_err_and(|error| {
+                            error.code == ErrorCode::Policy(PolicyError::TooDeep)
+                        })
+                }));
+            })
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+    fixture.join();
+}
+
 fn options(destination: SocketAddr, window: Duration) -> Options {
     Options {
         window,

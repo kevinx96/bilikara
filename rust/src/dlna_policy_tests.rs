@@ -4,6 +4,72 @@
 use super::*;
 
 #[test]
+fn deeply_nested_xml_is_rejected_on_a_two_mib_stack_at_every_entry() {
+    std::thread::Builder::new()
+        .stack_size(2 * 1024 * 1024)
+        .spawn(|| {
+            let source = format!("<root>{}{}</root>", "<a>".repeat(5000), "</a>".repeat(5000));
+            assert!(source.len() < MAX_DESCRIPTION_BYTES);
+            assert!(source.len() < MAX_SOAP_BYTES);
+            assert_eq!(parse(&source), Err(PolicyError::TooDeep));
+            assert_eq!(
+                validate_soap_response(&source, SoapAction::Play),
+                Err(PolicyError::TooDeep)
+            );
+            assert_eq!(parse_sink_protocol_info(&source), Err(PolicyError::TooDeep));
+            assert_eq!(parse_transport_info(&source), Err(PolicyError::TooDeep));
+            assert_eq!(parse_position_info(&source), Err(PolicyError::TooDeep));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn xml_depth_preflight_handles_limits_quotes_comments_cdata_and_unicode_names() {
+    let nested = |count: usize| format!("{}{}", "<a>".repeat(count), "</a>".repeat(count));
+    assert!(bounded_xml(&nested(64), MAX_DESCRIPTION_BYTES).is_ok());
+    assert_eq!(
+        bounded_xml(&nested(65), MAX_DESCRIPTION_BYTES).unwrap_err(),
+        PolicyError::TooDeep
+    );
+    let unicode = format!("{}{}", "<设备 x='/>'>".repeat(5000), "</设备>".repeat(5000));
+    assert_eq!(
+        bounded_xml(&unicode, MAX_DESCRIPTION_BYTES).unwrap_err(),
+        PolicyError::TooDeep
+    );
+    let disguise = format!(
+        "<a>{}{}{}{}</a>",
+        "<!-- </a> -->".repeat(80),
+        "<![CDATA[</a><a/>]]>".repeat(80),
+        "<a quote='/>'>".repeat(64),
+        "</a>".repeat(64)
+    );
+    assert_eq!(
+        bounded_xml(&disguise, MAX_DESCRIPTION_BYTES).unwrap_err(),
+        PolicyError::TooDeep
+    );
+    let harmless = format!(
+        "<root value=\"/>\">{}{}<empty /></root>",
+        "<!-- <fake> -->".repeat(100),
+        "<![CDATA[<fake>]]>".repeat(100)
+    );
+    assert!(bounded_xml(&harmless, MAX_DESCRIPTION_BYTES).is_ok());
+    for source in [
+        "<a x='unterminated",
+        "<!-- missing end",
+        "<![CDATA[broken",
+        "<?broken",
+        "</a>",
+    ] {
+        assert_eq!(
+            bounded_xml(source, MAX_DESCRIPTION_BYTES).unwrap_err(),
+            PolicyError::InvalidXml
+        );
+    }
+}
+
+#[test]
 fn accepts_only_device_or_local_helper_locations_and_actual_local_routes() {
     let sender = Ipv4Addr::new(192, 168, 1, 12);
     let local = Ipv4Addr::new(192, 168, 1, 20);

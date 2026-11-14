@@ -12,6 +12,7 @@ use url::Url;
 pub const MAX_DESCRIPTION_BYTES: usize = 1024 * 1024;
 pub const MAX_SOAP_BYTES: usize = 64 * 1024;
 pub const MAX_SSDP_BYTES: usize = 16 * 1024;
+pub const MAX_XML_DEPTH: usize = 64;
 pub const DEFAULT_PROTOCOL_INFO: &str = "http-get:*:video/MP2T:*";
 pub const MEDIA_RENDERER: &str = "urn:schemas-upnp-org:device:MediaRenderer:1";
 pub const AV_TRANSPORT: &str = "urn:schemas-upnp-org:service:AVTransport:";
@@ -26,6 +27,7 @@ pub enum PolicyError {
     ExternalControl,
     InvalidXml,
     TooLarge,
+    TooDeep,
     NotRenderer,
     MissingAvTransport,
     InvalidService,
@@ -526,7 +528,74 @@ fn bounded_xml(source: &str, limit: usize) -> Result<Document<'_>, PolicyError> 
     if source.len() > limit {
         return Err(PolicyError::TooLarge);
     }
+    check_xml_depth(source)?;
     Document::parse(source).map_err(|_| PolicyError::InvalidXml)
+}
+
+/// roxmltree 0.20 descends recursively. Bound nesting before it sees any XML,
+/// including malformed input. This scanner is iterative and allocates nothing;
+/// roxmltree still performs all XML/name/namespace validation afterwards.
+fn check_xml_depth(source: &str) -> Result<(), PolicyError> {
+    let bytes = source.as_bytes();
+    let mut cursor = 0;
+    let mut depth = 0_usize;
+    while let Some(offset) = bytes[cursor..].iter().position(|&byte| byte == b'<') {
+        cursor += offset;
+        let tail = &bytes[cursor..];
+        let marker = if tail.starts_with(b"<!--") {
+            Some((&b"-->"[..], 4))
+        } else if tail.starts_with(b"<![CDATA[") {
+            Some((&b"]]>"[..], 9))
+        } else if tail.starts_with(b"<?") {
+            Some((&b"?>"[..], 2))
+        } else {
+            None
+        };
+        if let Some((end, prefix)) = marker {
+            let length = tail[prefix..]
+                .windows(end.len())
+                .position(|part| part == end)
+                .ok_or(PolicyError::InvalidXml)?;
+            cursor += prefix + length + end.len();
+            continue;
+        }
+        // DTDs/entities already are disabled in roxmltree. Reject declarations
+        // here too, so none can obscure the depth preflight's token boundaries.
+        if tail.starts_with(b"<!") {
+            return Err(PolicyError::InvalidXml);
+        }
+        let closing = tail.starts_with(b"</");
+        if !closing {
+            depth += 1;
+            if depth > MAX_XML_DEPTH {
+                return Err(PolicyError::TooDeep);
+            }
+        }
+        let mut end = cursor + 1;
+        let mut quote = None;
+        let mut self_closing = false;
+        loop {
+            let byte = *bytes.get(end).ok_or(PolicyError::InvalidXml)?;
+            if let Some(delimiter) = quote {
+                if byte == delimiter {
+                    quote = None;
+                }
+            } else if matches!(byte, b'\'' | b'"') {
+                quote = Some(byte);
+                self_closing = false;
+            } else if byte == b'>' {
+                break;
+            } else {
+                self_closing = byte == b'/';
+            }
+            end += 1;
+        }
+        if closing || self_closing {
+            depth = depth.checked_sub(1).ok_or(PolicyError::InvalidXml)?;
+        }
+        cursor = end + 1;
+    }
+    Ok(())
 }
 
 /// A Fault can be returned with HTTP 200. Keep the UPnP code for diagnostics.

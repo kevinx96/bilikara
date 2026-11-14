@@ -67,6 +67,7 @@ impl ErrorCode {
                 PolicyError::ExternalControl => "external_control",
                 PolicyError::InvalidXml => "invalid_xml",
                 PolicyError::TooLarge => "response_too_large",
+                PolicyError::TooDeep => "xml_too_deep",
                 PolicyError::NotRenderer => "not_renderer",
                 PolicyError::MissingAvTransport => "missing_av_transport",
                 PolicyError::InvalidService => "invalid_service",

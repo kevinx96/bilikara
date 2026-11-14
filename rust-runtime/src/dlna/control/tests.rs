@@ -4,6 +4,25 @@ use super::*;
 use crate::dlna::test_support::*;
 use roxmltree::Document;
 
+#[test]
+fn deeply_nested_soap_reply_is_rejected_over_tcp() {
+    let source = format!("<root>{}{}</root>", "<a>".repeat(5000), "</a>".repeat(5000));
+    assert!(source.len() < dlna_policy::MAX_SOAP_BYTES);
+    let fixture = Fixture::start(vec![Reply::raw(
+        Some(SoapAction::GetTransportInfo),
+        200,
+        source,
+    )]);
+    let client = fixture_client(&fixture, HTTP_TIMEOUT);
+    let operation = run(client.get_transport_info(&CancellationToken::new()));
+    assert_eq!(
+        operation.result.unwrap_err().code,
+        ErrorCode::Policy(PolicyError::TooDeep)
+    );
+    assert_eq!(operation.stages[0].http_status, Some(200));
+    fixture.join();
+}
+
 fn fixture_client(fixture: &Fixture, timeout: Duration) -> ControlClient {
     ControlClient::with_policy(
         fixture.renderer(),
