@@ -4,6 +4,23 @@ This project, **bilikara**, may use, invoke, download, bundle, or interact with 
 
 This file is intended to document known third-party components and legal notices. It is not a complete legal analysis. Redistributors and binary packagers must verify the exact components, versions, build options, and licenses included in their own distribution.
 
+## DLNA protocol and discovery
+
+- Source: [VZRXS/bilikara PR #120](https://github.com/VZRXS/bilikara/pull/120)
+  by FMPeach (MIT), commit `297ae1de`; `rust-runtime/src/show_dlna.rs`
+  and `rust-runtime/src/show_dlna/discovery.rs`, including their fixtures.
+- Adaptation: media-backend-independent pure protocol policy in
+  `rust/src/dlna_policy.rs` and native discovery/control in `rust-runtime/src/dlna/`.
+  The upstream MIT notice is retained in the repository's `LICENSE`
+  (Copyright (c) 2026 bilikara contributors).
+- SOAP/DIDL formatting and MPEG-TS MIME preference follow Kirakara-App (MIT),
+  commit `e449070`, `lib/services/dlna/dlna_control_point.dart`.
+  Its copyright and permission notice are retained in
+  `third_party/Kirakara-App-LICENSE.txt`.
+- XML parsing uses `roxmltree` 0.20.0 (MIT OR Apache-2.0); URL parsing uses the
+  existing `url` crate (MIT OR Apache-2.0). No Kirakara Show binary is required.
+- Native discovery uses the existing `socket2` 0.6.5 crate (MIT OR Apache-2.0).
+
 ## Experimental automatic volume
 
 The shared Rust runtime uses [ebur128 0.1.10](https://github.com/sdroege/ebur128)

@@ -153,10 +153,12 @@ dependencies = [
  "quircs",
  "regex",
  "reqwest",
+ "roxmltree",
  "rquickjs",
  "serde",
  "serde_json",
  "sha2",
+ "socket2",
  "tar",
  "time",
  "tokio",
@@ -172,8 +174,10 @@ name = "bilikara_rust"
 version = "0.8.0"
 dependencies = [
  "regex",
+ "roxmltree",
  "serde",
  "serde_json",
+ "url",
 ]
 
 [[package]]
