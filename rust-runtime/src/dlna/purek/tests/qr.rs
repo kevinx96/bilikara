@@ -3,6 +3,32 @@
 use super::*;
 
 #[test]
+fn qr_trims_pasted_surrounding_whitespace_but_rejects_interior_controls() {
+    let raw = room_qr("http://10.1.2.3", "opaque+token");
+    let expected = Room::parse(&raw).unwrap();
+    for (prefix, suffix) in [
+        ("", "\n"),
+        ("", "\r\n"),
+        ("\t", ""),
+        ("", "\t"),
+        ("\n\r\t ", " \t\r\n"),
+    ] {
+        let room = Room::parse(&format!("{prefix}{raw}{suffix}")).unwrap();
+        assert_eq!(room.authorization_url(), expected.authorization_url());
+        assert_eq!(room.description, expected.description);
+        assert_eq!(room.token, expected.token);
+    }
+    for control in ['\n', '\r', '\t', '\u{1}'] {
+        let embedded = raw.replace("/projection/login", &format!("/projection/{control}login"));
+        assert_eq!(
+            Room::parse(&embedded).unwrap_err().code,
+            PureKErrorCode::InvalidQr
+        );
+    }
+    assert!(Room::parse(" \t\r\n ").is_err());
+}
+
+#[test]
 fn qr_accepts_chunk_case_ports_fragments_queries_and_all_lan_classes_rejected_by_next() {
     for (base, expected) in [
         (
@@ -129,7 +155,7 @@ fn qr_rejects_public_loopback_credentials_non_web_and_obvious_injection() {
     for raw in [
         valid.replace("wx.chunk.cn", "evil.test"),
         format!("{valid}&PLACE_CODE=duplicate"),
-        format!("{valid}\n"),
+        format!("{valid}&unexpected=embedded\ncontrol"),
     ] {
         let error = Room::parse(&raw).unwrap_err();
         assert_eq!(error.code, PureKErrorCode::InvalidQr);

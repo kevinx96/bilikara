@@ -83,10 +83,11 @@ impl Room {
     }
 
     pub(super) fn parse_on(raw: &str, policy: NetworkPolicy) -> Result<Self, PureKError> {
+        let raw = raw.trim();
         if raw.len() > MAX_QR_BYTES || raw.chars().any(char::is_control) {
             return Err(invalid());
         }
-        let outer = web(raw.trim(), "wx.chunk.cn", "/projection/login")?;
+        let outer = web(raw, "wx.chunk.cn", "/projection/login")?;
         let fields = query(&outer)?;
         let place = required(&fields, "place_code")?;
         let encoded = required(&fields, "projection_url")?
