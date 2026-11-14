@@ -8,6 +8,7 @@
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 mod wire;
 
+pub mod cast_mux;
 /// Pure developer comparison semantics; never consulted by normal media work.
 pub mod comparison;
 mod pcm;
