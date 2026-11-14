@@ -3,6 +3,96 @@
 use super::*;
 
 #[test]
+fn qr_receiver_query_never_reaches_description_soap_or_notify() {
+    let receiver = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    receiver
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+    let mut client = client();
+    client.notify_destination = receiver.local_addr().unwrap();
+    let fixture = Fixture::start(vec![
+        device("uuid:fixture", false),
+        authorized(),
+        device("uuid:fixture", true),
+        Reply::ok(SoapAction::Play),
+        authorized(),
+    ]);
+    let raw = room_qr(
+        &format!(
+            "http://{}/room?room=qr-private-room&bill=qr-private-bill#qr-private-fragment",
+            fixture.address
+        ),
+        "opaque+token",
+    );
+    let operation = run(client.connect(
+        &raw,
+        AddressApproval::LanLiteralOnly,
+        &CancellationToken::new(),
+    ));
+    let mut diagnostics = format!("{:?}", operation.stages);
+    let mut session = operation.result.unwrap();
+    assert_eq!(
+        session.renderer().unwrap().description.location,
+        format!("http://{}/room/description.xml", fixture.address)
+    );
+    let control = run(session
+        .control_client()
+        .unwrap()
+        .play(&CancellationToken::new()));
+    control.result.unwrap();
+    let release = run(session.release());
+    release.result.unwrap();
+    diagnostics.push_str(&format!(
+        "{:?}{:?}{session:?}",
+        control.stages, release.stages
+    ));
+    let address = fixture.address;
+    let requests = fixture.join();
+    for index in [0, 2] {
+        assert!(
+            requests[index]
+                .headers
+                .starts_with("GET /room/description.xml HTTP/1.1\r\n")
+        );
+    }
+    // Query supplied by the service description is a separate protocol field;
+    // preserve it while removing every parameter inherited from the QR URL.
+    for index in [1, 4] {
+        assert!(
+            requests[index]
+                .headers
+                .starts_with("POST /cm?opaque=room HTTP/1.1\r\n")
+        );
+    }
+    assert!(requests[3].headers.starts_with("POST /av HTTP/1.1\r\n"));
+    let mut buffer = [0; 4096];
+    for _ in 0..10 {
+        let (size, _) = receiver.recv_from(&mut buffer).unwrap();
+        let packet = std::str::from_utf8(&buffer[..size]).unwrap();
+        if packet.contains("NTS: ssdp:alive") {
+            assert!(packet.contains(&format!(
+                "LOCATION: http://{}/room/description.xml\r\n",
+                address
+            )));
+        } else {
+            assert!(packet.contains("NTS: ssdp:byebye"));
+            assert!(!packet.contains("LOCATION:"));
+        }
+        for private in ["qr-private-room", "qr-private-bill", "qr-private-fragment"] {
+            assert!(!packet.contains(private));
+        }
+    }
+    for private in ["qr-private-room", "qr-private-bill", "qr-private-fragment"] {
+        assert!(!diagnostics.contains(private));
+        assert!(
+            requests
+                .iter()
+                .all(|request| !request.headers.contains(private))
+        );
+    }
+}
+
+#[test]
 fn auth_unlocks_avtransport_then_t2_control_and_release_use_real_endpoints() {
     let fixture = Fixture::start(vec![
         device("uuid:fixture", false),
@@ -387,13 +477,14 @@ fn announce_is_best_effort_and_wire_uses_real_receiver_location_and_identities()
         let packet = std::str::from_utf8(&buffer[..size]).unwrap();
         assert!(packet.starts_with("NOTIFY * HTTP/1.1\r\n"));
         assert!(packet.contains(&format!(
-            "LOCATION: http://{}/room/description.xml?room=secret-query\r\n",
+            "LOCATION: http://{}/room/description.xml\r\n",
             fixture.address
         )));
         assert!(packet.contains("CACHE-CONTROL: max-age=60\r\n"));
         assert!(packet.contains("USN: uuid:real-receiver"));
         assert!(packet.contains("NTS: ssdp:alive\r\n"));
         assert!(!packet.contains("token+"));
+        assert!(!packet.contains("secret-query"));
         assert_eq!(peer.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
         nts.push(
             packet

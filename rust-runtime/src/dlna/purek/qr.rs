@@ -101,7 +101,9 @@ impl Room {
             .or_else(|_| web(&decode(inner, false)?, "conn.dolphinstar.cn", "/Remote"))?;
         let inner_fields = query(&inner)?;
         let mut description = safe_web(required(&inner_fields, "url")?)?;
-        // Fragments are annotations, never a part of the request or authority.
+        // Like ChunK's DescriptionUrl, accept receiver query/fragment syntax
+        // without sending QR room/bill parameters to HTTP or multicast peers.
+        description.set_query(None);
         description.set_fragment(None);
         let class = match description.host() {
             Some(url::Host::Ipv4(address)) => address_class(address, policy).ok_or_else(invalid)?,

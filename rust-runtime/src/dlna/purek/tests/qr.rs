@@ -56,6 +56,7 @@ fn qr_accepts_chunk_case_ports_fragments_queries_and_all_lan_classes_rejected_by
         let room = Room::parse(&raw).unwrap();
         assert_eq!(room.facts.address_class, expected);
         assert_eq!(room.token, "opaque+token");
+        assert!(room.description.query().is_none());
         assert!(room.description.fragment().is_none());
         assert!(room.authorization_url().contains(":8000/PROJECTION/LOGIN/"));
         assert!(!room.authorization_url().contains("#outer"));
@@ -95,7 +96,7 @@ fn qr_accepts_percent_wrapped_inner_and_does_not_append_description_twice() {
             ))
             .unwrap();
             assert_eq!(room.description.path(), "/a/DESCRIPTION.XML/");
-            assert_eq!(room.description.query(), Some("q=1"));
+            assert!(room.description.query().is_none());
             assert_eq!(room.token, "a+b/c==&<>");
         }
     }
