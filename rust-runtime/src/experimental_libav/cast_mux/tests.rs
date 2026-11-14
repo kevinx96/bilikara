@@ -786,7 +786,7 @@ fn cancellation_after_staging_write_removes_partial_before_session_drop() {
                         }
                         for entry in std::fs::read_dir(directory.path()).unwrap().flatten() {
                             if entry.path().extension().is_some_and(|e| e == "part")
-                                && entry.metadata().is_ok_and(|m| m.len() > 0)
+                                && std::fs::metadata(entry.path()).is_ok_and(|m| m.len() > 0)
                             {
                                 observed.store(true, Ordering::Release);
                                 stop.store(true, Ordering::Release);
