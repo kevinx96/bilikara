@@ -172,8 +172,10 @@ name = "bilikara_rust"
 version = "0.8.0"
 dependencies = [
  "regex",
+ "roxmltree",
  "serde",
  "serde_json",
+ "url",
 ]
 
 [[package]]
