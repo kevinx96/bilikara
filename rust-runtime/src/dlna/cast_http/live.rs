@@ -21,7 +21,9 @@ pub struct LiveOptions {
     /// Shared with T3's producer pacing and each reader's initial burst.
     pub burst: Duration,
     pub max_bytes: usize,
-    pub max_client_lag_bytes: usize,
+    /// Allowed delay behind the wall-clock playback point, excluding the
+    /// initial backward keyframe seek. Independent of bitrate and burst bytes.
+    pub max_client_lag: Duration,
 }
 
 impl Default for LiveOptions {
@@ -30,7 +32,7 @@ impl Default for LiveOptions {
             retention: Duration::from_secs(10),
             burst: Duration::from_secs(5),
             max_bytes: 64 * 1024 * 1024,
-            max_client_lag_bytes: 1024 * 1024,
+            max_client_lag: Duration::from_secs(3),
         }
     }
 }
@@ -46,8 +48,8 @@ impl LiveOptions {
             || self.burst > self.retention
             || self.max_bytes < MAX_CHUNK
             || self.max_bytes > MAX_RING_BYTES
-            || self.max_client_lag_bytes < MAX_CHUNK
-            || self.max_client_lag_bytes > self.max_bytes
+            || self.max_client_lag.is_zero()
+            || self.max_client_lag > self.retention
         {
             return Err(LiveError::InvalidOptions);
         }
@@ -81,6 +83,7 @@ struct Chunk {
     sequence: u64,
     time_us: i64,
     bytes: Arc<[u8]>,
+    ends_unit: bool,
 }
 
 #[derive(Default)]
@@ -94,6 +97,8 @@ struct Ring {
     last_time: i64,
     finished: bool,
     error: Option<LiveError>,
+    began: Option<tokio::time::Instant>,
+    pes: continuity::PesBoundary,
 }
 
 pub struct LiveStream {
@@ -106,6 +111,8 @@ pub struct LiveStream {
 pub(super) struct Cursor {
     sequence: Option<u64>,
     index: u64,
+    join_slack_us: i64,
+    pending_jump: bool,
 }
 
 impl Cursor {
@@ -113,15 +120,19 @@ impl Cursor {
         Self {
             sequence: None,
             index: 0,
+            join_slack_us: 0,
+            pending_jump: false,
         }
     }
 }
 
 pub(super) enum Read {
     Data {
-        bytes: Arc<[u8]>,
+        chunks: Vec<Arc<[u8]>>,
         time_us: i64,
         jumped: bool,
+        start: CastStart,
+        playback_us: i64,
     },
     Wait,
     End(Result<(), LiveError>),
@@ -175,6 +186,7 @@ impl LiveStream {
             match event {
                 CastEvent::Start(start) if r.start.is_none() && r.chunks.is_empty() => {
                     r.start = Some(start);
+                    r.began = Some(tokio::time::Instant::now());
                     Ok(())
                 }
                 CastEvent::Data {
@@ -205,6 +217,12 @@ impl LiveStream {
             return Err(LiveError::InvalidEvent);
         }
         let cutoff = time_us.saturating_sub(self.options.retention.as_micros() as i64);
+        if r.chunks.back().is_some_and(|c| time_us > c.time_us || key) {
+            // T3 flushes AVIO after each complete muxed packet. A changed
+            // watermark / new IDR group therefore closes the previous PES.
+            r.chunks.back_mut().expect("back exists").ends_unit = true;
+            r.pes.reset();
+        }
         // Keep the entire GOP containing the beginning of the window.
         while let Some(&(sequence, _, _)) = r.keys.get(1).filter(|(_, time, _)| *time <= cutoff) {
             while r.chunks.front().is_some_and(|c| c.sequence < sequence) {
@@ -227,11 +245,13 @@ impl LiveStream {
         if key {
             r.keys.push_back((sequence, time_us, index));
         }
+        let ends_unit = r.pes.observe(bytes);
         r.chunks.push_back(Chunk {
             index,
             sequence,
             time_us,
             bytes: Arc::from(bytes),
+            ends_unit,
         });
         Ok(())
     }
@@ -241,6 +261,9 @@ impl LiveStream {
     pub fn finish(&self, success: bool) {
         let mut r = self.ring.lock().unwrap_or_else(|e| e.into_inner());
         r.finished = true;
+        if let Some(last) = r.chunks.back_mut() {
+            last.ends_unit = true;
+        }
         if !success && r.error.is_none() {
             r.error = Some(LiveError::ProducerFailed);
         }
@@ -277,6 +300,11 @@ impl LiveStream {
         }
     }
 
+    #[cfg(test)]
+    pub(super) fn set_elapsed(&self, elapsed: Duration) {
+        self.ring.lock().unwrap().began = Some(tokio::time::Instant::now() - elapsed);
+    }
+
     pub(super) fn read(&self, cursor: &mut Cursor) -> Read {
         if self.stop.load(Ordering::Acquire) {
             return Read::End(Err(LiveError::Cancelled));
@@ -285,42 +313,76 @@ impl LiveStream {
         if let Some(error) = r.error {
             return Read::End(Err(error));
         }
-        let latest = r.keys.back();
-        let mut jumped = false;
+        // T3 starts its realtime clock at Start, with burst seconds of lead.
+        // Its most recently generated key is ahead of playback, not a join.
+        let playback_us = r
+            .began
+            .map_or(0, |began| {
+                began.elapsed().as_micros().min(i64::MAX as u128) as i64
+            })
+            .min(r.last_time);
+        let target = r
+            .keys
+            .iter()
+            .rev()
+            .find(|(_, time, _)| *time <= playback_us)
+            .or_else(|| r.keys.front());
         match cursor.sequence {
             None => {
-                if let Some(&(sequence, _, index)) = latest {
+                if let Some(&(sequence, time, index)) = target {
                     cursor.sequence = Some(sequence);
                     cursor.index = index;
+                    cursor.join_slack_us = playback_us.saturating_sub(time).max(0);
                 }
             }
             Some(sequence) => {
                 let expired = r.chunks.front().is_some_and(|c| sequence < c.sequence);
-                let lagged =
-                    r.next.saturating_sub(sequence) > self.options.max_client_lag_bytes as u64;
+                let time = r
+                    .chunks
+                    .front()
+                    .and_then(|front| cursor.index.checked_sub(front.index))
+                    .and_then(|offset| usize::try_from(offset).ok())
+                    .and_then(|offset| r.chunks.get(offset))
+                    .map_or(r.last_time, |c| c.time_us);
+                let lagged = playback_us.saturating_sub(time)
+                    > self.options.max_client_lag.as_micros() as i64 + cursor.join_slack_us;
                 if (expired || lagged)
                     && let Some(&(key_sequence, _, index)) =
-                        latest.filter(|(key_sequence, _, _)| *key_sequence > sequence)
+                        target.filter(|(key_sequence, _, _)| *key_sequence > sequence)
                 {
                     cursor.sequence = Some(key_sequence);
                     cursor.index = index;
-                    jumped = true;
+                    cursor.pending_jump = true;
                 }
             }
         }
-        let chunk = r
+        let offset = r
             .chunks
             .front()
             .and_then(|front| cursor.index.checked_sub(front.index))
-            .and_then(|offset| usize::try_from(offset).ok())
-            .and_then(|offset| r.chunks.get(offset));
+            .and_then(|offset| usize::try_from(offset).ok());
+        let chunk = offset.and_then(|offset| r.chunks.get(offset));
         if let Some(chunk) = chunk.filter(|chunk| cursor.sequence == Some(chunk.sequence)) {
-            cursor.sequence = Some(chunk.sequence + chunk.bytes.len() as u64);
-            cursor.index += 1;
+            let offset = offset.expect("chunk offset");
+            let Some(end) = r.chunks.iter().skip(offset).position(|c| c.ends_unit) else {
+                return Read::Wait;
+            };
+            let last = &r.chunks[offset + end];
+            let chunks = r
+                .chunks
+                .iter()
+                .skip(offset)
+                .take(end + 1)
+                .map(|c| c.bytes.clone())
+                .collect();
+            cursor.sequence = Some(last.sequence + last.bytes.len() as u64);
+            cursor.index = last.index + 1;
             Read::Data {
-                bytes: chunk.bytes.clone(),
+                chunks,
                 time_us: chunk.time_us,
-                jumped,
+                jumped: std::mem::take(&mut cursor.pending_jump),
+                start: r.start.expect("validated start"),
+                playback_us,
             }
         } else if r.finished {
             Read::End(Ok(()))

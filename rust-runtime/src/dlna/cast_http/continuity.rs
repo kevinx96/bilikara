@@ -4,6 +4,68 @@
 
 pub(super) const PACKET: usize = 188;
 
+/// A reader pins a complete PES delivery unit before writing any of it. Finite
+/// PES lengths can close a unit immediately; zero-length video PES are closed
+/// by T3's next flushed packet watermark (or EOF), never an arbitrary chunk.
+pub(super) struct PesBoundary {
+    remaining: Box<[u32; 8192]>,
+    active: usize,
+    seen: bool,
+}
+
+impl Default for PesBoundary {
+    fn default() -> Self {
+        Self {
+            remaining: Box::new([0; 8192]),
+            active: 0,
+            seen: false,
+        }
+    }
+}
+
+impl PesBoundary {
+    pub(super) fn observe(&mut self, bytes: &[u8]) -> bool {
+        for p in bytes.chunks_exact(PACKET) {
+            if p[3] & 0x10 == 0 {
+                continue;
+            }
+            let offset = if p[3] & 0x20 != 0 {
+                5 + usize::from(p[4])
+            } else {
+                4
+            };
+            let payload = &p[offset..];
+            let pid = (usize::from(p[1] & 31) << 8) | usize::from(p[2]);
+            if p[1] & 0x40 != 0 && payload.starts_with(&[0, 0, 1]) {
+                if self.remaining[pid] != 0 {
+                    self.active -= 1;
+                }
+                self.seen = true;
+                self.active += 1;
+                let length = payload.get(4..6).map(|b| u16::from_be_bytes([b[0], b[1]]));
+                self.remaining[pid] = match length {
+                    Some(length) if length != 0 => u32::from(length) + 6,
+                    _ => u32::MAX,
+                };
+            }
+            let remaining = &mut self.remaining[pid];
+            if *remaining != 0 && *remaining != u32::MAX {
+                *remaining = remaining.saturating_sub(payload.len() as u32);
+                if *remaining == 0 {
+                    self.active -= 1;
+                }
+            }
+        }
+        self.seen && self.active == 0
+    }
+
+    pub(super) fn reset(&mut self) {
+        self.remaining.fill(0);
+        self.active = 0;
+        self.seen = false;
+    }
+}
+
 pub(super) fn valid(bytes: &[u8]) -> bool {
     !bytes.is_empty()
         && bytes.len().is_multiple_of(PACKET)

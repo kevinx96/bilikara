@@ -307,3 +307,209 @@ fn real_companion_file_ts_mp4_live_http_and_t3_lease_cleanup() {
         assert!(TcpListener::bind(address).await.is_ok());
     });
 }
+
+// Repeat encoded access units without an encoder. Double sample durations to
+// obtain a 2.002s GOP; filler_data NALs make the input approximately 7 Mbps.
+// This exercises T3's real approximately 15 Mbps live CBR and multi-chunk PES.
+fn long_high_bitrate_video(source: &Path, destination: &Path) {
+    use mp4::{
+        AvcConfig, MediaConfig, Mp4Config, Mp4Reader, Mp4Sample, Mp4Writer, TrackConfig, TrackType,
+    };
+    // The committed fixture is fragmented. Normalize through the real test
+    // companion first; mp4 0.14's sample reader does not implement its trun
+    // data offsets. The resulting ordinary MP4 keeps the encoded samples.
+    let normalized = destination.with_extension("source.mp4");
+    repeated_video(&probe(), source, &normalized);
+    let input = std::fs::File::open(normalized).unwrap();
+    let size = input.metadata().unwrap().len();
+    let mut reader = Mp4Reader::read_header(input, size).unwrap();
+    let (&id, track) = reader.tracks().iter().next().unwrap();
+    let timescale = track.timescale();
+    let count = track.sample_count();
+    assert_eq!(count, 72);
+    let config = TrackConfig {
+        track_type: TrackType::Video,
+        timescale,
+        language: track.language().to_owned(),
+        media_conf: MediaConfig::AvcConfig(AvcConfig {
+            width: track.width(),
+            height: track.height(),
+            seq_param_set: track.sequence_parameter_set().unwrap().to_vec(),
+            pic_param_set: track.picture_parameter_set().unwrap().to_vec(),
+        }),
+    };
+    let samples: Vec<_> = (1..=24)
+        .map(|n| reader.read_sample(id, n).unwrap().unwrap())
+        .collect();
+    let gop_ticks: u64 = samples.iter().map(|s| u64::from(s.duration) * 2).sum();
+    let output = std::fs::File::create(destination).unwrap();
+    let mut writer = Mp4Writer::write_start(
+        output,
+        &Mp4Config {
+            major_brand: "isom".parse().unwrap(),
+            minor_version: 512,
+            compatible_brands: vec!["isom".parse().unwrap(), "avc1".parse().unwrap()],
+            timescale: 1000,
+        },
+    )
+    .unwrap();
+    writer.add_track(&config).unwrap();
+    for repeat in 0..15 {
+        for sample in &samples {
+            let mut data = sample.bytes.to_vec();
+            let mut nals = data.as_slice();
+            while !nals.is_empty() {
+                let length = u32::from_be_bytes(nals[..4].try_into().unwrap()) as usize;
+                assert!(length > 0 && length + 4 <= nals.len());
+                nals = &nals[4 + length..];
+            }
+            let filler_size = 73_000 - data.len() - 4;
+            data.extend_from_slice(&(filler_size as u32).to_be_bytes());
+            data.push(12); // H.264 filler_data NAL, nal_ref_idc=0
+            data.resize(72_999, 0xff);
+            data.push(0x80); // rbsp_trailing_bits
+            writer
+                .write_sample(
+                    1,
+                    &Mp4Sample {
+                        start_time: (sample.start_time - samples[0].start_time) * 2
+                            + repeat * gop_ticks,
+                        duration: sample.duration * 2,
+                        rendering_offset: sample.rendering_offset * 2,
+                        is_sync: sample.is_sync,
+                        bytes: data.into(),
+                    },
+                )
+                .unwrap();
+        }
+    }
+    writer.write_end().unwrap();
+}
+
+fn first_video_pts(bytes: &[u8]) -> u64 {
+    for p in bytes.chunks_exact(188) {
+        if p[1] & 0x40 == 0 || p[3] & 0x10 == 0 {
+            continue;
+        }
+        let offset = if p[3] & 0x20 != 0 {
+            5 + usize::from(p[4])
+        } else {
+            4
+        };
+        let payload = &p[offset..];
+        if payload.starts_with(&[0, 0, 1, 0xe0]) && payload.len() >= 14 && payload[7] & 0x80 != 0 {
+            let b = &payload[9..14];
+            return (u64::from(b[0] & 14) << 29)
+                | (u64::from(b[1]) << 22)
+                | (u64::from(b[2] & 0xfe) << 14)
+                | (u64::from(b[3]) << 7)
+                | u64::from(b[4] >> 1);
+        }
+    }
+    panic!("missing video PTS");
+}
+
+#[test]
+#[ignore = "requires freshly built native schema-2 test companion"]
+fn real_companion_default_burst_join_after_one_point_five_seconds_keeps_all_bytes() {
+    run(async {
+        let temp = Temp::new();
+        let video = temp.0.join("thirty-seconds-7mbps.mp4");
+        long_high_bitrate_video(&fixtures().join("video-reordered-start.mp4"), &video);
+        let stream = Arc::new(LiveStream::new(LiveOptions::default()).unwrap());
+        let endpoint = endpoint().await;
+        let media = endpoint
+            .publish_live(1, stream.clone(), TsMime::Mp2t)
+            .unwrap();
+        let produced = Arc::new(Mutex::new(Vec::new()));
+        let output = produced.clone();
+        let generator = stream.clone();
+        let task = tokio::task::spawn_blocking(move || {
+            let probe = probe();
+            let preflight = probe
+                .cast_preflight(&video, &AtomicBool::new(false))
+                .unwrap();
+            assert_eq!(preflight.packets, 360);
+            assert!((1_900_000..2_100_000).contains(&preflight.gop_us.unwrap()));
+            let result = probe.cast_ts_with_events(
+                &CastInputs {
+                    video: &video,
+                    audio: &fixtures().join("audio.m4a"),
+                    start_us: 0,
+                },
+                generator.options.pacing(),
+                96 * 1024 * 1024,
+                &AtomicBool::new(false),
+                &mut |event| {
+                    if let CastEvent::Data { bytes, .. } = &event {
+                        output.lock().unwrap().extend_from_slice(bytes);
+                    }
+                    generator.push(event).is_ok()
+                },
+            );
+            generator.finish(result.is_ok());
+            result.unwrap()
+        });
+        until(|| stream.snapshot().start.is_some()).await;
+        sleep(Duration::from_millis(1500)).await;
+        assert!(!task.is_finished());
+        let prefix_length = produced.lock().unwrap().len();
+        assert!(
+            prefix_length > 9 * 1024 * 1024,
+            "real high-rate producer has five seconds of lead"
+        );
+        let mut response = request(&endpoint, "GET", &media.uri, "").await;
+        assert_eq!(response.status, 200);
+        let burst_started = Instant::now();
+        let mut received = vec![0; prefix_length];
+        timeout(
+            Duration::from_secs(1),
+            response.socket.read_exact(&mut received),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let burst_elapsed = burst_started.elapsed();
+        // All already buffered data, including the five-second lead, bursts
+        // immediately. Remaining bytes follow the real generation's 1x clock.
+        timeout(
+            Duration::from_secs(30),
+            response.socket.read_to_end(&mut received),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let summary = task.await.unwrap();
+        let mut expected = std::mem::take(&mut *produced.lock().unwrap());
+        assert_eq!(expected.len() as u64, summary.bytes);
+        assert!(expected.len() > 45 * 1024 * 1024);
+        assert_eq!(
+            first_video_pts(&received),
+            first_video_pts(&expected),
+            "1.5s join must select the 0s GOP, never the generated 6s GOP"
+        );
+        continuity::Continuity::new().rewrite(&mut expected);
+        assert_eq!(
+            received.len(),
+            expected.len(),
+            "all subsequent bytes must reach the normal reader"
+        );
+        assert_eq!(received, expected);
+        let diag = endpoint.shutdown().await;
+        assert!(!diag.stages.iter().any(|e| e.stage == HttpStage::LiveJump));
+        let get = diag
+            .stages
+            .iter()
+            .find(|e| e.stage == HttpStage::Get)
+            .unwrap();
+        assert_eq!(get.media_time_us, Some(0));
+        assert_eq!(get.live_start, stream.snapshot().start);
+        eprintln!(
+            "default-burst regression: total_bytes={}, prefix_bytes={}, burst_ms={}, first_pts_90khz={}, join_watermark_us=0, jumps=0",
+            summary.bytes,
+            prefix_length,
+            burst_elapsed.as_millis(),
+            first_video_pts(&received)
+        );
+    });
+}

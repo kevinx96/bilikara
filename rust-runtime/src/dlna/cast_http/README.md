@@ -33,7 +33,9 @@ MP4 is a finalized file with the same HTTP range behavior as file TS.
 ## HTTP behavior
 
 GET/HEAD `/cast/{32 hex token}/{generation}.ts` (or `.mp4` for a file) are the
-only resource routes. The entire header terminator must arrive within 5 seconds
+only resource routes. Origin-form and absolute-form targets are accepted;
+absolute-form extracts the raw path without normalizing dot segments/escapes.
+CRLF and bare LF line endings are accepted. The entire header terminator must arrive within 5 seconds
 and 8192 bytes before any HTTP reply, including errors. Incomplete/oversized
 requests close without replying. Private, shared (RFC 6598), link-local and loopback sources are
 accepted regardless of the renderer description address. A differing source
@@ -41,17 +43,25 @@ produces a `http.peer_mismatch` diagnostic. Public sources receive 403 after
 the header is complete. Invalid capabilities/generations receive 404.
 
 File GET supports a single byte range, open-ended ranges and suffixes; responses
-include 206 or 416 and Content-Range. Unsupported units/multiple ranges are
-ignored with a full 200 response. HEAD computes the same headers without a body.
+include 206 or 416 and Content-Range. Malformed, reversed, unsupported, multiple
+or unrepresentable ranges are ignored with a full 200 response. Only valid but
+unsatisfiable ranges produce 416. Units are case-insensitive. HEAD computes the same headers without a body.
 File delivery has no pacing. CI reflects T3's audio conversion result.
 
 Live GET ignores every Range header, uses 200, no Content-Length/chunking,
-`Accept-Ranges: none` and `Connection: close`. A reader joins at the latest
-whole keyframe group. The default five-second burst is configurable and shared
-with T3 pacing. Each reader has independent 1x pacing and continuity counters.
-If its byte lag exceeds the configured bound, or its cursor was evicted, it
-finishes the current TS chunk, emits adaptation-only discontinuity markers for
-previously seen PIDs and resumes at the latest keyframe. PCR/PTS/DTS are
+`Accept-Ranges: none` and `Connection: close`. A reader joins at the nearest
+keyframe at or before the wall-clock playback point, using the earliest retained
+keyframe if necessary. The clock starts with T3's Start event; the generated
+head is normally five seconds ahead of that point and is never used as playback.
+The default five-second burst is configurable and shared with T3 pacing. The
+backward keyframe seek is included in the initial burst, then each reader has
+independent 1x pacing and continuity counters. `max_client_lag` defaults to three
+seconds behind playback, with allowance for the initial keyframe seek; it does
+not depend on bitrate. If that delay is exceeded, or the cursor was evicted,
+the reader finishes its pinned complete PES unit, emits adaptation-only
+discontinuity markers for previously seen PIDs and resumes at a playback
+keyframe. Zero-length video PES close on T3's next flushed packet watermark or
+EOF; chunk boundaries alone cannot trigger a jump. PCR/PTS/DTS are
 preserved; markers signal the clock jump. Long GOPs are accepted within the
 memory bound. The per-reader algorithm follows Kirakara-Show; see [NOTICE.md](NOTICE.md).
 
@@ -65,17 +75,22 @@ accepted nonblocking sockets with readiness waits on Windows and other targets.
 The process allows four endpoint listeners. Each endpoint accepts at most 16
 connection tasks (including incomplete headers), and four simultaneous GETs.
 The fifth GET cancels the oldest GET and waits for its socket to close before
-starting the new one; no 409 is returned. HEAD uses no GET slot. Backlog sockets
-wait in the OS until an accepted task is available.
+starting the new one; no 409 is returned. HEAD uses no GET slot. Incomplete
+headers have separate limits of 12 per endpoint and four per source. New
+connections evict the oldest incomplete header when necessary, after waiting
+for its socket to close. An atomic phase transition prevents evicting a request
+that concurrently completed its header. No HTTP reply precedes a complete header.
 
 The default live ring has a 64 MiB byte cap and retains at least ten seconds of
-whole GOPs; configurable caps are at most 128 MiB. Keys/chunks are indexed for
-constant-time reader lookup. The ring never waits on an HTTP reader. If the
+whole GOPs; configurable caps are at most 128 MiB. Chunk lookup is indexed;
+keyframe selection searches the bounded keyframe index. The ring never waits on an HTTP reader. If the
 required history/current GOP cannot fit, production explicitly fails with
 `LiveError::BufferLimit`, rather than retaining less history or growing memory.
 Session cancellation clears buffered data even if the producer still holds its
-`Arc`. Per-reader scratch storage is limited to one T3 chunk plus fixed PID
-counter tables. T3's file/session quotas additionally bound disk use.
+`Arc`. A reader pins at most one complete PES unit (at most one ring byte cap)
+and copies one T3 chunk at a time, plus bounded chunk references and fixed PID
+tables. With four GETs, retained payload outside/inside a ring is bounded by
+five ring byte caps. T3's file/session quotas additionally bound disk use.
 
 `subscribe()` returns bounded broadcast `HttpStageResult` events, carrying
 `DeviceContext`, generation, connection ID, monotonic elapsed time, status,
@@ -83,6 +98,12 @@ result, written body bytes and disconnect reason. `http.first_byte` fires once
 per generation, immediately after the first successful body write; headers and
 HEAD do not count. T5 can apply this fact to AppState. Other stages cover GET,
 HEAD, mismatched peer, rejection, live jump, terminal byte count and disconnect.
+Live GET is recorded when its join point becomes available, before body bytes.
+GET/LiveJump carry `media_time_us` (T3 watermark relative to
+`live_start.timestamp_origin_us`) and the full `live_start: CastStart` basis.
+Source timestamp is origin + watermark; elapsed from source presentation start
+is origin + watermark - source_start_us (which can include the decode lead for
+B frames). T5 can rebase receiver-relative progress on these per-connection facts.
 No capability, URI, raw address or OS error text is retained.
 
 `diagnostics()` exposes a 256-stage bounded snapshot with `dropped_stages`,
@@ -102,7 +123,8 @@ cargo test --manifest-path rust-runtime/Cargo.toml --locked --features native-ho
 ```
 
 The loopback tests exercise real socket backpressure, 3/10-second read pauses,
-the real 15-second stall timeout, Windows accepted sockets, HTTP range/header
+the real 15-second stall timeout, a single large write whose progress renews
+the deadline beyond 15 seconds, Windows accepted sockets, HTTP range/header
 boundaries, concurrent readers, midstream joins/jumps, bounds and cancellation.
 
 Build a fresh schema-2 test companion in a private output directory with
@@ -121,3 +143,8 @@ T3-generated file TS, MP4 and live TS to loopback clients, and joins a second GE
 while generation is running. It checks PSI/IDR/PCR/counters and verifies
 lease/port cleanup. These tests do not qualify physical DLNA receivers or a
 different operating system.
+
+The additional default-burst companion regression repeats encoded H.264 samples
+to 30 seconds with 2-second GOPs and filler NALs (~7 Mbps source, ~15 Mbps TS).
+A GET at 1.5 seconds must start at the 0-second GOP, burst all buffered lead in
+one second, receive every subsequent byte, and never jump during normal reading.

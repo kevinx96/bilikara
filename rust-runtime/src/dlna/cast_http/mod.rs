@@ -27,7 +27,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex, OnceLock,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -41,6 +41,8 @@ use tokio::{
 pub const MAX_SESSIONS: usize = 4;
 pub const MAX_GETS: usize = 4;
 const MAX_CONNECTIONS: usize = 16;
+const MAX_HEADERS: usize = 12;
+const MAX_HEADERS_PER_PEER: usize = 4;
 const DEFAULT_STAGES: usize = 256;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -78,6 +80,7 @@ pub enum Reason {
     IncompleteHeader,
     HeaderTimeout,
     HeaderTooLarge,
+    HeaderPreempted,
     Range,
 }
 
@@ -101,6 +104,7 @@ impl Reason {
             Self::IncompleteHeader => "incomplete_header",
             Self::HeaderTimeout => "header_timeout",
             Self::HeaderTooLarge => "header_too_large",
+            Self::HeaderPreempted => "header_preempted",
             Self::Range => "range",
         }
     }
@@ -215,6 +219,9 @@ struct Client {
     id: u64,
     cancel: CancellationToken,
     closed: CancellationToken,
+    /// 0 reading, 1 complete, 2 preempted. CAS prevents preemption of a GET
+    /// whose header completed concurrently with header-slot selection.
+    header_phase: Arc<AtomicU8>,
 }
 struct Current {
     last: Option<u64>,
@@ -240,7 +247,20 @@ impl Shared {
         result: Result<(), Reason>,
         bytes: u64,
     ) {
-        self.diag.record(HttpStageResult {
+        self.diag
+            .record(self.stage(stage, generation, id, status, result, bytes));
+    }
+
+    fn stage(
+        &self,
+        stage: HttpStage,
+        generation: Option<u64>,
+        id: u64,
+        status: Option<u16>,
+        result: Result<(), Reason>,
+        bytes: u64,
+    ) -> HttpStageResult {
+        HttpStageResult {
             stage,
             context: self.diag.context.clone(),
             generation,
@@ -251,7 +271,9 @@ impl Shared {
                 .then_some(result.err().unwrap_or(Reason::Completed)),
             result,
             bytes_written: bytes,
-        });
+            media_time_us: None,
+            live_start: None,
+        }
     }
 
     fn clear(&self) {
@@ -487,18 +509,49 @@ impl Drop for CastEndpoint {
 
 async fn listen(listener: TcpListener, shared: Arc<Shared>, _permit: OwnedSemaphorePermit) {
     let mut tasks = JoinSet::new();
+    let mut headers: VecDeque<(IpAddr, Client)> = VecDeque::new();
     loop {
+        headers.retain(|(_, c)| {
+            c.header_phase.load(Ordering::Acquire) == 0 && !c.closed.is_cancelled()
+        });
         tokio::select! {
             biased;
             _ = shared.stop.cancelled() => break,
             Some(_) = tasks.join_next(), if !tasks.is_empty() => (),
-            result = listener.accept(), if tasks.len() < MAX_CONNECTIONS => {
+            result = listener.accept(), if tasks.len() < MAX_CONNECTIONS || !headers.is_empty() => {
                 match result {
                     Ok((socket, peer)) => {
+                        headers.retain(|(_, c)| c.header_phase.load(Ordering::Acquire) == 0 && !c.closed.is_cancelled());
+                        let peer_count = headers.iter().filter(|(ip, _)| *ip == peer.ip()).count();
+                        let victim = if peer_count >= MAX_HEADERS_PER_PEER {
+                            headers.iter().position(|(ip, _)| *ip == peer.ip())
+                        } else if headers.len() >= MAX_HEADERS || tasks.len() >= MAX_CONNECTIONS {
+                            (!headers.is_empty()).then_some(0)
+                        } else { None };
+                        if let Some(victim) = victim {
+                            let (_, oldest) = headers.remove(victim).expect("header victim");
+                            if oldest.header_phase.compare_exchange(0, 2, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+                              oldest.cancel.cancel();
+                              tokio::select! {
+                                _ = shared.stop.cancelled() => break,
+                                _ = oldest.closed.cancelled() => (),
+                              }
+                            }
+                        }
+                        while tasks.try_join_next().is_some() {}
+                        // A completed header can race the snapshot above. Wait
+                        // for a task slot rather than growing the accepted set.
+                        if tasks.len() >= MAX_CONNECTIONS {
+                            tokio::select! {
+                                _ = shared.stop.cancelled() => break,
+                                _ = tasks.join_next() => (),
+                            }
+                        }
                         // Tokio explicitly performs nonblocking readiness IO on
                         // accepted sockets on Windows too. WouldBlock is waited
                         // on by AsyncWriteExt, never treated as a disconnect.
-                        let client = Client { id: shared.next_connection.fetch_add(1, Ordering::Relaxed), cancel: CancellationToken::new(), closed: CancellationToken::new() };
+                        let client = Client { id: shared.next_connection.fetch_add(1, Ordering::Relaxed), cancel: CancellationToken::new(), closed: CancellationToken::new(), header_phase: Arc::new(AtomicU8::new(0)) };
+                        headers.push_back((peer.ip(), client.clone()));
                         let state = shared.clone();
                         tasks.spawn(async move {
                             serve(socket, peer.ip(), &state, &client).await;
@@ -520,7 +573,22 @@ async fn listen(listener: TcpListener, shared: Arc<Shared>, _permit: OwnedSemaph
 
 async fn serve(mut socket: TcpStream, peer: IpAddr, shared: &Shared, client: &Client) {
     let _ = socket.set_nodelay(true);
-    let header = match protocol::read_header(&mut socket, &shared.stop).await {
+    let header = tokio::select! {
+        biased;
+        _ = shared.stop.cancelled() => Err(Reason::Cancelled),
+        _ = client.cancel.cancelled() => Err(Reason::HeaderPreempted),
+        result = protocol::read_header(&mut socket, &shared.stop) => result,
+    };
+    let header = if client
+        .header_phase
+        .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        Err(Reason::HeaderPreempted)
+    } else {
+        header
+    };
+    let header = match header {
         Ok(header) => header,
         Err(reason) => {
             shared.event(HttpStage::Rejected, None, client.id, None, Err(reason), 0);
@@ -561,6 +629,7 @@ async fn serve(mut socket: TcpStream, peer: IpAddr, shared: &Shared, client: &Cl
         connection: client,
         status: None,
         bytes: 0,
+        media: None,
     };
     if let Some((status, reason)) = denial {
         writer.status = Some(status);
@@ -591,14 +660,16 @@ async fn serve(mut socket: TcpStream, peer: IpAddr, shared: &Shared, client: &Cl
         },
     };
     writer.status = Some(status);
-    writer.event(
-        if head {
-            HttpStage::Head
-        } else {
-            HttpStage::Get
-        },
-        Ok(()),
-    );
+    if head || matches!(media.body, Body::File(_)) {
+        writer.event(
+            if head {
+                HttpStage::Head
+            } else {
+                HttpStage::Get
+            },
+            Ok(()),
+        );
+    }
     if status == 416 {
         writer.event(HttpStage::Rejected, Err(Reason::Range));
     }
@@ -616,6 +687,9 @@ async fn serve(mut socket: TcpStream, peer: IpAddr, shared: &Shared, client: &Cl
         }
     }
     .await;
+    if !head && matches!(media.body, Body::Live(_)) && writer.media.is_none() {
+        writer.event(HttpStage::Get, result);
+    }
     writer.event(HttpStage::BytesWritten, Ok(()));
     writer.event(HttpStage::Disconnect, result);
 }
@@ -677,10 +751,17 @@ async fn serve_live(writer: &mut Writer<'_>, stream: &LiveStream) -> Result<(), 
         notified.as_mut().enable();
         match stream.read(&mut cursor) {
             live::Read::Data {
-                bytes,
+                chunks,
                 time_us,
                 jumped,
+                start,
+                playback_us,
             } => {
+                let joined = writer.media.is_none();
+                writer.media = Some((time_us, start));
+                if joined {
+                    writer.event(HttpStage::Get, Ok(()));
+                }
                 if jumped {
                     writer.event(HttpStage::LiveJump, Ok(()));
                     for packet in continuity.discontinuities() {
@@ -690,14 +771,18 @@ async fn serve_live(writer: &mut Writer<'_>, stream: &LiveStream) -> Result<(), 
                 }
                 let start = *origin.get_or_insert_with(|| {
                     clock = tokio::time::Instant::now();
-                    time_us
+                    playback_us
                 });
-                let delay = Duration::from_micros(time_us.saturating_sub(start) as u64)
+                let delay = Duration::from_micros(time_us.saturating_sub(start).max(0) as u64)
                     .saturating_sub(stream.options.burst);
                 writer.wait(tokio::time::sleep_until(clock + delay)).await?;
-                let mut bytes = bytes.to_vec();
-                continuity.rewrite(&mut bytes);
-                writer.send(&bytes, true).await?;
+                // All continuations of this PES unit are pinned. Eviction or
+                // lag can only change the cursor after this complete unit.
+                for bytes in chunks {
+                    let mut bytes = bytes.to_vec();
+                    continuity.rewrite(&mut bytes);
+                    writer.send(&bytes, true).await?;
+                }
             }
             live::Read::Wait => {
                 writer.wait(notified).await?;

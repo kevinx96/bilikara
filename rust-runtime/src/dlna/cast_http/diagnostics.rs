@@ -1,4 +1,5 @@
 use super::{DeviceContext, Reason};
+use crate::experimental_libav::cast_mux::CastStart;
 use std::{
     collections::VecDeque,
     sync::Mutex,
@@ -48,6 +49,11 @@ pub struct HttpStageResult {
     pub result: Result<(), Reason>,
     pub bytes_written: u64,
     pub disconnect_reason: Option<Reason>,
+    /// Join/jump watermark relative to live_start.timestamp_origin_us. Thus
+    /// source timestamp = origin + media_time_us; presentation elapsed from
+    /// the source start = origin + media_time_us - source_start_us.
+    pub media_time_us: Option<i64>,
+    pub live_start: Option<CastStart>,
 }
 
 #[derive(Clone, Debug)]

@@ -8,6 +8,7 @@ use tokio::{
 };
 
 mod companion;
+mod review;
 
 fn run(future: impl Future<Output = ()>) {
     tokio::runtime::Builder::new_multi_thread()
@@ -212,8 +213,10 @@ fn packet(pid: u16, stamp: u8, key: bool) -> Vec<u8> {
     p[5] = 0x10;
     p[6..12].copy_from_slice(&[0, 0, 0, stamp, 0x7e, 0]);
     p[12..16].copy_from_slice(&[0, 0, 1, 0xe0]);
-    p[16] = if key { 0x65 } else { 0x41 };
-    p[17] = stamp;
+    p[16..18].copy_from_slice(&170u16.to_be_bytes());
+    p[18..21].copy_from_slice(&[0x80, 0, 0]);
+    p[21] = if key { 0x65 } else { 0x41 };
+    p[22] = stamp;
     p
 }
 
@@ -274,12 +277,16 @@ fn file_range_boundaries_head_and_common_headers() {
                 "bytes 0-9/10",
             ),
             ("bytes=10-", 416, "", "bytes */10"),
-            ("bytes=7-3", 416, "", "bytes */10"),
+            ("bytes=7-3", 200, "0123456789", ""),
             ("bytes=-0", 416, "", "bytes */10"),
-            ("bytes=18446744073709551616-", 416, "", "bytes */10"),
-            ("bytes=0-18446744073709551616", 416, "", "bytes */10"),
-            ("bytes=+1-2", 416, "", "bytes */10"),
-            ("bytes=", 416, "", "bytes */10"),
+            ("bytes=18446744073709551616-", 200, "0123456789", ""),
+            ("bytes=0-18446744073709551616", 200, "0123456789", ""),
+            ("bytes=-18446744073709551616", 200, "0123456789", ""),
+            ("bytes=+1-2", 200, "0123456789", ""),
+            ("bytes=", 200, "0123456789", ""),
+            ("bytes=abc", 200, "0123456789", ""),
+            ("bytes=not-a-range", 200, "0123456789", ""),
+            ("Bytes=0-1", 206, "01", "bytes 0-1/10"),
             ("bytes=1-2,5-6", 200, "0123456789", ""),
             ("items=1-2", 200, "0123456789", ""),
         ] {
@@ -447,6 +454,7 @@ fn public_peer_403_waits_for_complete_header_over_loopback_transport() {
                 id: 100,
                 cancel: CancellationToken::new(),
                 closed: CancellationToken::new(),
+                header_phase: Arc::new(AtomicU8::new(0)),
             };
             // A public source cannot be routed through a real loopback connection;
             // inject only the accept peer fact, use the actual parser and writer.
@@ -597,7 +605,7 @@ fn fifth_get_closes_oldest_and_all_new_gets_return_200() {
                 .await
                 .unwrap()
                 .unwrap();
-            assert_eq!(packet[17], 7);
+            assert_eq!(packet[22], 7);
         }
         let diag = endpoint.shutdown().await;
         assert!(
@@ -679,13 +687,15 @@ fn first_body_byte_event_once_per_generation_and_no_head_false_positive() {
 }
 
 #[test]
-fn live_midstream_join_uses_latest_keyframe_and_ignores_every_range() {
+fn live_midstream_join_uses_playback_keyframe_and_ignores_every_range() {
     run(async {
         let endpoint = endpoint().await;
         let stream = live(LiveOptions::default());
         for i in 0..15 {
             push(&stream, i64::from(i) * 1_000_000, i, i % 3 == 0);
         }
+        stream.set_elapsed(Duration::from_secs(10));
+        stream.finish(true);
         let media = endpoint
             .publish_live(1, stream.clone(), TsMime::Mp2t)
             .unwrap();
@@ -702,7 +712,7 @@ fn live_midstream_join_uses_latest_keyframe_and_ignores_every_range() {
             common(&response, "video/MP2T", false, false);
             assert!(!response.headers.contains_key("content-length"));
             assert!(!response.headers.contains_key("content-range"));
-            let mut data = [0; 188 * 3];
+            let mut data = [0; 188 * 6];
             timeout(
                 Duration::from_secs(1),
                 response.socket.read_exact(&mut data),
@@ -710,11 +720,11 @@ fn live_midstream_join_uses_latest_keyframe_and_ignores_every_range() {
             .await
             .unwrap()
             .unwrap();
-            assert_eq!(data[16], 0x65);
-            assert_eq!(data[17], 12);
+            assert_eq!(data[21], 0x65);
+            assert_eq!(data[22], 9);
             for (index, p) in data.chunks_exact(188).enumerate() {
                 assert_eq!(p[3] & 15, index as u8);
-                assert_eq!(p[9], (index + 12) as u8); // PCR untouched
+                assert_eq!(p[9], (index + 9) as u8); // PCR untouched
             }
         }
         let head = request(&endpoint, "HEAD", &media.uri, "Range: bytes=7-9\r\n").await;
@@ -773,7 +783,7 @@ fn live_default_five_second_burst_then_one_x_and_configurable_burst() {
             .unwrap()
             .unwrap();
             assert!(since.elapsed() >= Duration::from_millis(850));
-            assert_eq!(last[17], 3);
+            assert_eq!(last[22], 3);
             endpoint.shutdown().await;
         }
     });
@@ -785,7 +795,7 @@ fn lagging_live_reader_jumps_to_keyframe_with_discontinuity_and_continuous_cc() 
         let endpoint = endpoint().await;
         let stream = live(LiveOptions {
             burst: Duration::ZERO,
-            max_client_lag_bytes: 188 * 128,
+            max_client_lag: Duration::from_millis(100),
             ..LiveOptions::default()
         });
         push(&stream, 0, 0, true);
@@ -796,12 +806,13 @@ fn lagging_live_reader_jumps_to_keyframe_with_discontinuity_and_continuous_cc() 
         let mut first = [0; 188];
         response.socket.read_exact(&mut first).await.unwrap();
         push(&stream, 1_000_000, 1, false);
-        // The reader is now pacing the next packet. Advance enough data to exceed
-        // the byte lag bound, without waiting for a ring eviction.
+        // The reader is now pacing a complete PES. Simulate elapsed media time
+        // and eviction while that unit is in flight.
         sleep(Duration::from_millis(80)).await;
         for i in 2..140 {
             push(&stream, i64::from(i) * 1_000_000, i, i % 3 == 0);
         }
+        stream.set_elapsed(Duration::from_secs(139));
         stream.finish(true);
         let mut rest = Vec::new();
         timeout(
@@ -813,23 +824,31 @@ fn lagging_live_reader_jumps_to_keyframe_with_discontinuity_and_continuous_cc() 
         .unwrap();
         let packets: Vec<_> = rest.chunks_exact(188).collect();
         assert_eq!(packets.len(), 4); // old paced packet, marker, key 138, packet 139
-        assert_eq!(packets[0][17], 1);
+        assert_eq!(packets[0][22], 1);
         assert_eq!(packets[0][3] & 15, 1);
         assert_eq!(packets[1][3] & 0x30, 0x20);
         assert_eq!(packets[1][5] & 0x80, 0x80);
         assert_eq!(packets[1][3] & 15, 1);
-        assert_eq!(packets[2][16], 0x65);
-        assert_eq!(packets[2][17], 138);
+        assert_eq!(packets[2][21], 0x65);
+        assert_eq!(packets[2][22], 138);
         assert_eq!(packets[2][3] & 15, 2);
         assert_eq!(packets[3][3] & 15, 3);
-        assert!(
-            endpoint
-                .shutdown()
-                .await
-                .stages
-                .iter()
-                .any(|e| e.stage == HttpStage::LiveJump)
-        );
+        let diag = endpoint.shutdown().await;
+        let jump = diag
+            .stages
+            .iter()
+            .find(|e| e.stage == HttpStage::LiveJump)
+            .unwrap();
+        assert_eq!(jump.media_time_us, Some(138_000_000));
+        assert_eq!(jump.live_start, Some(start()));
+        let get = diag
+            .stages
+            .iter()
+            .find(|e| e.stage == HttpStage::Get)
+            .unwrap();
+        assert_eq!(get.media_time_us, Some(0));
+        assert_eq!(get.live_start, Some(start()));
+        assert_eq!(jump.connection_id, get.connection_id);
     });
 }
 
@@ -848,7 +867,6 @@ fn live_retains_ten_seconds_whole_gops_and_fails_explicitly_at_memory_limit() {
         assert_eq!(snapshot.error, None);
         let limited = live(LiveOptions {
             max_bytes: 188 * 128,
-            max_client_lag_bytes: 188 * 128,
             ..LiveOptions::default()
         });
         let bytes = packet(256, 0, true).repeat(128);
@@ -990,8 +1008,13 @@ fn accepted_connections_and_diagnostics_are_bounded() {
             .publish_live(1, live(LiveOptions::default()), TsMime::Mp2t)
             .unwrap();
         let mut probes = Vec::new();
-        for _ in 0..MAX_CONNECTIONS {
-            let mut socket = connect(&endpoint, None, false).await;
+        for i in 0..MAX_HEADERS {
+            let mut socket = connect(
+                &endpoint,
+                Some(Ipv4Addr::new(127, 0, 0, i as u8 + 2)),
+                false,
+            )
+            .await;
             socket
                 .write_all(format!("HEAD {} HTTP/1.1\r\nX: ", target(&media.uri)).as_bytes())
                 .await
@@ -1004,16 +1027,25 @@ fn accepted_connections_and_diagnostics_are_bounded() {
             .write_all(format!("HEAD {} HTTP/1.1\r\n\r\n", target(&media.uri)).as_bytes())
             .await
             .unwrap();
-        let mut byte = [0];
-        assert!(
-            timeout(Duration::from_millis(250), extra.read(&mut byte))
+        assert_eq!(
+            timeout(Duration::from_millis(500), reply(extra))
                 .await
-                .is_err()
+                .unwrap()
+                .status,
+            200
         );
         let mut first = probes.remove(0);
-        first.write_all(b"done\r\n\r\n").await.unwrap();
-        assert_eq!(reply(first).await.status, 200);
-        assert_eq!(reply(extra).await.status, 200);
+        let mut byte = [0];
+        let closed = timeout(Duration::from_secs(1), first.read(&mut byte))
+            .await
+            .unwrap();
+        assert!(
+            matches!(closed, Ok(0))
+                || closed.is_err_and(|e| matches!(
+                    e.kind(),
+                    std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
+                ))
+        );
         for mut probe in probes {
             probe.write_all(b"done\r\n\r\n").await.unwrap();
             assert_eq!(reply(probe).await.status, 200);
@@ -1117,8 +1149,8 @@ async fn resume_reading(endpoint: &CastEndpoint, response: &mut Reply, before: u
 fn real_backpressure_pauses_three_and_ten_seconds_then_resumes() {
     run(async {
         let (_temp, endpoint, mut response) = backpressured_file().await;
-        // Total connection age exceeds 15 s, while every individual stall is
-        // shorter: successful writes must reset the deadline.
+        // Every individual stall is shorter than the deadline. The separate
+        // single_large_write test proves resetting within one send() call.
         for pause in [
             Duration::from_secs(3),
             Duration::from_secs(10),
