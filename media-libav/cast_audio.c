@@ -12,14 +12,14 @@ typedef struct {
     SwrContext *swr;
     AVFrame *frame;
     float *cache,*converted;
-    int64_t base;
+    int64_t base, decoded;
     int count,head,draining,done;
 } CastAudioSource;
 typedef struct {
     CastAudioSource sources[1];
     AVCodecContext *encoder;
     AVFrame *frame;
-    int64_t source_frame,frames,sent;
+    int64_t source_frame,sent;
     int draining;
     float pcm[1024*2];
 } CastAudio;
@@ -34,12 +34,17 @@ static uint32_t cast_input_audio(LiveInput *in,const BmRequest *q) {
     if(q->fd<0 || !q->cancelled) return BM_INVALID_REQUEST;
     if(interrupted(&(Call){.request=q})) return BM_CANCELLED;
 #ifdef _WIN32
-    if(!bm_regular_fd(q->fd) || _lseeki64(q->fd,0,SEEK_SET)<0 || _read(q->fd,magic,4)!=4 || _lseeki64(q->fd,0,SEEK_SET)<0) return BM_IO;
+    if(!bm_regular_fd(q->fd) || _lseeki64(q->fd,0,SEEK_SET)<0) return BM_IO;
+    int bytes=_read(q->fd,magic,4);
+    if(bytes<0 || _lseeki64(q->fd,0,SEEK_SET)<0) return BM_IO;
 #else
     struct stat st;
     if(fstat(q->fd,&st)||!S_ISREG(st.st_mode)) return BM_INVALID_REQUEST;
-    if(lseek(q->fd,0,SEEK_SET)<0||read(q->fd,magic,4)!=4||lseek(q->fd,0,SEEK_SET)<0) return BM_IO;
+    if(lseek(q->fd,0,SEEK_SET)<0) return BM_IO;
+    ssize_t bytes=read(q->fd,magic,4);
+    if(bytes<0||lseek(q->fd,0,SEEK_SET)<0) return BM_IO;
 #endif
+    if(bytes!=4) return BM_INVALID_MEDIA;
     uint32_t status=live_open(in,q,AVMEDIA_TYPE_AUDIO,AV_CODEC_ID_NONE,!memcmp(magic,"fLaC",4)?"flac":"mov");
     return status;
 }
@@ -105,6 +110,8 @@ static int cast_audio_decode(CastAudioSource *s) {
             if(f->nb_samples<=0||f->nb_samples>65536||f->pts==AV_NOPTS_VALUE||f->decode_error_flags||
                f->sample_rate!=s->decoder->sample_rate||f->format!=s->decoder->sample_fmt||
                av_channel_layout_compare(&f->ch_layout,&s->decoder->ch_layout)) {av_frame_unref(f);return AVERROR_INVALIDDATA;}
+            s->decoded+=f->nb_samples;
+            if(s->decoded>INT64_C(21600)*f->sample_rate) {av_frame_unref(f);return AVERROR_INVALIDDATA;}
             int64_t position=av_rescale_q(f->pts,s->input.format->streams[0]->time_base,(AVRational){1,CAST_AUDIO_RATE});
             int64_t delay=swr_get_delay(s->swr,CAST_AUDIO_RATE);
             if(position < -INT64_C(604800)*CAST_AUDIO_RATE || position > INT64_C(604800)*CAST_AUDIO_RATE || delay<0 || delay>CAST_AUDIO_CONVERT) {av_frame_unref(f);return AVERROR_INVALIDDATA;}
@@ -130,29 +137,24 @@ static int cast_audio_seek(CastAudioSource *s,int64_t target) {
     avcodec_flush_buffers(s->decoder);swr_close(s->swr);ret=swr_init(s->swr);
     s->count=s->head=0;s->draining=s->done=s->input.eof=0;return ret;
 }
-static int32_t cast_audio_read(void *opaque,uint32_t track,int64_t start,uint32_t frames,float *out) {
-    CastAudio *a=opaque;
-    if(track!=0||!frames||frames>16384||!out||
-       start < -INT64_C(604800)*CAST_AUDIO_RATE||start>INT64_C(604800)*CAST_AUDIO_RATE) return BM_INVALID_REQUEST;
-    CastAudioSource *s=&a->sources[track];
+/* Return actual source frames, zero at EOF, or the original libav error.
+ * STREAMINFO/container duration is advisory and never drives PCM production. */
+static int cast_audio_read(CastAudio *a,int64_t start,int frames,float *out) {
+    CastAudioSource *s=&a->sources[0];
     memset(out,0,frames*2*sizeof(float));
-    int64_t end=start+frames;
-    if(end<=0) return BM_OK;
-    int64_t wanted=FFMAX(0,start);
+    int64_t end=start+frames, wanted=FFMAX(0,start);
     if((s->count && wanted<s->base) || (!s->done && wanted>s->base+s->count+CAST_AUDIO_CACHE-CAST_AUDIO_RATE)) {
-        int ret=cast_audio_seek(s,wanted);if(ret<0) return error_status(ret);
+        int ret=cast_audio_seek(s,wanted);if(ret<0) return ret;
     }
     while(!s->done && s->base+s->count<end) {
-        int ret=cast_audio_decode(s);if(ret<0) return interrupted(&s->input.call)?BM_CANCELLED:error_status(ret);
+        int ret=cast_audio_decode(s);if(ret<0) return ret;
     }
-    /* A final partial AAC frame may be padded; a truncated source must not
-     * become seconds/minutes of fabricated silence from container duration. */
-    if(s->done && end>s->base+s->count+1024) return BM_INVALID_MEDIA;
+    if(s->done) end=FFMIN(end,s->base+s->count);
+    if(end<=start) return 0;
     if(wanted<s->base) {
-        // Only leading silence before an actual positive stream start is valid.
         AVStream *stream=s->input.format->streams[0];
         int64_t declared=stream->start_time==AV_NOPTS_VALUE?0:av_rescale_q(stream->start_time,stream->time_base,(AVRational){1,CAST_AUDIO_RATE});
-        if(wanted>=declared) return BM_INVALID_MEDIA;
+        if(wanted>=declared) return AVERROR_INVALIDDATA;
     }
     int64_t begin=FFMAX(wanted,s->base),limit=FFMIN(end,s->base+s->count);
     if(limit>begin) {
@@ -161,7 +163,7 @@ static int32_t cast_audio_read(void *opaque,uint32_t track,int64_t start,uint32_
         memcpy(out+(begin-start)*2,s->cache+position*2,first*2*sizeof(float));
         memcpy(out+(begin-start+first)*2,s->cache,(size_t)(limit-begin-first)*2*sizeof(float));
     }
-    return BM_OK;
+    return (int)(end-start);
 }
 static void cast_audio_release(LiveInput *in) {
     CastAudio *a=in->state;if(!a) return;
@@ -176,12 +178,14 @@ static int cast_audio_next(LiveInput *in) {
         if(ret==AVERROR_EOF) {in->eof=1;return 0;}
         if(ret>=0) return 1;
         if(ret!=AVERROR(EAGAIN)||a->draining) return ret;
-        if(a->sent>=a->frames) {a->draining=1;ret=avcodec_send_frame(a->encoder,NULL);}
-        else {
-            int32_t status=cast_audio_read(a,0,a->source_frame+a->sent,1024,a->pcm);
-            if(status) return status==BM_CANCELLED?AVERROR_EXIT:AVERROR_INVALIDDATA;
+        int count=cast_audio_read(a,a->source_frame+a->sent,1024,a->pcm);
+        if(count<0) return count;
+        if(a->sent+count>INT64_C(21600)*CAST_AUDIO_RATE) return AVERROR_INVALIDDATA;
+        if(!count) {
+            if(!a->sent) return AVERROR_INVALIDDATA;
+            a->draining=1;ret=avcodec_send_frame(a->encoder,NULL);
+        } else {
             ret=av_frame_make_writable(a->frame);if(ret<0) return ret;
-            int count=(int)FFMIN(1024,a->frames-a->sent);
             for(int n=0;n<1024;n++) for(int c=0;c<2;c++) {
                 float value=n<count?a->pcm[n*2+c]:0;
                 if(!isfinite(value)) return AVERROR_INVALIDDATA;
@@ -193,11 +197,16 @@ static int cast_audio_next(LiveInput *in) {
         if(ret<0) return ret;
     }
 }
+static int cast_aac_copy_supported(const AVCodecParameters *p) {
+    return p->codec_id==AV_CODEC_ID_AAC && p->profile==AV_PROFILE_AAC_LOW &&
+        p->ch_layout.nb_channels>=1 && p->ch_layout.nb_channels<=2 &&
+        (p->sample_rate==44100 || p->sample_rate==48000);
+}
 static uint32_t cast_audio_open(LiveInput *in,const BmRequest *q,int64_t source_us,uint32_t *transcoded) {
     /* Inspect once to preserve AAC bytes and use the same source validation. */
     uint32_t status=cast_input_audio(in,q);
     if(status) return status;
-    if(in->config->codec_id==AV_CODEC_ID_AAC) {
+    if(cast_aac_copy_supported(in->config)) {
         const AVCodecParameters *p=in->config;
         if(!p->extradata || p->extradata_size<=0 || p->ch_layout.nb_channels<1 ||
             p->ch_layout.nb_channels>8 || p->sample_rate<8000 || p->sample_rate>192000) return BM_UNSUPPORTED_CODEC;
@@ -207,22 +216,12 @@ static uint32_t cast_audio_open(LiveInput *in,const BmRequest *q,int64_t source_
         }
         return BM_OK;
     }
-    AVStream *src=in->format->streams[0];
-    int64_t end_us=src->duration==AV_NOPTS_VALUE ? 0 : av_rescale_q(src->duration,src->time_base,AV_TIME_BASE_Q);
-    if(end_us<=0 || end_us>INT64_C(21600000000)) return BM_UNSUPPORTED_LAYOUT;
-    if(src->start_time!=AV_NOPTS_VALUE) {
-        int64_t start=av_rescale_q(src->start_time,src->time_base,AV_TIME_BASE_Q);
-        if(start < -INT64_C(604800000000) || start > INT64_C(604800000000)) return BM_INVALID_MEDIA;
-        end_us+=start;
-    }
     live_close(in);memset(in,0,sizeof(*in));
     *transcoded=1;
     CastAudio *a=av_mallocz(sizeof(*a));
     if(!a) return BM_BACKEND_FAILURE;
     in->state=a;in->release=cast_audio_release;in->next=cast_audio_next;in->call.request=q;
     a->source_frame=av_rescale_q(source_us,AV_TIME_BASE_Q,(AVRational){1,CAST_AUDIO_RATE});
-    a->frames=av_rescale_q(end_us-source_us,AV_TIME_BASE_Q,(AVRational){1,CAST_AUDIO_RATE});
-    if(a->frames<=0||a->frames>INT64_C(21600)*CAST_AUDIO_RATE) return BM_UNSUPPORTED_LAYOUT;
     status=cast_audio_source_open(&a->sources[0],q);if(status) return status;
     const AVCodec *codec=avcodec_find_encoder(AV_CODEC_ID_AAC);
     a->encoder=avcodec_alloc_context3(codec);a->frame=av_frame_alloc();in->packet=av_packet_alloc();in->format=avformat_alloc_context();

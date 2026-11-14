@@ -16,6 +16,9 @@ struct Inspection {
     audio_channels: u32,
     duration_us: i64,
     packets: [u64; 2],
+    first_pts_us: [i64; 2],
+    last_end_us: [i64; 2],
+    audio_profile: i32,
 }
 fn inspect(probe: &LibavMetadataProbe, path: &Path) -> Inspection {
     type Check = unsafe extern "C" fn(*const wire::Request, u32, *mut Inspection) -> u32;
@@ -65,10 +68,12 @@ fn temporary() -> PathBuf {
     path
 }
 fn repeated_video(probe: &LibavMetadataProbe, source: &Path, path: &Path) {
+    video_fixture(probe, source, path, c"bm_test_cast_fixture_v1");
+}
+fn video_fixture(probe: &LibavMetadataProbe, source: &Path, path: &Path, symbol: &std::ffi::CStr) {
     type Fixture = unsafe extern "C" fn(*const wire::Request, *const std::ffi::c_char) -> u32;
     // SAFETY: explicitly supplied test companion; private test-only signature.
-    let create: Fixture =
-        unsafe { transmute(probe._library.symbol(c"bm_test_cast_fixture_v1").unwrap()) };
+    let create: Fixture = unsafe { transmute(probe._library.symbol(symbol).unwrap()) };
     let file = open_input(source).unwrap();
     let fd = probe._library.descriptor(&file).unwrap();
     extern "C" fn never(_: *mut c_void) -> i32 {
@@ -167,10 +172,12 @@ fn clocks(bytes: &[u8]) {
     }
     assert!(pcrs.len() > 10);
     assert!(pats.len() > 2);
-    let mut packet_ticks = 0;
+    let first = pcrs.first().unwrap();
+    let last = pcrs.last().unwrap();
+    let packet_ticks = ((last.1 + WRAP - first.1) % WRAP).div_ceil(last.0 - first.0);
     for pair in pcrs.windows(2) {
         let delta = (pair[1].1 + WRAP - pair[0].1) % WRAP;
-        let tick = delta.div_ceil(pair[1].0 - pair[0].0);
+        let tick = packet_ticks;
         // libav checks PCR around PSI insertion. Bound the configured 20 ms
         // plus at most four TS packets (PAT/PMT/SDT and packet quantization).
         assert!(
@@ -178,7 +185,6 @@ fn clocks(bytes: &[u8]) {
             "PCR interval {} us",
             delta / 27
         );
-        packet_ticks = packet_ticks.max(tick);
     }
     for pair in pats.windows(2) {
         let delta = (pair[1] - pair[0]) * packet_ticks;
@@ -250,8 +256,9 @@ fn real_cast_mux_contract() {
                 let bytes = std::fs::read(output.path()).unwrap();
                 if format == CastFormat::Ts {
                     tables(&bytes);
-                    clocks(&bytes);
+                    assert_eq!(null_packets(&bytes), 0);
                 } else {
+                    assert_unsigned_ctts(&bytes);
                     let mut offset = 0;
                     let mut atoms = Vec::new();
                     while offset + 8 <= bytes.len() {
@@ -334,6 +341,7 @@ fn real_cast_mux_contract() {
     drop(seek_file);
 
     tables(&chunks);
+    clocks(&chunks);
     assert!(matches!(
         probe.cast_ts(
             &inputs,
@@ -420,6 +428,405 @@ fn real_cast_mux_contract() {
     assert!(began.elapsed() < Duration::from_millis(500));
     assert!(generated > 0);
     drop(session);
-    assert_eq!(std::fs::read_dir(cache.join(".cast")).unwrap().count(), 0);
+    assert!(
+        std::fs::read_dir(cache.join(".cast"))
+            .unwrap()
+            .all(|e| e.unwrap().file_name() == ".lock")
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+fn audio_fixture(probe: &LibavMetadataProbe, path: &Path, kind: u32, seconds: u32) {
+    type Create = unsafe extern "C" fn(*const std::ffi::c_char, u32, u32) -> u32;
+    // SAFETY: test-only export of the explicitly supplied native test companion.
+    let create: Create =
+        unsafe { transmute(probe._library.symbol(c"bm_test_cast_audio_v1").unwrap()) };
+    let path = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+    // SAFETY: the path outlives the synchronous fixture encoder.
+    assert_eq!(unsafe { create(path.as_ptr(), kind, seconds) }, 0);
+}
+
+#[test]
+#[ignore = "requires actual cast test companion"]
+fn transcode_uses_decoded_eof_for_unknown_and_inaccurate_flac_duration() {
+    let probe = load();
+    let root = temporary();
+    let audio = root.join("\u{97f3}\u{9891} unknown.flac");
+    audio_fixture(&probe, &audio, 0, 2);
+    let original = std::fs::read(&audio).unwrap();
+    assert_eq!(&original[..4], b"fLaC");
+    let mut header = u64::from_be_bytes(original[18..26].try_into().unwrap());
+    assert_eq!(header & ((1 << 36) - 1), 192000);
+    header &= !((1 << 36) - 1);
+    let video = fixtures().join("video-reordered-start.mp4");
+    let stop = AtomicBool::new(false);
+    let session = CastSession::new(&root, 8 * 1024 * 1024).unwrap();
+    for samples in [0, 192000 + 9600, 192000 - 19200] {
+        let mut bytes = original.clone();
+        bytes[18..26].copy_from_slice(&(header | samples).to_be_bytes());
+        std::fs::write(&audio, bytes).unwrap();
+        for format in [CastFormat::Ts, CastFormat::Mp4] {
+            let out = session
+                .mux(
+                    &probe,
+                    &CastInputs {
+                        video: &video,
+                        audio: &audio,
+                        start_us: 0,
+                    },
+                    format,
+                    &stop,
+                )
+                .unwrap();
+            let actual = inspect(&probe, out.path());
+            assert!(out.summary.audio_transcoded);
+            assert!(
+                (out.summary.duration_us - 2_000_000).abs() < 50_000,
+                "{samples}: {actual:?}"
+            );
+            assert!((actual.last_end_us[1] - actual.first_pts_us[1] - 2_000_000).abs() < 50_000);
+        }
+    }
+    drop(session);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[ignore = "requires actual cast test companion"]
+fn multichannel_and_nonstandard_rate_aac_are_converted_to_stereo_lc() {
+    let probe = load();
+    let root = temporary();
+    let video = fixtures().join("video-reordered-start.mp4");
+    let audio = root.join("audio.m4a");
+    let stop = AtomicBool::new(false);
+    let session = CastSession::new(&root, 8 * 1024 * 1024).unwrap();
+    for kind in [1, 2] {
+        audio_fixture(&probe, &audio, kind, 2);
+        for format in [CastFormat::Ts, CastFormat::Mp4] {
+            let out = session
+                .mux(
+                    &probe,
+                    &CastInputs {
+                        video: &video,
+                        audio: &audio,
+                        start_us: 0,
+                    },
+                    format,
+                    &stop,
+                )
+                .unwrap();
+            let actual = inspect(&probe, out.path());
+            assert!(
+                out.summary.audio_transcoded,
+                "AAC fixture {kind} bypassed conversion"
+            );
+            assert_eq!(
+                (
+                    actual.audio_rate,
+                    actual.audio_channels,
+                    actual.audio_profile
+                ),
+                (48000, 2, 1)
+            );
+        }
+    }
+    drop(session);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[ignore = "requires actual cast test companion"]
+fn transcoded_ts_keeps_aac_priming_packet() {
+    let probe = load();
+    let root = temporary();
+    let original = fixtures().join("video-reordered-start.mp4");
+    let intra = root.join("intra.mp4");
+    video_fixture(&probe, &original, &intra, c"bm_test_cast_intra_fixture_v1");
+    let repeated = root.join("repeated.mp4");
+    repeated_video(&probe, &original, &repeated);
+    let audio = root.join("audio.flac");
+    audio_fixture(&probe, &audio, 0, 4);
+    let stop = AtomicBool::new(false);
+    let session = CastSession::new(&root, 8 * 1024 * 1024).unwrap();
+    for video in [&original, &intra, &repeated] {
+        for start_us in [0, 1_500_000] {
+            if video == &original && start_us > 0 {
+                continue;
+            }
+            let out = session
+                .mux(
+                    &probe,
+                    &CastInputs {
+                        video,
+                        audio: &audio,
+                        start_us,
+                    },
+                    CastFormat::Ts,
+                    &stop,
+                )
+                .unwrap();
+            let actual = inspect(&probe, out.path());
+            assert!(
+                (actual.first_pts_us[0] - actual.first_pts_us[1] - 21_333).abs() < 25,
+                "{actual:?}"
+            );
+            tables(&std::fs::read(out.path()).unwrap());
+        }
+    }
+    drop(session);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+fn null_packets(bytes: &[u8]) -> usize {
+    bytes
+        .chunks_exact(188)
+        .filter(|p| p[1] & 31 == 31 && p[2] == 255)
+        .count()
+}
+
+#[test]
+#[ignore = "requires actual cast test companion"]
+fn live_start_precedes_data_and_file_ts_avoids_cbr_padding() {
+    let probe = load();
+    let root = temporary();
+    let video = root.join("three-gops.mp4");
+    repeated_video(
+        &probe,
+        &fixtures().join("video-reordered-start.mp4"),
+        &video,
+    );
+    let audio = fixtures().join("audio-eac3.m4a");
+    let inputs = CastInputs {
+        video: &video,
+        audio: &audio,
+        start_us: 1_500_000,
+    };
+    let stop = AtomicBool::new(false);
+    let mut started = None;
+    let mut data = 0;
+    let result = probe.cast_ts_with_events(
+        &inputs,
+        CastPacing::FullSpeed,
+        8 * 1024 * 1024,
+        &stop,
+        &mut |event| match event {
+            CastEvent::Start(start) => {
+                assert!(started.is_none());
+                assert!((start.source_start_us - 1_001_000).abs() < 1000);
+                assert!(start.timestamp_origin_us < start.source_start_us);
+                assert_eq!((start.width, start.height), (160, 90));
+                assert!(start.audio_transcoded);
+                started = Some(start);
+                true
+            }
+            CastEvent::Data { .. } => {
+                assert!(started.is_some());
+                data += 1;
+                false
+            }
+        },
+    );
+    assert!(matches!(result, Err(ProbeError::Cancelled)));
+    assert_eq!(data, 1); // start is delivered even though no EOF/summary was reached
+    for panic in [false, true] {
+        let result = probe.cast_ts_with_events(
+            &inputs,
+            CastPacing::FullSpeed,
+            8 * 1024 * 1024,
+            &stop,
+            &mut |event| {
+                assert!(matches!(event, CastEvent::Start(_)));
+                assert!(!panic, "caught start callback panic");
+                false
+            },
+        );
+        if panic {
+            assert!(matches!(result, Err(ProbeError::BackendFailure(_))));
+        } else {
+            assert!(matches!(result, Err(ProbeError::Cancelled)));
+        }
+    }
+    let session = CastSession::new(&root, 8 * 1024 * 1024).unwrap();
+    let file = session.mux(&probe, &inputs, CastFormat::Ts, &stop).unwrap();
+    let bytes = std::fs::read(file.path()).unwrap();
+    assert_eq!(null_packets(&bytes), 0);
+    tables(&bytes);
+    inspect(&probe, file.path());
+    let mut live = Vec::new();
+    probe
+        .cast_ts(
+            &inputs,
+            CastPacing::FullSpeed,
+            8 * 1024 * 1024,
+            &stop,
+            &mut |b, _, _| {
+                live.extend_from_slice(b);
+                true
+            },
+        )
+        .unwrap();
+    assert!(null_packets(&live) > 0);
+    assert!(live.len() > bytes.len() * 2);
+    clocks(&live);
+    drop(file);
+    drop(session);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+fn assert_unsigned_ctts(bytes: &[u8]) {
+    let mut offset = 0;
+    while offset + 8 <= bytes.len() {
+        let size = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+        assert!(size >= 8 && offset + size <= bytes.len());
+        let kind = &bytes[offset + 4..offset + 8];
+        if kind == b"ctts" {
+            assert_eq!(bytes[offset + 8], 0, "legacy MP4 requires unsigned CTS v0");
+        }
+        if [b"moov", b"trak", b"mdia", b"minf", b"stbl"].contains(&kind.try_into().unwrap()) {
+            assert_unsigned_ctts(&bytes[offset + 8..offset + size]);
+        }
+        offset += size;
+    }
+}
+
+#[test]
+#[ignore = "requires actual cast test companion"]
+fn malformed_cast_inputs_have_media_error_categories() {
+    use crate::MediaErrorKind::{InvalidMedia, MediaContractViolation};
+    let probe = load();
+    let root = temporary();
+    let stop = AtomicBool::new(false);
+    let session = CastSession::new(&root, 8 * 1024 * 1024).unwrap();
+    let video = fixtures().join("video-reordered-start.mp4");
+    let audio = fixtures().join("audio.m4a");
+    let empty = root.join("empty.m4a");
+    std::fs::write(&empty, []).unwrap();
+    let flac = root.join("truncated.flac");
+    audio_fixture(&probe, &flac, 0, 2);
+    type AudioIo = unsafe extern "C" fn(*const wire::Request) -> u32;
+    // SAFETY: explicitly selected test companion and private test-only signature.
+    let audio_io: AudioIo =
+        unsafe { transmute(probe._library.symbol(c"bm_test_cast_audio_io_v1").unwrap()) };
+    let input = open_input(&flac).unwrap();
+    let fd = probe._library.descriptor(&input).unwrap();
+    extern "C" fn never(_: *mut c_void) -> i32 {
+        0
+    }
+    let request = wire::Request {
+        fd: fd.fd,
+        cancelled: never,
+        opaque: std::ptr::null_mut(),
+    };
+    // SAFETY: synchronous test call keeps all descriptor borrows alive.
+    assert_eq!(unsafe { audio_io(&request) }, 8); // BM_IO, not BM_INVALID_MEDIA
+    drop(fd);
+    drop(input);
+    let mut bytes = std::fs::read(&flac).unwrap();
+    bytes.truncate(bytes.len() - 31);
+    std::fs::write(&flac, bytes).unwrap();
+    let combined = session
+        .mux(
+            &probe,
+            &CastInputs {
+                video: &video,
+                audio: &audio,
+                start_us: 0,
+            },
+            CastFormat::Mp4,
+            &stop,
+        )
+        .unwrap();
+    for (v, a, kind) in [
+        (video.as_path(), empty.as_path(), InvalidMedia),
+        (&empty, &audio, InvalidMedia),
+        (&video, &video, MediaContractViolation),
+        (&audio, &audio, MediaContractViolation),
+        (&video, &flac, InvalidMedia),
+        (combined.path(), &audio, MediaContractViolation),
+    ] {
+        match session.mux(
+            &probe,
+            &CastInputs {
+                video: v,
+                audio: a,
+                start_us: 0,
+            },
+            CastFormat::Ts,
+            &stop,
+        ) {
+            Err(ProbeError::Media(error)) => assert_eq!(error.kind, kind, "{v:?}/{a:?}"),
+            result => panic!("wrong error category for {v:?}/{a:?}: {:?}", result.err()),
+        }
+    }
+    drop(combined);
+    drop(session);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[ignore = "requires actual cast test companion"]
+fn cancellation_after_staging_write_removes_partial_before_session_drop() {
+    let probe = load();
+    let root = temporary();
+    let audio = root.join("long.flac");
+    audio_fixture(&probe, &audio, 0, 60);
+    let video = fixtures().join("video-reordered-start.mp4");
+    let session = CastSession::new(&root, 32 * 1024 * 1024).unwrap();
+    for format in [CastFormat::Ts, CastFormat::Mp4] {
+        let stop = AtomicBool::new(false);
+        let done = AtomicBool::new(false);
+        let observed = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                while !done.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+                    for directory in std::fs::read_dir(root.join(".cast")).unwrap().flatten() {
+                        if !directory.path().is_dir() {
+                            continue;
+                        }
+                        for entry in std::fs::read_dir(directory.path()).unwrap().flatten() {
+                            if entry.path().extension().is_some_and(|e| e == "part")
+                                && entry.metadata().is_ok_and(|m| m.len() > 0)
+                            {
+                                observed.store(true, Ordering::Release);
+                                stop.store(true, Ordering::Release);
+                                return;
+                            }
+                        }
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            });
+            let result = session.mux(
+                &probe,
+                &CastInputs {
+                    video: &video,
+                    audio: &audio,
+                    start_us: 0,
+                },
+                format,
+                &stop,
+            );
+            done.store(true, Ordering::Release);
+            assert!(
+                matches!(result, Err(ProbeError::Cancelled)),
+                "expected cancellation: {:?}",
+                result.err()
+            );
+        });
+        assert!(observed.load(Ordering::Acquire));
+        let directories: Vec<_> = std::fs::read_dir(root.join(".cast"))
+            .unwrap()
+            .flatten()
+            .filter(|e| e.path().is_dir())
+            .collect();
+        assert_eq!(directories.len(), 1); // session is still alive
+        assert!(
+            std::fs::read_dir(directories[0].path())
+                .unwrap()
+                .all(|e| e.unwrap().file_name() == ".lease")
+        );
+    }
+    drop(session);
     std::fs::remove_dir_all(root).unwrap();
 }

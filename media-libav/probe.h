@@ -168,7 +168,12 @@ BM_EXPORT void bm_fd_close_v1(int32_t fd);
  * output_kind: 0 callback TS, 1 private faststart MP4 staging file.
  * TS callbacks start at packet boundaries; key marks the first chunk of an
  * IDR group (PAT/PMT precede the video PES). Never retain borrowed bytes. */
-typedef struct { uint32_t schema, request_size, result_size; } BmCastInfo;
+typedef struct { uint32_t schema, request_size, result_size, start_size; } BmCastInfo;
+typedef struct {
+    int64_t source_start_us, timestamp_origin_us;
+    int32_t profile, level;
+    uint32_t width, height, has_b_frames, audio_transcoded;
+} BmCastStart;
 typedef struct {
     BmRequest video, audio;
     int64_t start_us;
@@ -177,6 +182,8 @@ typedef struct {
     uint32_t output_kind;
     const char *staging_path;
     uint64_t max_bytes;
+    uint32_t ts_cbr; /* 0 file VBR, 1 live CBR; independent of Rust pacing */
+    int32_t (*on_start)(void *, const BmCastStart *); /* exactly once before bytes */
 } BmCastRequest;
 typedef struct {
     uint32_t status, complete;

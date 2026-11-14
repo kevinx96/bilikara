@@ -32,7 +32,7 @@ uint32_t bm_cast_info_v1(uint32_t size, BmCastInfo *info) {
         !av_guess_format("mp4", NULL, NULL) || !avcodec_find_encoder(AV_CODEC_ID_AAC) ||
         swresample_version() != LIBSWRESAMPLE_VERSION_INT ||
         strcmp(swresample_configuration(), BM_BUILD_CONFIG)) return BM_UNAVAILABLE;
-    *info = (BmCastInfo){1, sizeof(BmCastRequest), sizeof(BmCastResult)};
+    *info = (BmCastInfo){2, sizeof(BmCastRequest), sizeof(BmCastResult), sizeof(BmCastStart)};
     return BM_OK;
 }
 
@@ -65,7 +65,7 @@ static uint32_t live_open(LiveInput *in, const BmRequest *request,
     s->flags |= AVFMT_FLAG_CUSTOM_IO;
     s->probesize = 1024 * 1024;
     s->max_analyze_duration = 1000000;
-    s->max_streams = strcmp(format,"mpegts") ? 1 : 2;
+    s->max_streams = 2; /* inspect a second stream and classify the contract */
     AVDictionary *options = NULL;
     int ret = av_dict_set_int(&options, "fd", request->fd, 0);
     if (ret >= 0) ret = av_dict_set(&options, "protocol_whitelist", "fd", 0);
@@ -93,8 +93,6 @@ static uint32_t live_open(LiveInput *in, const BmRequest *request,
     const AVCodecParameters *par = s->streams[0]->codecpar;
     if (codec != AV_CODEC_ID_NONE && par->codec_id != codec) return BM_UNSUPPORTED_CODEC;
     if (codec == AV_CODEC_ID_H264 && (par->extradata_size <= 0 || !par->extradata)) return BM_INVALID_MEDIA;
-    if (codec == AV_CODEC_ID_AAC && (par->profile != AV_PROFILE_AAC_LOW ||
-        par->ch_layout.nb_channels < 1 || par->ch_layout.nb_channels > 2 || par->sample_rate <= 0)) return BM_UNSUPPORTED_CODEC;
     if (s->streams[0]->time_base.num <= 0 || s->streams[0]->time_base.den <= 0) return BM_INVALID_MEDIA;
     in->config = avcodec_parameters_alloc();
     if (!in->config || avcodec_parameters_copy(in->config,par)<0) return BM_BACKEND_FAILURE;
@@ -165,7 +163,7 @@ static int64_t cast_seek(void *opaque, int64_t offset, int whence) {
 static uint32_t live_mux(const BmCastRequest *q, BmCastResult *r) {
     if (!r) return BM_INVALID_REQUEST;
     memset(r, 0, sizeof(*r));
-    if (!q || (q->output_kind == 0 && !q->visit) || q->output_kind > 1 ||
+    if (!q || !q->on_start || q->ts_cbr > 1 || (q->output_kind == 0 && !q->visit) || q->output_kind > 1 ||
         (q->output_kind == 1 && !q->staging_path) || !q->max_bytes || q->max_bytes > INT64_MAX ||
         !q->video.cancelled || !q->audio.cancelled ||
         q->start_us < 0 || q->start_us > INT64_C(21600000000)) return BM_INVALID_REQUEST;
@@ -201,7 +199,7 @@ static uint32_t live_mux(const BmCastRequest *q, BmCastResult *r) {
     status = cast_audio_open(&inputs[1], &q->audio, source_start, &r->audio_transcoded);
     if (status) goto done;
     do { ret = live_read(&inputs[1]); }
-    while (ret > 0 && live_time(&inputs[1], inputs[1].packet->pts) < source_start);
+    while (ret > 0 && !r->audio_transcoded && live_time(&inputs[1], inputs[1].packet->pts) < source_start);
     if (ret < 0) goto failed;
     if (!ret) { status = BM_INVALID_MEDIA; goto done; }
     int64_t origin = FFMIN(live_time(&inputs[0], inputs[0].packet->dts), live_time(&inputs[1], inputs[1].packet->dts));
@@ -260,18 +258,22 @@ static uint32_t live_mux(const BmCastRequest *q, BmCastResult *r) {
         av_dict_set(&options, "pcr_period", "20", 0);
         /* VBR can emit PCR only on video frames (41.7 ms at 24 fps). CBR lets
          * the muxer insert adaptation-only PCR/null packets between such frames. */
-        if (inputs[0].format->bit_rate>256000000 || inputs[1].format->bit_rate>256000000) {
-            status=BM_UNSUPPORTED_LAYOUT;goto done;
+        if (q->ts_cbr) {
+            if (inputs[0].format->bit_rate>256000000 || inputs[1].format->bit_rate>256000000) {
+                status=BM_UNSUPPORTED_LAYOUT;goto done;
+            }
+            int64_t rate=inputs[0].format->bit_rate>0 ? inputs[0].format->bit_rate : 0;
+            if (inputs[1].format->bit_rate>0) rate+=inputs[1].format->bit_rate;
+            if (rate>256000000) {status=BM_UNSUPPORTED_LAYOUT;goto done;}
+            rate=rate*2+1000000;
+            av_dict_set_int(&options,"muxrate",rate,0);
         }
-        int64_t rate=inputs[0].format->bit_rate>0 ? inputs[0].format->bit_rate : 0;
-        if (inputs[1].format->bit_rate>0) rate+=inputs[1].format->bit_rate;
-        if (rate>256000000) {status=BM_UNSUPPORTED_LAYOUT;goto done;}
-        rate=rate*2+1000000;
-        av_dict_set_int(&options,"muxrate",rate,0);
     } else {
-        av_dict_set(&options,"movflags","+faststart+negative_cts_offsets",0);
+        av_dict_set(&options,"movflags","+faststart",0);
         av_dict_set(&options,"use_editlist","1",0);
     }
+    BmCastStart start={source_start,origin,r->profile,r->level,r->width,r->height,r->has_b_frames,r->audio_transcoded};
+    if (q->on_start(q->opaque,&start)) {status=BM_CANCELLED;goto done;}
     ret = avformat_write_header(out, &options);
     if (ret < 0) goto failed;
     if (av_dict_count(options)) { status = BM_UNAVAILABLE; goto done; }
@@ -279,12 +281,16 @@ static uint32_t live_mux(const BmCastRequest *q, BmCastResult *r) {
         if (interrupted(&inputs[0].call) || interrupted(&inputs[1].call)) { status = BM_CANCELLED; goto done; }
         int index = inputs[0].eof ? 1 : inputs[1].eof ? 0 :
             (live_time(&inputs[0], inputs[0].packet->dts) <= live_time(&inputs[1], inputs[1].packet->dts) ? 0 : 1);
+        /* A TS join starts with PSI + the video IDR even when encoder priming
+         * has an earlier audio DTS (no B-frame video decode lead). Packet times
+         * remain intact; only this first cross-stream emission is reordered. */
+        if (!q->output_kind && !r->packets) index=0;
         LiveInput *in = &inputs[index];
         AVPacket *p = in->packet;
         int64_t dts = live_time(in, p->dts) - origin;
         if (dts < 0 || dts <= last_dts[index]) { status = BM_UNSUPPORTED_LAYOUT; goto done; }
         last_dts[index] = dts;
-        writer.time_us = dts;
+        writer.time_us = FFMAX(writer.time_us,dts);
         writer.key = !index && (p->flags & AV_PKT_FLAG_KEY) ? 1 : 0;
         if (writer.key) {
             if(last_key>=0) r->gop_us=FFMAX(r->gop_us,dts-last_key);
@@ -323,7 +329,7 @@ static uint32_t live_mux(const BmCastRequest *q, BmCastResult *r) {
     goto done;
 failed:
     status = ret == AVERROR_EXIT || (inputs[0].call.request && interrupted(&inputs[0].call)) || (inputs[1].call.request && interrupted(&inputs[1].call))
-        ? BM_CANCELLED : error_status(ret);
+        ? BM_CANCELLED : (io && io->error < 0 ? output_error(io->error) : error_status(ret));
 done:
     av_dict_free(&options);
     av_packet_free(&filtered);

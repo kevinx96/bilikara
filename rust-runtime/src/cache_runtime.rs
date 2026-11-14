@@ -2582,6 +2582,8 @@ fn media_url(relative_path: &str) -> String {
 }
 
 fn clear_directory(root: &Path) -> Result<(), CacheRuntimeError> {
+    crate::experimental_libav::cast_mux::CastSession::recover(root)
+        .map_err(|error| CacheRuntimeError::new("io", error.to_string()))?;
     let entries =
         fs::read_dir(root).map_err(|error| CacheRuntimeError::new("io", error.to_string()))?;
     for entry in entries {
@@ -2727,7 +2729,7 @@ fn cache_metrics(cache_root: &Path) -> Value {
     if let Ok(entries) = fs::read_dir(cache_root) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if !path.is_dir() {
+            if entry.file_name() == ".cast" || !path.is_dir() {
                 continue;
             }
             let size = directory_size(&path);
@@ -3109,6 +3111,31 @@ pathlib.Path(name).write_bytes(b'truncated' if n == 1 else (root/'valid.mp4').re
             existing_video_relative_path: String::new(),
             existing_audio_variants: Vec::new(),
         }
+    }
+
+    #[test]
+    fn cast_orphans_are_excluded_from_metrics_and_clear_cache_recovers_them() {
+        use crate::experimental_libav::cast_mux::CastSession;
+        let root = publication_root("cast-cleanup");
+        fs::create_dir_all(&root).unwrap();
+        let live = CastSession::new(&root, 1024).unwrap();
+        let orphan = root.join(".cast/0123456789abcdef0123456789abcdef");
+        fs::create_dir(&orphan).unwrap();
+        fs::write(orphan.join("crash.part"), [0; 100]).unwrap();
+        let media = root.join("real-media");
+        fs::create_dir(&media).unwrap();
+        fs::write(media.join("video.mp4"), [0; 7]).unwrap();
+        let metrics = cache_metrics(&root);
+        assert_eq!(metrics["total_bytes"], 7);
+        assert_eq!(metrics["item_count"], 1);
+        assert!(metrics["item_bytes"].get(".cast").is_none());
+        clear_directory(&root).unwrap();
+        assert!(!orphan.exists());
+        assert!(media.join("video.mp4").exists());
+        // Clearing does not take ownership of the active CastSession's directory.
+        assert_eq!(fs::read_dir(root.join(".cast")).unwrap().count(), 2);
+        drop(live);
+        fs::remove_dir_all(root).unwrap();
     }
 
     pub(super) fn publication_root(label: &str) -> PathBuf {

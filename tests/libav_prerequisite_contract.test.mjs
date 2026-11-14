@@ -32,10 +32,10 @@ test('actual cast TS/MP4 generator, AAC transcode, keyframe joins and cancellati
   if (process.platform === 'win32') for (const name of ['avutil-61.dll', 'swresample-7.dll', 'avcodec-63.dll', 'avformat-63.dll'])
     copyFile(path.join(inputs.prefix, 'bin', name), path.join(out, name));
   const binary = await buildMediaTests();
-  const result = await runNative(binary, ['--exact', 'experimental_libav::cast_mux::tests::real_cast_mux_contract', '--ignored'],
+  const result = await runNative(binary, ['experimental_libav::cast_mux::tests::', '--ignored', '--test-threads=1'],
     { ...inputs.environment, BILIKARA_TEST_CAST_COMPANION: path.join(out, testCompanionName) }, 120_000, inputs.directory);
   assert.equal(result.status, 0, result.stdout + result.stderr);
-  assert.match(result.stdout, /1 passed; 0 failed; 0 ignored/);
+  assert.match(result.stdout, /7 passed; 0 failed; 0 ignored/);
 });
 
 test('actual companion/shim rebuild twice with pinned loaded facts and exact configuration header', { timeout: 400_000 }, async () => {
