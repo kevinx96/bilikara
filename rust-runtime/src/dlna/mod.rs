@@ -184,6 +184,8 @@ pub struct StageResult {
     pub http_status: Option<u16>,
     pub result: Result<(), DlnaError>,
     pub disposition: Disposition,
+    /// Successful no-value acknowledgements may have an empty or vendor body.
+    pub nonconforming_body: Option<PolicyError>,
 }
 
 impl StageResult {
@@ -201,6 +203,7 @@ impl StageResult {
                 .or_else(|| result.as_ref().err().and_then(|error| error.http_status)),
             result: result.as_ref().map(|_| ()).map_err(Clone::clone),
             disposition: Disposition::Applied,
+            nonconforming_body: None,
         }
     }
 }

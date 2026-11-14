@@ -107,6 +107,7 @@ impl ControlClient {
     ) -> Operation<String> {
         let since = Instant::now();
         let mut status = None;
+        let mut nonconforming_body = None;
         let result = async {
             if cancel.is_cancelled() {
                 return Err(DlnaError::new(ErrorCode::Cancelled));
@@ -130,11 +131,24 @@ impl ControlClient {
             if !(200..300).contains(&reply.status) {
                 return Err(DlnaError::new(ErrorCode::HttpStatus).status(reply.status));
             }
-            parsed.map_err(|error| DlnaError::from(error).status(reply.status))?;
+            if let Err(error) = parsed {
+                if matches!(
+                    action,
+                    SoapAction::GetProtocolInfo
+                        | SoapAction::GetTransportInfo
+                        | SoapAction::GetPositionInfo
+                ) {
+                    return Err(DlnaError::from(error).status(reply.status));
+                }
+                // Kirakara accepts any 2xx acknowledgement for no-value actions.
+                // Parsing is still bounded, and a recognizable Fault wins above.
+                nonconforming_body = Some(error);
+            }
             Ok(reply.body)
         }
         .await;
-        let stage = StageResult::new(Stage::Action(action), since, status, &result);
+        let mut stage = StageResult::new(Stage::Action(action), since, status, &result);
+        stage.nonconforming_body = nonconforming_body;
         Operation {
             result,
             stages: vec![stage],

@@ -54,6 +54,104 @@ fn text(source: &str, name: &str) -> String {
 }
 
 #[test]
+fn no_value_actions_accept_2xx_nonconforming_bodies() {
+    for (action, status, body) in [
+        (SoapAction::SetAVTransportURI, 200, ""),
+        (SoapAction::SetAVTransportURI, 200, "OK"),
+        (
+            SoapAction::SetAVTransportURI,
+            200,
+            "<s:Envelope xmlns:s='x'><s:Body/></s:Envelope>",
+        ),
+        (SoapAction::Play, 204, ""),
+        (SoapAction::Pause, 202, "accepted"),
+        (SoapAction::Seek, 200, "<unrelated/>"),
+        (SoapAction::Stop, 200, ""),
+    ] {
+        let fixture = Fixture::start(vec![Reply::raw(Some(action), status, body)]);
+        let client = fixture_client(&fixture, HTTP_TIMEOUT);
+        let cancel = CancellationToken::new();
+        let uri = format!("http://{}/cast.ts", fixture.address);
+        let operation = run(async {
+            match action {
+                SoapAction::SetAVTransportURI => client.set_uri(&uri, "", &cancel).await,
+                SoapAction::Play => client.play(&cancel).await,
+                SoapAction::Pause => client.pause(&cancel).await,
+                SoapAction::Seek => client.seek(Duration::from_secs(1), &cancel).await,
+                SoapAction::Stop => client.stop(&cancel).await,
+                _ => unreachable!(),
+            }
+        });
+        fixture.join();
+        assert!(
+            operation.result.is_ok(),
+            "{action:?} HTTP {status}: {:?}",
+            operation.result
+        );
+        assert!(operation.stages[0].nonconforming_body.is_some());
+    }
+}
+
+#[test]
+fn empty_success_bodies_start_without_metadata_or_play_retries() {
+    let fixture = Fixture::start(vec![
+        Reply::ok(SoapAction::Stop),
+        Reply::raw(Some(SoapAction::SetAVTransportURI), 200, ""),
+        Reply::raw(Some(SoapAction::Play), 200, ""),
+    ]);
+    let client = fixture_client(&fixture, HTTP_TIMEOUT);
+    let uri = format!("http://{}/cast.ts", fixture.address);
+    let operation = run(client.start(
+        request(&uri, CapabilityQuery::Skip),
+        &CancellationToken::new(),
+    ));
+    assert!(operation.result.is_ok());
+    assert_eq!(operation.stages.len(), 3);
+    assert!(
+        operation.stages[1..]
+            .iter()
+            .all(|stage| stage.attempt == 1 && stage.nonconforming_body.is_some())
+    );
+    assert_eq!(fixture.join().len(), 3);
+}
+
+#[test]
+fn successful_http_queries_still_require_values_and_faults_still_fail() {
+    for action in [
+        SoapAction::GetProtocolInfo,
+        SoapAction::GetTransportInfo,
+        SoapAction::GetPositionInfo,
+        SoapAction::Play,
+    ] {
+        for body in ["", "<unrelated/>", &fault(501)] {
+            let fixture = Fixture::start(vec![Reply::raw(Some(action), 200, body)]);
+            let client = fixture_client(&fixture, HTTP_TIMEOUT);
+            let result = run(async {
+                let cancel = CancellationToken::new();
+                match action {
+                    SoapAction::GetProtocolInfo => {
+                        client.get_protocol_info(&cancel).await.result.map(|_| ())
+                    }
+                    SoapAction::GetTransportInfo => {
+                        client.get_transport_info(&cancel).await.result.map(|_| ())
+                    }
+                    SoapAction::GetPositionInfo => {
+                        client.get_position_info(&cancel).await.result.map(|_| ())
+                    }
+                    _ => client.play(&cancel).await.result,
+                }
+            });
+            fixture.join();
+            if action == SoapAction::Play && !body.contains("Fault") {
+                assert!(result.is_ok());
+            } else {
+                assert!(result.is_err());
+            }
+        }
+    }
+}
+
+#[test]
 fn every_stop_error_is_ignored_and_set_uri_is_sent() {
     let stop = SoapAction::Stop;
     let mut cases: Vec<_> = [701, 402, 501]
@@ -66,6 +164,7 @@ fn every_stop_error_is_ignored_and_set_uri_is_sent() {
         Reply::reset(stop),
     ]);
     for reply in cases {
+        let nonconforming = reply.status == 200 && !reply.reset;
         let fixture = Fixture::start(vec![
             reply,
             Reply::ok(SoapAction::SetAVTransportURI),
@@ -78,8 +177,13 @@ fn every_stop_error_is_ignored_and_set_uri_is_sent() {
             &CancellationToken::new(),
         ));
         assert!(result.result.is_ok(), "{:?}", result.result);
-        assert!(result.stages[0].result.is_err());
-        assert_eq!(result.stages[0].disposition, Disposition::Ignored);
+        if nonconforming {
+            assert!(result.stages[0].result.is_ok());
+            assert!(result.stages[0].nonconforming_body.is_some());
+        } else {
+            assert!(result.stages[0].result.is_err());
+            assert_eq!(result.stages[0].disposition, Disposition::Ignored);
+        }
         assert_eq!(fixture.join().len(), 3);
     }
 }
@@ -155,11 +259,8 @@ fn actual_http_soap_retries_metadata_and_preserves_xml_arguments() {
 }
 
 #[test]
-fn metadata_retry_is_bounded_and_does_not_retry_transport_or_invalid_success_xml() {
-    for reply in [
-        Reply::reset(SoapAction::SetAVTransportURI),
-        Reply::raw(Some(SoapAction::SetAVTransportURI), 200, "<bad/>"),
-    ] {
+fn metadata_retry_is_bounded_and_does_not_retry_transport_errors() {
+    for reply in [Reply::reset(SoapAction::SetAVTransportURI)] {
         let fixture = Fixture::start(vec![Reply::ok(SoapAction::Stop), reply]);
         let client = fixture_client(&fixture, HTTP_TIMEOUT);
         let uri = format!("http://{}/cast.ts", fixture.address);
