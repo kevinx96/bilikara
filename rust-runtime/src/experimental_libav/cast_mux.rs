@@ -3,7 +3,9 @@
 use super::{LibavMetadataProbe, ProbeError};
 use std::{path::Path, sync::atomic::AtomicBool, time::Duration};
 mod files;
-pub use files::{CastFile, CastSession};
+pub use files::{CastFile, CastRecovery, CastSession};
+#[cfg(test)]
+pub(crate) mod recovery_test_support;
 
 pub struct CastInputs<'a> {
     pub video: &'a Path,

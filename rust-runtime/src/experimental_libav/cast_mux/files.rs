@@ -1,6 +1,7 @@
 //! Private, quota-bounded cast files under the caller's authoritative cache root.
 use super::*;
 use std::{
+    collections::BTreeMap,
     fs::{self, File, OpenOptions},
     io::Write,
     path::PathBuf,
@@ -39,7 +40,10 @@ fn private_directory(path: &Path) -> std::io::Result<()> {
 fn lock_file(path: &Path) -> std::io::Result<File> {
     match fs::symlink_metadata(path) {
         Ok(m) if is_link(&m) || !m.is_file() => {
-            return Err(std::io::Error::other("invalid cast lock"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid cast lock",
+            ));
         }
         Ok(_) => (),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
@@ -56,44 +60,113 @@ fn lock_file(path: &Path) -> std::io::Result<File> {
 fn root_gate(cast: &Path) -> std::io::Result<File> {
     let meta = fs::symlink_metadata(cast)?;
     if is_link(&meta) || !meta.is_dir() {
-        return Err(std::io::Error::other("cast root is not a real directory"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "cast root is not a real directory",
+        ));
     }
     let file = lock_file(&cast.join(".lock"))?;
     fs2::FileExt::lock_exclusive(&file)?;
     Ok(file)
 }
-fn recover_locked(cast: &Path) -> std::io::Result<usize> {
-    let mut count = 0;
-    for entry in fs::read_dir(cast)? {
-        let entry = entry?;
+/// Bounded, path-free diagnostics for a best-effort cleanup pass. Reasons are
+/// fixed stage/error-category pairs, never OS error text or user filenames.
+#[derive(Debug, Default, Clone, serde::Serialize)]
+pub struct CastRecovery {
+    pub collected: usize,
+    pub retained_live: usize,
+    pub skipped: usize,
+    pub reasons: BTreeMap<String, usize>,
+}
+impl CastRecovery {
+    fn record(&mut self, stage: &'static str, error: &std::io::Error) {
+        let reason = match error.kind() {
+            #[cfg(windows)]
+            _ if error.raw_os_error() == Some(32) => "sharing_violation",
+            std::io::ErrorKind::PermissionDenied => "permission_denied",
+            std::io::ErrorKind::InvalidData => "invalid_layout",
+            std::io::ErrorKind::NotFound => "not_found",
+            _ => "io_error",
+        };
+        self.skipped += 1;
+        *self.reasons.entry(format!("{stage}:{reason}")).or_default() += 1;
+    }
+    fn log(&self) {
+        if self.skipped != 0 {
+            eprintln!("cast_recovery: {}", serde_json::json!(self));
+        }
+    }
+}
+fn recover_entry(path: &Path, report: &mut CastRecovery) {
+    let meta = match fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(e) => {
+            report.record("entry", &e);
+            return;
+        }
+    };
+    if is_link(&meta) || !meta.is_dir() {
+        report.record(
+            "entry",
+            &std::io::Error::from(std::io::ErrorKind::InvalidData),
+        );
+        return;
+    }
+    let lease = match lock_file(&path.join(".lease")) {
+        Ok(lease) => lease,
+        Err(e) => {
+            report.record("lease", &e);
+            return;
+        }
+    };
+    match fs2::FileExt::try_lock_exclusive(&lease) {
+        Ok(()) => (),
+        Err(e)
+            if e.kind() == std::io::ErrorKind::WouldBlock
+                || e.raw_os_error() == fs2::lock_contended_error().raw_os_error() =>
+        {
+            report.retained_live += 1;
+            return;
+        }
+        Err(e) => {
+            report.record("lease", &e);
+            return;
+        }
+    }
+    // Root gate still excludes creation and other collectors. Close before
+    // Windows deletion; no live owner can acquire an abandoned directory.
+    drop(lease);
+    match fs::remove_dir_all(path) {
+        // std does not follow child links/junctions
+        Ok(()) => report.collected += 1,
+        Err(e) => report.record("remove", &e),
+    }
+}
+fn recover_locked(cast: &Path) -> CastRecovery {
+    let mut report = CastRecovery::default();
+    let entries = match fs::read_dir(cast) {
+        Ok(entries) => entries,
+        Err(e) => {
+            report.record("enumerate", &e);
+            return report;
+        }
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) => {
+                report.record("enumerate", &e);
+                continue;
+            }
+        };
         let name = entry.file_name();
         let name = name.to_string_lossy();
         if name.len() != 32 || !name.bytes().all(|b| b.is_ascii_hexdigit()) {
             continue;
         }
-        let path = entry.path();
-        let meta = fs::symlink_metadata(&path)?;
-        if is_link(&meta) || !meta.is_dir() {
-            continue;
-        }
-        let lease = lock_file(&path.join(".lease"))?;
-        match fs2::FileExt::try_lock_exclusive(&lease) {
-            Ok(()) => (),
-            Err(e)
-                if e.kind() == std::io::ErrorKind::WouldBlock
-                    || e.raw_os_error() == fs2::lock_contended_error().raw_os_error() =>
-            {
-                continue;
-            }
-            Err(e) => return Err(e),
-        }
-        // Root gate still excludes creation and other collectors. Close before
-        // Windows deletion; no live owner can acquire an abandoned directory.
-        drop(lease);
-        fs::remove_dir_all(&path)?; // std does not follow child symlinks/junctions
-        count += 1;
+        recover_entry(&entry.path(), &mut report);
     }
-    Ok(count)
+    report
 }
 struct Directory {
     path: PathBuf,
@@ -153,7 +226,7 @@ impl CastSession {
             Err(e) => return Err(io_error(e)),
         }
         let _gate = root_gate(&cast).map_err(io_error)?;
-        recover_locked(&cast).map_err(io_error)?;
+        recover_locked(&cast).log();
         let mut nonce = [0u8; 16];
         getrandom::fill(&mut nonce).map_err(io_error)?;
         let name = nonce.iter().map(|b| format!("{b:02x}")).collect::<String>();
@@ -171,17 +244,35 @@ impl CastSession {
             limit: max_bytes,
         })
     }
-    /// Reclaim crash-abandoned generations only. Live sessions and CastFile
-    /// readers keep an OS lease and are never deleted by startup/cache cleanup.
-    pub fn recover(cache_root: &Path) -> std::io::Result<usize> {
-        let cast = fs::canonicalize(cache_root)?.join(".cast");
+    /// Best-effort recovery: a damaged or inaccessible cast root/entry is
+    /// reported and left alone, never promoted to a Host startup/cache error.
+    /// New sessions independently require a safe, exclusively locked cast root.
+    pub fn recover(cache_root: &Path) -> CastRecovery {
+        let mut report = CastRecovery::default();
+        let root = match fs::canonicalize(cache_root) {
+            Ok(root) => root,
+            Err(e) => {
+                report.record("root", &e);
+                report.log();
+                return report;
+            }
+        };
+        let cast = root.join(".cast");
         match fs::symlink_metadata(&cast) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-            Err(e) => return Err(e),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return report,
+            Err(e) => {
+                report.record("root", &e);
+                report.log();
+                return report;
+            }
             Ok(_) => (),
         }
-        let _gate = root_gate(&cast)?;
-        recover_locked(&cast)
+        match root_gate(&cast) {
+            Ok(_gate) => report = recover_locked(&cast),
+            Err(e) => report.record("root", &e),
+        }
+        report.log();
+        report
     }
     pub fn mux(
         &self,
@@ -335,9 +426,9 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success());
-        assert_eq!(CastSession::recover(&root).unwrap(), 1);
+        assert_eq!(CastSession::recover(&root).collected, 1);
         assert!(path.join("live.ts").exists());
-        assert_eq!(CastSession::recover(&root).unwrap(), 0);
+        assert_eq!(CastSession::recover(&root).collected, 0);
         drop(reader);
         assert!(!path.exists());
         // A crash between mkdir and lease creation is also recoverable.
@@ -350,16 +441,103 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
+    fn recovery_skips_failed_cast_orphans_and_preserves_live_leases() {
+        use super::super::recovery_test_support::{BlockedOrphan, cases, orphan};
+        for case in cases() {
+            let root = root();
+            let live = CastSession::new(&root, 1024).unwrap();
+            let reader = live.directory.clone();
+            let live_path = reader.path.join("live.ts");
+            fs::write(&live_path, b"live").unwrap();
+            drop(live);
+            let blocked = BlockedOrphan::new(&root, case);
+            let good = orphan(&root, 2);
+            let report = CastSession::recover(&root);
+            assert_eq!(report.collected, 1, "{case:?}: {report:?}");
+            assert_eq!(report.skipped, 1);
+            assert_eq!(report.retained_live, 1);
+            assert_eq!(report.reasons[blocked.reason], 1);
+            let diagnostic = serde_json::to_string(&report).unwrap();
+            assert!(!diagnostic.contains(&root.to_string_lossy().to_string()));
+            assert!(!diagnostic.contains("crashed.part"));
+            assert!(!good.exists());
+            assert!(blocked.path.exists());
+            assert!(live_path.exists());
+            let next_good = orphan(&root, 3);
+            let next = CastSession::new(&root, 1024).unwrap();
+            assert!(!next_good.exists());
+            assert!(live_path.exists());
+            assert!(blocked.path.exists());
+            drop(next);
+            drop(reader);
+            drop(blocked);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn recovery_does_not_follow_cast_junctions() {
+        fn junction(target: &Path, link: &Path) {
+            let status = std::process::Command::new("powershell.exe")
+                .args(["-NoProfile", "-NonInteractive", "-Command",
+                    "$ErrorActionPreference = 'Stop'; New-Item -ItemType Junction -Path $env:BILIKARA_CAST_LINK -Target $env:BILIKARA_CAST_TARGET | Out-Null"])
+                .env("BILIKARA_CAST_LINK", link)
+                .env("BILIKARA_CAST_TARGET", target)
+                .status().unwrap();
+            assert!(status.success());
+        }
+        use super::super::recovery_test_support::orphan;
+        let root = root();
+        let outside = root.with_extension("outside");
+        fs::create_dir(&outside).unwrap();
+        let sentinel = outside.join("keep");
+        fs::write(&sentinel, b"outside cast").unwrap();
+        junction(&outside, &root.join(".cast"));
+        assert_eq!(
+            CastSession::recover(&root).reasons["root:invalid_layout"],
+            1
+        );
+        assert!(CastSession::new(&root, 1024).is_err());
+        assert_eq!(fs::read(&sentinel).unwrap(), b"outside cast");
+        fs::remove_dir(root.join(".cast")).unwrap(); // unlink only the junction
+        let session = CastSession::new(&root, 1024).unwrap();
+        let linked_session = root.join(".cast").join(format!("{:032x}", 1));
+        junction(&outside, &linked_session);
+        let bad_lease = orphan(&root, 2);
+        junction(&outside, &bad_lease.join(".lease"));
+        let removable = orphan(&root, 3);
+        junction(&outside, &removable.join("nested"));
+        let report = CastSession::recover(&root);
+        assert_eq!(report.collected, 1);
+        assert_eq!(report.retained_live, 1);
+        assert_eq!(report.skipped, 2);
+        assert_eq!(report.reasons["entry:invalid_layout"], 1);
+        assert_eq!(report.reasons["lease:invalid_layout"], 1);
+        assert!(!removable.exists());
+        assert!(linked_session.exists());
+        assert!(bad_lease.exists());
+        assert_eq!(fs::read(&sentinel).unwrap(), b"outside cast");
+        drop(session);
+        fs::remove_dir_all(&root).unwrap();
+        assert_eq!(fs::read(&sentinel).unwrap(), b"outside cast");
+        fs::remove_dir_all(outside).unwrap();
+    }
+
+    #[test]
     fn recovery_rejects_non_directory_root_and_preserves_unrecognized_paths() {
         let root = root();
         fs::write(root.join(".cast"), b"not ours").unwrap();
-        assert!(CastSession::recover(&root).is_err());
+        assert_eq!(
+            CastSession::recover(&root).reasons["root:invalid_layout"],
+            1
+        );
         assert!(CastSession::new(&root, 1024).is_err());
         fs::remove_file(root.join(".cast")).unwrap();
         let session = CastSession::new(&root, 1024).unwrap();
         let other = root.join(".cast/not-a-session");
         fs::create_dir(&other).unwrap();
-        assert_eq!(CastSession::recover(&root).unwrap(), 0);
+        assert_eq!(CastSession::recover(&root).collected, 0);
         assert!(other.exists());
         drop(session);
         fs::remove_dir_all(root).unwrap();

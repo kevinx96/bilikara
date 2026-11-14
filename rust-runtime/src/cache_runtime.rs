@@ -2582,8 +2582,7 @@ fn media_url(relative_path: &str) -> String {
 }
 
 fn clear_directory(root: &Path) -> Result<(), CacheRuntimeError> {
-    crate::experimental_libav::cast_mux::CastSession::recover(root)
-        .map_err(|error| CacheRuntimeError::new("io", error.to_string()))?;
+    crate::experimental_libav::cast_mux::CastSession::recover(root);
     let entries =
         fs::read_dir(root).map_err(|error| CacheRuntimeError::new("io", error.to_string()))?;
     for entry in entries {
@@ -3135,6 +3134,34 @@ pathlib.Path(name).write_bytes(b'truncated' if n == 1 else (root/'valid.mp4').re
         // Clearing does not take ownership of the active CastSession's directory.
         assert_eq!(fs::read_dir(root.join(".cast")).unwrap().count(), 2);
         drop(live);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn clear_cache_skips_failed_cast_orphans() {
+        use crate::experimental_libav::cast_mux::recovery_test_support::{
+            BlockedOrphan, cases, orphan,
+        };
+        for case in cases() {
+            let root = publication_root("cast-obstruction");
+            let blocked = BlockedOrphan::new(&root, case);
+            let good = orphan(&root, 2);
+            fs::create_dir(root.join(".staging")).unwrap();
+            fs::write(root.join(".staging/partial"), b"partial").unwrap();
+            clear_directory(&root).unwrap();
+            assert!(!good.exists());
+            assert!(blocked.path.exists());
+            assert!(!root.join(".staging").exists());
+            drop(blocked);
+            fs::remove_dir_all(root).unwrap();
+        }
+        let root = publication_root("cast-invalid-root");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join(".cast"), b"not a directory").unwrap();
+        fs::write(root.join(".staging"), b"partial").unwrap();
+        clear_directory(&root).unwrap();
+        assert!(root.join(".cast").is_file());
+        assert!(!root.join(".staging").exists());
         fs::remove_dir_all(root).unwrap();
     }
 

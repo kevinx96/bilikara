@@ -122,7 +122,12 @@ rejects a linked root/lock and skips linked session directories. It removes only
 unlocked orphans, including a crash before .lease creation. Rust recursive removal
 does not follow child links. Host startup, clear-cache and new session creation
 invoke recovery; .cast is excluded from cache_metrics. Clear-cache retains live
-sessions/readers. The empty .lock remains after normal cleanup.
+sessions/readers. Recovery is best effort per entry: a busy/inaccessible orphan or
+invalid lease is retained while other orphans are reclaimed. `recover` returns
+`CastRecovery` (collected, retained_live, skipped and counts by fixed stage/reason),
+and logs path-free summary diagnostics when anything is skipped. Even an invalid
+cast root cannot fail Host startup or clear-cache; creating a new session still
+requires a safe root and its exclusive gate. The empty .lock remains after normal cleanup.
 The existing loader is packaged for Windows/macOS/Linux. Android without that
 optional loader returns Unavailable; the storage implementation uses portable
 rename rather than Android-forbidden hard links.
@@ -148,7 +153,10 @@ B-frame/intra-only video and seek, start-before-data/cancellation, VBR size and
 CBR clocks, unsigned MP4 CTS, empty/truncated/wrong-stream inputs, injected decoder
 IO propagation, cancellation after a nonempty .part, and Unicode input paths.
 Non-media Rust tests cover crash-process orphan recovery with a live reader lease,
-startup and clear-cache integration, and metrics exclusion. Native Main/HE-AAC
+startup and clear-cache integration, and metrics exclusion. Windows regressions
+use actual delete-sharing denial, an invalid lease directory and an access-denied
+ACL; they verify independent orphan cleanup, live reader protection, path-free
+diagnostics, new-session creation and real Host startup with a loopback listener. Native Main/HE-AAC
 conversion is not exercised: no fixture/encoder for those profiles is available.
 Windows native evidence does not qualify macOS/Linux builds, Android packaging
 or real receivers. T4 ring/HTTP acceptance remains separate.
