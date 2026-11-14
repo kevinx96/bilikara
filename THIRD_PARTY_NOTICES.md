@@ -19,6 +19,7 @@ This file is intended to document known third-party components and legal notices
   `third_party/Kirakara-App-LICENSE.txt`.
 - XML parsing uses `roxmltree` 0.20.0 (MIT OR Apache-2.0); URL parsing uses the
   existing `url` crate (MIT OR Apache-2.0). No Kirakara Show binary is required.
+- Native discovery uses the existing `socket2` 0.6.5 crate (MIT OR Apache-2.0).
 
 ## Experimental automatic volume
 

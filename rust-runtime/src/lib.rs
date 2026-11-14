@@ -9,6 +9,8 @@ pub mod catalog_maintenance;
 mod cloudflare_service;
 mod desktop_login;
 mod diagnostics;
+#[cfg(feature = "native-host")]
+pub mod dlna;
 pub mod experimental_libav;
 mod ffi;
 mod file_publication;

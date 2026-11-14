@@ -320,7 +320,9 @@ fn inspect_first_start(
 }
 
 fn private_options() -> OpenOptions {
-    let mut options = OpenOptions::new();
+    let options = OpenOptions::new();
+    #[cfg(unix)]
+    let mut options = options;
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -330,7 +332,9 @@ fn private_options() -> OpenOptions {
 }
 
 fn directory(path: &Path) -> Result<(), String> {
-    let mut builder = fs::DirBuilder::new();
+    let builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    let mut builder = builder;
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt;
