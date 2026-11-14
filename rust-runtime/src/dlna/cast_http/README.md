@@ -34,7 +34,8 @@ MP4 is a finalized file with the same HTTP range behavior as file TS.
 
 GET/HEAD `/cast/{32 hex token}/{generation}.ts` (or `.mp4` for a file) are the
 only resource routes. Origin-form and absolute-form targets are accepted;
-absolute-form extracts the raw path without normalizing dot segments/escapes.
+both forms extract the raw path without query parameters or normalization of
+dot segments/escapes. Query parameters cannot substitute a token or generation.
 CRLF and bare LF line endings are accepted. The entire header terminator must arrive within 5 seconds
 and 8192 bytes before any HTTP reply, including errors. Incomplete/oversized
 requests close without replying. Private, shared (RFC 6598), link-local and loopback sources are

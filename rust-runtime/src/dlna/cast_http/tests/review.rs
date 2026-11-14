@@ -92,6 +92,8 @@ fn lf_absolute_form_and_unparseable_ranges_preserve_capability_checks() {
         for target in [
             target(&media.uri).to_owned(),
             media.uri.clone(),
+            format!("{}?probe=1", target(&media.uri)),
+            format!("{}?probe=1", media.uri),
             format!("http://old-renderer:123{}", target(&media.uri)),
         ] {
             for ending in ["\n", "\r\n"] {
@@ -111,8 +113,15 @@ fn lf_absolute_form_and_unparseable_ranges_preserve_capability_checks() {
         }
         for path in [
             format!("/wrong/../{}", target(&media.uri).trim_start_matches('/')),
-            format!("{}?token=ignored", target(&media.uri)),
-            target(&media.uri).replace("/1.ts", "/2.ts"),
+            format!("{}#fragment", target(&media.uri)),
+            format!(
+                "{}?token=ignored",
+                target(&media.uri).replace("/1.ts", "/2.ts")
+            ),
+            format!(
+                "{}?token=ignored",
+                target(&media.uri).replace(&endpoint.token, &"0".repeat(32))
+            ),
         ] {
             let mut socket = connect(&endpoint, None, false).await;
             socket

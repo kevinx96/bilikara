@@ -96,7 +96,7 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Request, Reason> {
 
 fn request_target(raw: &str) -> String {
     if raw.starts_with('/') {
-        return raw.into();
+        return raw.split_once('?').map_or(raw, |(path, _)| path).into();
     }
     let Some((scheme, rest)) = raw.split_once("://") else {
         return raw.into();
@@ -114,9 +114,13 @@ fn request_target(raw: &str) -> String {
     {
         return raw.into();
     }
-    // Preserve the exact raw path, including escapes, query and dot segments.
+    if raw.contains('#') {
+        return raw.into();
+    }
+    // Preserve the exact raw path, including escapes and dot segments.
     // URL normalization must never turn a non-capability path into a valid one.
-    rest[slash..].into()
+    let path = &rest[slash..];
+    path.split_once('?').map_or(path, |(path, _)| path).into()
 }
 
 pub(super) fn same_target(actual: &str, expected: &str) -> bool {
