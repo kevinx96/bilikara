@@ -295,6 +295,10 @@ pub(super) fn conclusion(outputs: &[Output]) -> Conclusion {
                 && o.user_answers.audio == Answer::Yes
         })
     };
+    // Plan §7.6 row 3 says F×B OR L×B, which would swallow row 4. Interpret
+    // row 3 as F×B works (with/without L×B), and row 4 as only L×B works.
+    // This preserves the useful distinction: video recoding vs mandatory live
+    // delivery plus recoding. A successful A cell still wins rows 1/2 first.
     let selection = if works(Cell::FileA) {
         Some((Mode::File, Variant::A, 1))
     } else if works(Cell::LiveA) {

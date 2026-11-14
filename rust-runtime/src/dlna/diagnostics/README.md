@@ -17,6 +17,15 @@ Unknown facts remain JSON `null`; missing measurements are never success.
    `StagesDropped(n)` is cumulative per scan; repeated counts are not summed.
    Live `Stage` records still arrive after T2's returned stage buffer fills.
    `discovery_facts` supplies scan duration and before/after target presence.
+   T8 must establish target identity using its admitted device/UDN evidence,
+   then call `discovery_target_facts` alongside `discovery_facts` on the same
+   connection. Pass T9's target context and only the T2 contexts explicitly
+   matched before/after authorization. The report retains three session-HMAC
+   cross-references (`target_device_key`, `matched_before_device_key`,
+   `matched_after_device_key`); unmatched/unknown contexts stay null. This API
+   records caller evidence, never infers a match from unrelated salted keys or
+   merges device projections. T8 acceptance must check before/after presence
+   booleans and these cross-references agree, including absent/unknown matches.
 3. Forward T9 `PureKOperation.stages` via `record_purek_operation`, or each
    `PhaseResult` via `purek`. Parse, resolution, route, pre-auth description,
    registration, confirmation, announcement, health and revoke remain distinct.
@@ -36,7 +45,13 @@ Unknown facts remain JSON `null`; missing measurements are never success.
    The approximate pre-bind origin is for session ordering, not a first-byte
    latency benchmark. `HttpStageResult.elapsed` is endpoint uptime, not request
    duration; it is exported as `facts.endpoint_elapsed_ms`, with duration `null`.
-   The receiver drains ready events on cancellation and counts broadcast lag.
+   On cancellation the receiver continues collecting for up to 500ms, ending
+   earlier on sender close, so late terminal BytesWritten/Disconnect survive.
+   T5/T8 must concurrently shut down the endpoint, await the receiver, and only
+   then complete the cell/finish the report. The deadline is shared, so traffic
+   cannot extend the grace indefinitely; shutdown exceeding 500ms may still
+   lose late events. Closing the sender after endpoint shutdown is preferred.
+   The receiver counts broadcast lag throughout shutdown.
    Do not replay an endpoint snapshot already ingested through the subscription.
 7. Use `first_ts_packet`, `failure`, `sample`, `environment`, `self_test_step`,
    `observations` and `complete_output` for facts owned by the media/T8 worker.
@@ -70,6 +85,12 @@ counts and final classification continue updating even when stage retention
 fills. Source-buffer omissions and broadcast lag are distinct fields
 `source_dropped_stages` and `delivery_lagged_stages`; they do not claim that live
 events were lost when T2 merely omitted them from its return value.
+`dropped_device_observations` counts omitted observations;
+`dropped_devices` counts distinct omitted device HMACs, deduplicated with a
+4096-key bound. If that tracking set overflows, the exact count is unknown and
+`dropped_devices` becomes null; `dropped_devices_lower_bound` remains 4097.
+Repeated observations never inflate the distinct count. Stored device
+projections still have their separate 128-device limit.
 
 ## Privacy
 
@@ -82,7 +103,8 @@ Repeated snapshots of one session correlate; fresh sessions do not correlate.
 The HMAC primitive has an RFC 4231 test vector. No new crypto dependency is used.
 
 Before entering retained diagnostic state, manufacturer/model/modelDescription
-and SERVER discard Unicode control characters and truncate to 256 Unicode
+and SERVER discard Unicode Cc controls and Cf format characters (including
+RLO/LRO, ZWJ/ZWSP and BOM) and truncate to 256 Unicode
 characters; friendlyName uses the report's stricter 64-character limit. These
 arbitrary fields can themselves be tokens, room names or usernames. Therefore
 each exports `{digest, characters, truncated, controls_removed}` rather than
@@ -124,6 +146,31 @@ never proves a visible picture. Unanswered/uncertain picture questions cannot
 produce “received but did not decode.” Results and mode are report suggestions,
 not persistent device preferences. No physical receiver is qualified by the
 loopback tests. No T8 runner, UI or AppState state is implemented here.
+
+S4 treats `video/mp2t` (any casing), `video/vnd.dlna.mpeg-tts`,
+`video/x-mpegts`, `video/mpeg_ts`, `video/mpegts` and `video/mpeg-ts` as TS.
+T1 also accepts `video/mpeg` for TS trial playback, but the same MIME denotes
+program streams. Here `video/mpeg`/`video/x-mpeg` are TS only with an explicit
+`DLNA.ORG_PN` beginning `MPEG_TS_`, `AVC_TS_`, `HEVC_TS_` or `VC1_TS_`;
+otherwise they stay MPEG. These categories are diagnostic hints, not playback
+admission rules. No profile/extension text is exported.
+
+S6 action records include compact `result`: `ok`, `fault:<number>` (or
+`fault:unknown`), `http:<class>xx`, `timeout`, `unreachable`, `cancelled`, or
+`failed`. SOAP Fault takes precedence over HTTP status, including a Fault
+without errorCode; either kind can match decision row 9. Missing actions have
+no record (not attempted), and human questions retain their explicit
+`unanswered`/`uncertain` values. Text summaries use the same action result.
+
+### Interpretation of decision rows 3 and 4 (awaiting confirmation)
+
+The plan says row 3 covers “F×B or L×B” and stops at the first matching row,
+which makes its row 4 (“only L×B”) unreachable. We interpret row 3 as **F×B
+works**, whether or not L×B also works, and row 4 as **only L×B works**; any
+working A cell still wins rows 1/2. This preserves the useful distinction
+between video recoding alone and recoding plus mandatory live delivery. The
+code already used this interpretation; this review documents it without
+changing the plan itself. User/orchestrator confirmation remains pending.
 
 ## Verification
 

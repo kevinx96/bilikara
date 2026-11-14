@@ -42,7 +42,7 @@ impl Privacy {
         // newlines/NUL; never keep a raw device name that might be a room/user.
         let bounded: String = value
             .chars()
-            .filter(|c| !c.is_control())
+            .filter(|c| !diagnostic_control(*c))
             .take(limit.min(256))
             .collect();
         Metadata {
@@ -50,13 +50,22 @@ impl Privacy {
             characters: bounded.chars().count(),
             truncated: value
                 .chars()
-                .filter(|c| !c.is_control())
+                .filter(|c| !diagnostic_control(*c))
                 .take(limit + 1)
                 .count()
                 > limit,
-            controls_removed: value.chars().any(char::is_control),
+            controls_removed: value.chars().any(diagnostic_control),
         }
     }
+}
+
+/// Only the diagnostic projection is normalized. Device/UI text stays intact.
+fn diagnostic_control(c: char) -> bool {
+    static FORMAT: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    c.is_control()
+        || FORMAT
+            .get_or_init(|| regex::Regex::new(r"\p{Cf}").expect("fixed Unicode category"))
+            .is_match(c.encode_utf8(&mut [0; 4]))
 }
 
 /// Even apparently innocuous friendlyName/model/SERVER can contain an arbitrary

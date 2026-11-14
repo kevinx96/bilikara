@@ -33,6 +33,8 @@ const DEVICES: usize = 128;
 const CONNECTIONS: usize = 6;
 const OUTPUTS: usize = 2;
 const CELLS: usize = 5;
+const DROPPED_DEVICE_KEYS: usize = 4096;
+const CANCEL_DRAIN_GRACE: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DiagnosticError {
@@ -84,6 +86,7 @@ pub(super) struct Event {
     http_status_class: Option<u16>,
     upnp_code: Option<u32>,
     pub outcome: &'static str,
+    result: String,
     pub code: Option<&'static str>,
     transport_error: Option<&'static str>,
     pub disposition: &'static str,
@@ -97,6 +100,9 @@ struct Connection {
     discovery_duration_ms: Option<u64>,
     target_before_auth: Option<bool>,
     target_after_auth: Option<bool>,
+    target_device_key: Option<String>,
+    matched_before_device_key: Option<String>,
+    matched_after_device_key: Option<String>,
 }
 
 struct State {
@@ -111,7 +117,9 @@ struct State {
     steps: Vec<SelfTestStep>,
     samples: [Option<MediaPreflight>; 2],
     dropped_stages: usize,
-    dropped_devices: usize,
+    dropped_device_keys: BTreeSet<String>,
+    dropped_device_keys_overflow: bool,
+    dropped_device_observations: usize,
     dropped_connections: usize,
     dropped_outputs: usize,
     source_dropped_stages: usize,
@@ -203,7 +211,9 @@ impl SessionTrace {
                 steps: vec![],
                 samples: [None, None],
                 dropped_stages: 0,
-                dropped_devices: 0,
+                dropped_device_keys: BTreeSet::new(),
+                dropped_device_keys_overflow: false,
+                dropped_device_observations: 0,
                 dropped_connections: 0,
                 dropped_outputs: 0,
                 source_dropped_stages: 0,
@@ -235,13 +245,21 @@ impl SessionTrace {
             discovery_duration_ms: None,
             target_before_auth: None,
             target_after_auth: None,
+            target_device_key: None,
+            matched_before_device_key: None,
+            matched_after_device_key: None,
         });
         id
     }
     fn device(&self, s: &mut State, context: &DeviceContext) -> String {
         let key = self.privacy.id("device", &context.device_key);
         if !s.devices.contains_key(&key) && s.devices.len() >= DEVICES {
-            s.dropped_devices = s.dropped_devices.saturating_add(1);
+            s.dropped_device_observations = s.dropped_device_observations.saturating_add(1);
+            if s.dropped_device_keys.len() < DROPPED_DEVICE_KEYS {
+                s.dropped_device_keys.insert(key.clone());
+            } else if !s.dropped_device_keys.contains(&key) {
+                s.dropped_device_keys_overflow = true;
+            }
             return key;
         }
         let previous = s.devices.remove(&key);
@@ -365,6 +383,7 @@ impl SessionTrace {
             http_status_class: status.map(|v| v / 100),
             upnp_code: error.and_then(|e| e.upnp_code),
             outcome: if error.is_some() { "failed" } else { "ok" },
+            result: compact_result(error, status),
             code: error.and_then(|e| stage_code(stage.stage, e)),
             transport_error: error.map(|e| e.code.as_str()),
             disposition: match stage.disposition {
@@ -463,6 +482,25 @@ impl SessionTrace {
             c.target_after_auth = after;
         }
     }
+    /// T8 supplies verified identity matches; this records cross-references,
+    /// never compares raw UDN/URLs or merges independently salted T2/T9 keys.
+    /// Call alongside discovery_facts for the same connection attempt.
+    pub fn discovery_target_facts(
+        &self,
+        connection: u64,
+        target: &DeviceContext,
+        matched_before: Option<&DeviceContext>,
+        matched_after: Option<&DeviceContext>,
+    ) {
+        let mut s = self.lock();
+        if let Some(c) = s.connections.iter_mut().find(|c| c.id == connection) {
+            c.target_device_key = Some(self.privacy.id("device", &target.device_key));
+            c.matched_before_device_key =
+                matched_before.map(|d| self.privacy.id("device", &d.device_key));
+            c.matched_after_device_key =
+                matched_after.map(|d| self.privacy.id("device", &d.device_key));
+        }
+    }
     pub fn purek(&self, connection: u64, phase: &purek::PhaseResult) {
         let mut s = self.lock();
         let mut e = self.stage_event(&mut s, Some(connection), None, self.elapsed(), &phase.stage);
@@ -511,6 +549,16 @@ impl SessionTrace {
             http_status_class: h.http_status.map(|v| v / 100),
             upnp_code: None,
             outcome: if h.result.is_ok() { "ok" } else { "failed" },
+            result: match h.result {
+                Ok(()) => "ok".into(),
+                Err(Reason::Cancelled | Reason::GenerationEnded | Reason::Replaced) => {
+                    "cancelled".into()
+                }
+                Err(_) => h
+                    .http_status
+                    .filter(|s| !(200..300).contains(s))
+                    .map_or_else(|| "failed".into(), |s| format!("http:{}xx", s / 100)),
+            },
             code: h.result.err().map(http_code),
             transport_error: h.result.err().map(|e| e.as_str()),
             disposition: "applied",
@@ -526,7 +574,9 @@ impl SessionTrace {
     }
     /// Await in the admitted worker; this function never spawns a detached task.
     /// Capture endpoint_origin before bind, then subscribe before publication.
-    /// On cancellation drain available events. Lag is explicit; T5 may separately
+    /// On cancellation allow up to 500ms for endpoint terminal events, stopping
+    /// earlier when the sender closes. T5 must shut down its endpoint concurrently.
+    /// Lag is explicit; T5 may separately
     /// recover first_get_written from T4's snapshot without replaying duplicates.
     pub async fn receive_http(
         &self,
@@ -546,11 +596,12 @@ impl SessionTrace {
                 }
             }
         }
-        loop {
-            match receiver.try_recv() {
-                Ok(h) => self.http_at(output, endpoint_origin.saturating_add(h.elapsed), &h),
-                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(n)) => self.lagged(n),
-                Err(_) => break,
+        let deadline = tokio::time::Instant::now() + CANCEL_DRAIN_GRACE;
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout_at(deadline, receiver.recv()).await {
+                Ok(Ok(h)) => self.http_at(output, endpoint_origin.saturating_add(h.elapsed), &h),
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(n))) => self.lagged(n),
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) | Err(_) => break,
             }
         }
     }
@@ -586,20 +637,7 @@ impl SessionTrace {
             o.sink_mime_classes.clear();
             for sink in sinks.iter().take(512) {
                 // MIME categories only. Never retain protocolInfo extension text.
-                let mime = match sink
-                    .split(':')
-                    .nth(2)
-                    .unwrap_or("")
-                    .to_ascii_lowercase()
-                    .as_str()
-                {
-                    "video/mp2t" | "video/mpeg_ts" => Mime::Ts,
-                    "video/mpeg" => Mime::Mpeg,
-                    "video/mp4" => Mime::Mp4,
-                    "*" => Mime::Wildcard,
-                    v if v.starts_with("audio/") => Mime::Audio,
-                    _ => Mime::Other,
-                };
+                let mime = sink_mime(sink);
                 if !o.sink_mime_classes.contains(&mime) {
                     o.sink_mime_classes.push(mime);
                 }
@@ -704,7 +742,7 @@ impl SessionTrace {
                 } else if s.cells.iter().any(|o| {
                     o.actions.iter().any(|a| {
                         matches!(a.stage, "Stop" | "SetAVTransportURI" | "Play")
-                            && a.upnp_code.is_some()
+                            && (a.upnp_code.is_some() || a.transport_error == Some("soap_fault"))
                     })
                 }) {
                     Some(9)
@@ -733,7 +771,10 @@ impl SessionTrace {
         let cast = json!({"schema_version":1,"connections":s.connections,"devices":devices,"stages":events,
             "output":s.outputs.back().map(|o| o.snapshot(now)),"previous_output":s.outputs.iter().rev().nth(1).map(|o| o.snapshot(now)),
             "dropped_stages":s.dropped_stages,"source_dropped_stages":s.source_dropped_stages,"delivery_lagged_stages":s.delivery_lagged_stages,
-            "dropped_devices":s.dropped_devices,"dropped_connections":s.dropped_connections,"dropped_outputs":s.dropped_outputs});
+            "dropped_devices":(!s.dropped_device_keys_overflow).then_some(s.dropped_device_keys.len()),
+            "dropped_devices_lower_bound":s.dropped_device_keys.len() + usize::from(s.dropped_device_keys_overflow),
+            "dropped_device_observations":s.dropped_device_observations,
+            "dropped_connections":s.dropped_connections,"dropped_outputs":s.dropped_outputs});
         let self_test = json!({"schema_version":1,"metadata":metadata,"environment":s.environment,"steps":s.steps,
             "discovery":{"count":s.discovered.len(),"connections":s.connections,"devices":devices},
             "purek":events.iter().filter(|e| e.stage.starts_with("purek_")).collect::<Vec<_>>(),
@@ -774,7 +815,7 @@ impl SessionTrace {
                 "{} ms {}: {} {} (HTTP {:?}, UPnP {:?}, duration {:?} ms)\n",
                 e.at_ms,
                 e.stage,
-                e.outcome,
+                e.result,
                 e.code.unwrap_or("none"),
                 e.http_status,
                 e.upnp_code,
@@ -797,6 +838,63 @@ fn context_facts(s: &State, key: Option<&str>) -> Value {
         Value::Null,
         |d| json!({"source":d.source,"route":d.route,"udn_hash":d.udn_hash}),
     )
+}
+
+fn sink_mime(sink: &str) -> Mime {
+    let mut parts = sink.splitn(4, ':');
+    let _protocol = parts.next();
+    let _network = parts.next();
+    let mime = parts.next().unwrap_or("").trim().to_ascii_lowercase();
+    let extension = parts.next().unwrap_or("");
+    // T1 deliberately accepts video/mpeg for TS playback. It alone is also
+    // used for program streams, so require an explicitly TS DLNA profile here.
+    // Keep only a category; never export the untrusted profile/extension text.
+    let ts_profile = extension.split(';').any(|part| {
+        part.split_once('=').is_some_and(|(key, value)| {
+            key.trim().eq_ignore_ascii_case("DLNA.ORG_PN") && {
+                let value = value.trim().to_ascii_uppercase();
+                ["MPEG_TS_", "AVC_TS_", "HEVC_TS_", "VC1_TS_"]
+                    .iter()
+                    .any(|prefix| value.starts_with(prefix))
+            }
+        })
+    });
+    match mime.as_str() {
+        "video/mp2t"
+        | "video/mpeg_ts"
+        | "video/vnd.dlna.mpeg-tts"
+        | "video/x-mpegts"
+        | "video/mpegts"
+        | "video/mpeg-ts" => Mime::Ts,
+        "video/mpeg" | "video/x-mpeg" if ts_profile => Mime::Ts,
+        "video/mpeg" | "video/x-mpeg" => Mime::Mpeg,
+        "video/mp4" => Mime::Mp4,
+        "*" => Mime::Wildcard,
+        v if v.starts_with("audio/") => Mime::Audio,
+        _ => Mime::Other,
+    }
+}
+
+fn compact_result(error: Option<&super::DlnaError>, status: Option<u16>) -> String {
+    let Some(error) = error else {
+        return "ok".into();
+    };
+    if matches!(
+        error.code,
+        ErrorCode::Policy(super::dlna_policy::PolicyError::SoapFault(_))
+    ) {
+        return error
+            .upnp_code
+            .map_or_else(|| "fault:unknown".into(), |code| format!("fault:{code}"));
+    }
+    match error.code {
+        ErrorCode::Timeout => "timeout".into(),
+        ErrorCode::Connect | ErrorCode::Io => "unreachable".into(),
+        ErrorCode::Cancelled => "cancelled".into(),
+        _ => status
+            .filter(|s| !(200..300).contains(s))
+            .map_or_else(|| "failed".into(), |s| format!("http:{}xx", s / 100)),
+    }
 }
 
 fn purek_class(c: purek::AddressClass) -> &'static str {
