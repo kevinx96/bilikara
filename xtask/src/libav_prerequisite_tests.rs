@@ -420,9 +420,14 @@ fn windows_msvc_companion_paths_compile_generated_header() {
     // This is a compiler/path probe without FFmpeg prerequisites. The later
     // bundle recipe still builds and executes the actual libav C companion.
     compiler.retain(|arg| {
-        !["avformat.lib", "avcodec.lib", "avutil.lib"]
-            .iter()
-            .any(|library| arg == library)
+        ![
+            "avformat.lib",
+            "avcodec.lib",
+            "avutil.lib",
+            "swresample.lib",
+        ]
+        .iter()
+        .any(|library| arg == library)
     });
     prepare::run_companion_commands(&out, &[compiler, commands[2].clone()]).unwrap();
     assert!(out.join("test_shim.exe").is_file());

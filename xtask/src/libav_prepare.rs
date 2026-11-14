@@ -450,6 +450,7 @@ pub fn companion_commands(
             "avformat.lib".into(),
             "avcodec.lib".into(),
             "avutil.lib".into(),
+            "swresample.lib".into(),
             "kernel32.lib".into(),
             link_output(&output),
         ]
@@ -490,6 +491,7 @@ pub fn companion_commands(
             "-lavformat".into(),
             "-lavcodec".into(),
             "-lavutil".into(),
+            "-lswresample".into(),
             "-o".into(),
             output.clone().into(),
         ]);

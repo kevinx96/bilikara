@@ -84,6 +84,11 @@ export async function prepareRealInputs() {
     const environment = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
       !/^(?:BILIKARA_|TAURI_ENV_|GITHUB_|CARGO_BUILD_TARGET$|LD_LIBRARY_PATH$|LD_PRELOAD$|DYLD_LIBRARY_PATH$|DYLD_INSERT_LIBRARIES$)/i.test(key)));
     environment.LC_ALL = 'C';
+    if (process.platform === 'win32') {
+      // Isolated --out shim executables need this explicitly selected prefix.
+      const pathKey = Object.keys(environment).find(key => key.toLowerCase() === 'path') || 'PATH';
+      environment[pathKey] = path.join(inputs.prefix, 'bin') + path.delimiter + (environment[pathKey] || '');
+    }
     const probe = path.join(directory, `independent-libav-probe${suffix}`);
     const source = path.join(root, 'tests/fixtures/libav_prerequisite_probe.c');
     const command = process.platform === 'win32' ? 'cl.exe' : environment.CC || 'cc';
@@ -105,7 +110,7 @@ export async function prepareRealInputs() {
     });
     const loaded = await runNative(probe, [...libraries, inputs.companion], environment);
     assert.equal(loaded.status, 0, loaded.stdout + loaded.stderr);
-    const lines = loaded.stdout.split('\n');
+    const lines = loaded.stdout.replace(/\r\n/g, '\n').split('\n');
     assert.deepEqual(lines.slice(0, 4), ['3998053', '4129125', '4129125', '9.0.1'], 'actual independently loaded library facts');
     const configuration = lines.slice(4).join('\n');
     assert.ok(Buffer.byteLength(configuration) <= 2048);

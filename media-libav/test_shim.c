@@ -190,7 +190,96 @@ static void windows_long_path_tests(void) {
 }
 #endif
 
+/* Test-only independent demux inspection of finalized cast output. */
+typedef struct {
+    uint32_t status, streams, first_video_key, audio_rate, audio_channels;
+    int64_t duration_us;
+    uint64_t packets[2];
+} CastCheck;
+BM_EXPORT uint32_t bm_test_cast_check_v1(const BmRequest *q,uint32_t size,CastCheck *r) {
+    if(!q || !r || size!=sizeof(*r)) return BM_INVALID_REQUEST;
+    memset(r,0,sizeof(*r));
+    LiveInput in={0};
+    /* Auto-probe only for this test reader; production input stays restricted. */
+    in.call.request=q;
+    in.format=avformat_alloc_context();
+    if(!in.format) return BM_BACKEND_FAILURE;
+    in.format->opaque=&in.call;in.format->io_open=deny_open;
+    in.format->interrupt_callback=(AVIOInterruptCB){interrupted,&in.call};
+    in.format->flags|=AVFMT_FLAG_CUSTOM_IO;
+    AVDictionary *options=NULL;
+    av_dict_set_int(&options,"fd",q->fd,0);
+    int ret=avio_open2(&in.io,"fd:",AVIO_FLAG_READ,&in.format->interrupt_callback,&options);
+    av_dict_free(&options);
+    if(ret<0) goto failed;
+    in.format->pb=in.io;
+    ret=avformat_open_input(&in.format,"",NULL,NULL);
+    if(ret<0) goto failed;
+    ret=avformat_find_stream_info(in.format,NULL);
+    if(ret<0) goto failed;
+    r->streams=in.format->nb_streams;
+    if(r->streams!=2 || in.format->streams[0]->codecpar->codec_id!=AV_CODEC_ID_H264 ||
+        in.format->streams[1]->codecpar->codec_id!=AV_CODEC_ID_AAC) {r->status=BM_CONTRACT;goto done;}
+    r->duration_us=in.format->duration;
+    r->audio_rate=in.format->streams[1]->codecpar->sample_rate;
+    r->audio_channels=in.format->streams[1]->codecpar->ch_layout.nb_channels;
+    in.packet=av_packet_alloc();
+    if(!in.packet) {r->status=BM_BACKEND_FAILURE;goto done;}
+    for(;;) {
+        ret=av_read_frame(in.format,in.packet);
+        if(ret==AVERROR_EOF) break;
+        if(ret<0) goto failed;
+        int n=in.packet->stream_index;
+        if(n<0 || n>1 || (in.packet->flags&AV_PKT_FLAG_CORRUPT)) {r->status=BM_INVALID_MEDIA;goto done;}
+        if(n==0 && !r->packets[0]) r->first_video_key=!!(in.packet->flags&AV_PKT_FLAG_KEY);
+        r->packets[n]++;av_packet_unref(in.packet);
+    }
+    goto done;
+failed:
+    r->status=error_status(ret);
+done:
+    live_close(&in);return BM_OK;
+}
+
+/* Test-only repeated H.264 fixture: original encoded samples, three GOPs.
+ * Caller provides a test-owned output path; never used by the product. */
+BM_EXPORT uint32_t bm_test_cast_fixture_v1(const BmRequest *q,const char *path) {
+    LiveInput in={0};AVFormatContext *out=NULL;uint32_t status=BM_OK;int ret;
+    status=live_open(&in,q,AVMEDIA_TYPE_VIDEO,AV_CODEC_ID_H264,"mov");
+    if(status) goto done;
+    ret=avformat_alloc_output_context2(&out,NULL,"mp4",path);
+    if(ret<0 || !out) {status=BM_BACKEND_FAILURE;goto done;}
+    AVStream *stream=avformat_new_stream(out,NULL);
+    if(!stream) {status=BM_BACKEND_FAILURE;goto done;}
+    avcodec_parameters_copy(stream->codecpar,in.config);stream->time_base=in.format->streams[0]->time_base;
+    ret=avio_open(&out->pb,path,AVIO_FLAG_WRITE);if(ret<0) goto failed;
+    ret=avformat_write_header(out,NULL);if(ret<0) goto failed;
+    for(int repeat=0;repeat<3;repeat++) {
+        ret=av_seek_frame(in.format,0,0,AVSEEK_FLAG_BACKWARD);if(ret<0) goto failed;
+        int64_t origin=AV_NOPTS_VALUE;
+        for(;;) {
+            ret=av_read_frame(in.format,in.packet);if(ret==AVERROR_EOF) break;if(ret<0) goto failed;
+            AVPacket *p=in.packet;
+            if(origin==AV_NOPTS_VALUE) origin=p->pts;
+            p->pts-=origin;p->dts-=origin;
+            av_packet_rescale_ts(p,in.format->streams[0]->time_base,stream->time_base);
+            int64_t offset=av_rescale_q((int64_t)repeat*1001000,AV_TIME_BASE_Q,stream->time_base);
+            p->pts+=offset;p->dts+=offset;p->pos=-1;
+            ret=av_write_frame(out,p);av_packet_unref(p);if(ret<0) goto failed;
+        }
+    }
+    ret=av_write_trailer(out);if(ret<0) goto failed;goto done;
+failed: status=error_status(ret);
+done:
+    if(out) {if(out->pb) avio_closep(&out->pb);avformat_free_context(out);}
+    live_close(&in);return status;
+}
+
 int main(void) {
+    BmCastInfo cast_info;
+    assert(bm_cast_info_v1(sizeof(cast_info),&cast_info)==BM_OK);
+    assert(bm_cast_info_v1(sizeof(cast_info)-1,&cast_info)==BM_UNAVAILABLE);
+    assert(cast_info.schema==1 && cast_info.request_size==sizeof(BmCastRequest) && cast_info.result_size==sizeof(BmCastResult));
     assert(flac_time_matches(95856, (AVRational){1, 96000}, 96000, 96000));
     assert(flac_time_matches(95712, (AVRational){1, 96000}, 96000, 96000));
     /* Both sides of the inclusive 200 ms boundary, in microseconds. */
