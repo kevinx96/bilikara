@@ -81,14 +81,30 @@ impl Session {
         for attempt in 1..=health::FAILURE_LIMIT {
             let since = Instant::now();
             let local = self.client.route(self.target, &mut self.context, cancel);
-            stages.push(route_stage(
+            let mut stage = route_stage(
                 since,
                 &local,
                 self.target,
                 &self.context,
                 self.client.policy,
-            ));
-            self.local = local?;
+            );
+            stage.stage.attempt = attempt;
+            self.local = match local {
+                Ok(local) => {
+                    stages.push(stage);
+                    local
+                }
+                Err(error) => {
+                    if attempt < health::FAILURE_LIMIT && !error.cause.is_cancelled() {
+                        stage.stage.disposition = Disposition::Retrying;
+                        stages.push(stage);
+                        self.wait_confirmation_retry(cancel).await?;
+                        continue;
+                    }
+                    stages.push(stage);
+                    return Err(error);
+                }
+            };
             let (confirmed, mut stage) = self.read_description(Phase::Confirm, cancel).await;
             stage.stage.attempt = attempt;
             match confirmed {
@@ -157,11 +173,7 @@ impl Session {
                     if attempt < health::FAILURE_LIMIT && !error.cause.is_cancelled() {
                         stage.stage.disposition = Disposition::Retrying;
                         stages.push(stage);
-                        tokio::select! {
-                            biased;
-                            _ = cancel.cancelled() => return Err(cancel_error()),
-                            _ = tokio::time::sleep(self.client.retry_interval) => {}
-                        }
+                        self.wait_confirmation_retry(cancel).await?;
                     } else {
                         stages.push(stage);
                         return Err(error);
@@ -173,6 +185,14 @@ impl Session {
             PureKErrorCode::RouteChanged,
             DlnaError::new(ErrorCode::RouteUnavailable),
         ))
+    }
+
+    async fn wait_confirmation_retry(&self, cancel: &CancellationToken) -> Result<(), PureKError> {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => Err(cancel_error()),
+            _ = tokio::time::sleep(self.client.retry_interval) => Ok(()),
+        }
     }
 
     pub(super) async fn authorization(

@@ -3,6 +3,87 @@
 use super::*;
 
 #[test]
+fn confirmation_retries_route_loss_before_recovery_or_five_failure_cleanup() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static ROUTES: AtomicUsize = AtomicUsize::new(0);
+    static FAILURES: AtomicUsize = AtomicUsize::new(0);
+    for failure_count in [1, 5] {
+        ROUTES.store(0, Ordering::SeqCst);
+        FAILURES.store(failure_count, Ordering::SeqCst);
+        let mut client = client();
+        // A different /24 prevents a same-subnet fallback from hiding the
+        // simulated missing route. Both addresses are local loopback fixtures.
+        client.interfaces = Some(vec![Ipv4Addr::new(127, 1, 0, 1)]);
+        client.route_lookup = |_| {
+            let call = ROUTES.fetch_add(1, Ordering::SeqCst);
+            if call > 0 && call <= FAILURES.load(Ordering::SeqCst) {
+                Err(DlnaError::new(ErrorCode::RouteUnavailable))
+            } else {
+                Ok(Ipv4Addr::new(127, 1, 0, 1))
+            }
+        };
+        let mut replies = vec![device("uuid:fixture", false), authorized()];
+        if failure_count == 1 {
+            replies.push(device("uuid:fixture", true));
+        }
+        replies.push(authorized());
+        let fixture = Fixture::start(replies);
+        let operation = connect(&client, &fixture);
+        let failed_routes: Vec<_> = operation
+            .stages
+            .iter()
+            .filter(|stage| stage.phase == Phase::Route && stage.stage.result.is_err())
+            .collect();
+        assert_eq!(failed_routes.len(), failure_count);
+        for (index, stage) in failed_routes.iter().enumerate() {
+            assert_eq!(stage.stage.attempt as usize, index + 1);
+            assert_eq!(
+                stage.stage.disposition,
+                if index < 4 {
+                    Disposition::Retrying
+                } else {
+                    Disposition::Applied
+                }
+            );
+        }
+        if failure_count == 1 {
+            assert!(
+                !operation
+                    .stages
+                    .iter()
+                    .any(|stage| stage.phase == Phase::Revoke)
+            );
+            let confirmed = operation
+                .stages
+                .iter()
+                .find(|stage| stage.phase == Phase::Confirm)
+                .unwrap();
+            assert_eq!(confirmed.stage.attempt, 2);
+            let mut session = operation.result.unwrap();
+            assert!(session.is_registered());
+            run(session.release()).result.unwrap();
+        } else {
+            assert_eq!(operation.result.unwrap_err().code, PureKErrorCode::Route);
+            assert!(
+                operation
+                    .stages
+                    .iter()
+                    .any(|stage| stage.phase == Phase::Revoke)
+            );
+        }
+        let requests = fixture.join();
+        assert_eq!(requests.len(), if failure_count == 1 { 4 } else { 3 });
+        let last = requests.last().unwrap();
+        assert!(last.body.contains("<Enable>0</Enable>"));
+        assert!(last.body.contains("<DeviceIP>127.1.0.1</DeviceIP>"));
+        assert_eq!(
+            requests[0].peer.ip(),
+            IpAddr::V4(Ipv4Addr::new(127, 1, 0, 1))
+        );
+    }
+}
+
+#[test]
 fn qr_receiver_query_never_reaches_description_soap_or_notify() {
     let receiver = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     receiver
