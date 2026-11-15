@@ -37,7 +37,7 @@ const RULES: &[Rule] = &[
         ["DolphinStar", "海豚星空"]
     ),
     rule!("lebo", "LeBo", Brand, ["Hpplay", "LeBo", "Lelink", "乐播"]),
-    rule!("purek", "PureK", Brand, ["PureK", "Pure K", "纯K"]),
+    rule!("purek", "PureK", Brand, ["PureK", "Pure K", "纯K", "ChunK"]),
     rule!("xiaomi", "Xiaomi", Brand, ["Xiaomi", "MiTV", "小米"]),
     rule!("huawei", "Huawei", Brand, ["Huawei", "华为"]),
     rule!("honor", "Honor", Brand, ["Honor", "荣耀"]),
@@ -103,8 +103,6 @@ const RULES: &[Rule] = &[
 enum Field {
     Manufacturer,
     ModelName,
-    ModelDescription,
-    FriendlyName,
     Server,
 }
 
@@ -174,15 +172,7 @@ fn matches(text: &str, alias: &str) -> Option<usize> {
 impl Identification {
     fn field(&mut self, field: Field, text: &str) {
         self.brand_matches.retain(|h| h.field != field);
-        let text = bounded_metadata(
-            text,
-            if field == Field::FriendlyName {
-                64
-            } else {
-                256
-            },
-        )
-        .to_lowercase();
+        let text = bounded_metadata(text, 256).to_lowercase();
         if field == Field::Server {
             self.server_products.clear();
             self.rules.server_stack.clear();
@@ -236,11 +226,11 @@ impl Identification {
         self.field(Field::Server, text);
     }
     pub fn description(&mut self, d: &super::super::dlna_policy::RendererDescription) {
+        // Room/store names and free-form descriptions are not product evidence.
+        // They retain only HMAC metadata at the diagnostic boundary.
         for (field, text) in [
             (Field::Manufacturer, &d.manufacturer),
             (Field::ModelName, &d.model_name),
-            (Field::ModelDescription, &d.model_description),
-            (Field::FriendlyName, &d.name),
         ] {
             self.field(field, text);
         }
@@ -285,7 +275,8 @@ fn server_major(tail: &str) -> Option<u16> {
 
 fn sensitive_atom(atom: &str) -> bool {
     static PRIVATE: OnceLock<Regex> = OnceLock::new();
-    let pattern=PRIVATE.get_or_init(||Regex::new(r"(?i)([0-9]{6,}|[0-9a-f]{8,}|(?:[0-9]{1,3}\.){3}[0-9]{1,3}|token|secret|password|room|place|bill|uuid|user|serial|\.mp4|\.exe)").expect("fixed private forms"));
+    // Deliberately unanchored: product prefixes can adjoin an address (IP192-...).
+    let pattern=PRIVATE.get_or_init(||Regex::new(r"(?i)([0-9]{6,}|[0-9a-f]{8,}|(?:[0-9]{1,3}[-._]){3}[0-9]{1,3}|token|secret|password|room|place|bill|uuid|user|serial|\.mp4|\.exe)").expect("fixed private forms"));
     if atom.len() > 24 || pattern.is_match(atom) {
         return true;
     }
@@ -320,9 +311,10 @@ fn sanitize_model(text: &str) -> String {
         return "*".into();
     }
     let mut redact_next = false;
+    let mut seen_brands = Vec::new();
     let words: Vec<String> = text
         .split_whitespace()
-        .map(|atom| {
+        .filter_map(|atom| {
             let label = matches!(
                 atom.to_ascii_lowercase().as_str(),
                 "token"
@@ -344,17 +336,21 @@ fn sanitize_model(text: &str) -> String {
             let redact = redact_next || label;
             redact_next = label;
             if redact {
-                return "*".into();
+                return Some("*".into());
             }
             if sensitive_atom(atom) {
-                return "*".into();
+                return Some("*".into());
             }
             if let Some(rule) = RULES.iter().find(|r| {
                 r.aliases
                     .iter()
                     .any(|a| a.is_ascii() && a.eq_ignore_ascii_case(atom))
             }) {
-                return rule.server_name.to_owned();
+                if seen_brands.contains(&rule.name) {
+                    return None;
+                }
+                seen_brands.push(rule.name);
+                return Some(rule.server_name.to_owned());
             }
             const WORDS: &[&str] = &[
                 "TV",
@@ -373,18 +369,24 @@ fn sanitize_model(text: &str) -> String {
                 "Max",
             ];
             if let Some(word) = WORDS.iter().find(|w| w.eq_ignore_ascii_case(atom)) {
-                return (*word).into();
+                return Some((*word).into());
+            }
+            // A narrow public prefix exception, after the full atom's privacy
+            // checks. Unknown mixed-case prefixes still fail closed.
+            if atom
+                .get(..5)
+                .is_some_and(|p| p.eq_ignore_ascii_case("MiTV-"))
+                && product_code(&atom[5..])
+            {
+                return Some(format!("MiTV-{}", &atom[5..]));
             }
             // Ordinary names/opaque words are not model codes. Require digits and
             // uppercase short product prefixes; unknown prose is fail-closed.
-            let prefix = atom.bytes().take_while(u8::is_ascii_alphabetic).count();
-            let code = atom.bytes().any(|c| c.is_ascii_digit())
-                && atom.bytes().any(|c| c.is_ascii_alphabetic())
-                && prefix <= 4
-                && atom
-                    .bytes()
-                    .all(|c| !c.is_ascii_alphabetic() || c.is_ascii_uppercase());
-            if code { atom.to_owned() } else { "*".into() }
+            Some(if product_code(atom) {
+                atom.to_owned()
+            } else {
+                "*".into()
+            })
         })
         .collect();
     let mut model = words.join(" ");
@@ -395,6 +397,16 @@ fn sanitize_model(text: &str) -> String {
     } else {
         model.to_owned()
     }
+}
+
+fn product_code(atom: &str) -> bool {
+    let prefix = atom.bytes().take_while(u8::is_ascii_alphabetic).count();
+    atom.bytes().any(|c| c.is_ascii_digit())
+        && atom.bytes().any(|c| c.is_ascii_alphabetic())
+        && prefix <= 4
+        && atom
+            .bytes()
+            .all(|c| !c.is_ascii_alphabetic() || c.is_ascii_uppercase())
 }
 
 #[cfg(test)]

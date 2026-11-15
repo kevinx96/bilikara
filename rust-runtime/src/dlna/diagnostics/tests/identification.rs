@@ -37,8 +37,8 @@ fn approved_metadata_projections_are_readable_and_rule_hits_are_typed() {
         p["server_products"],
         json!([{"name":"Platinum","major":1},{"name":"Linux","major":null}])
     );
-    assert_eq!(p["rules"]["is_purek_room"], true);
-    assert_eq!(p["rules"]["is_lebo_receiver"], true);
+    assert_eq!(p["rules"]["is_purek_room"], false);
+    assert_eq!(p["rules"]["is_lebo_receiver"], false);
     assert_eq!(p["rules"]["declares_ts"], true);
     assert_eq!(p["rules"]["has_avtransport"], true);
     assert_eq!(p["rules"]["server_stack"], json!(["platinum"]));
@@ -47,7 +47,7 @@ fn approved_metadata_projections_are_readable_and_rule_hits_are_typed() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|m| m["field"] == "friendly_name" && m["rule"] == "dolphinstar")
+            .all(|m| m["field"] != "friendly_name" && m["field"] != "model_description")
     );
     let name = &report.diagnostics()["cast"]["devices"][0]["device"]["friendly_name"];
     assert!(name.get("digest").is_some());
@@ -136,6 +136,133 @@ fn model_codes_whitespace_masks_and_output_bound_are_conservative() {
     );
 }
 
+#[test]
+fn separated_ipv4_models_are_masked_in_every_export() {
+    for (raw, address) in [
+        ("KD-192-168-1-5", "192-168-1-5"),
+        ("TV-10-0-0-23", "10-0-0-23"),
+        ("IP192-168-31-86", "192-168-31-86"),
+        ("KD_192_168_1_5", "192_168_1_5"),
+        ("MiTV-192-168-31-86", "192-168-31-86"),
+        ("MiTV-IP192_168_31_86", "192_168_31_86"),
+        ("KD-192.168_1-5", "192.168_1-5"),
+    ] {
+        let mut r = renderer();
+        r.description.model_name = raw.into();
+        let t = trace(10);
+        t.renderer(&r);
+        let report = t.report();
+        assert_eq!(identification(&report)["model"], "*", "{raw}");
+        for surface in export_surfaces(&report) {
+            for forbidden in forms(address) {
+                assert!(
+                    !surface.contains(&forbidden),
+                    "leaked {forbidden} from {raw}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn room_names_and_free_text_do_not_classify_devices() {
+    let mut r = renderer();
+    r.description.manufacturer = "Sony".into();
+    r.description.model_name = "KD-55X80J".into();
+    r.description.model_description.clear();
+    r.context.server.clear();
+    let t = trace(10);
+    t.renderer(&r);
+    let baseline = identification(&t.report()).clone();
+    for room in [
+        "荣耀厅",
+        "三星包厢",
+        "长虹厅",
+        "Platinum VIP Room",
+        "Sharp Room",
+        "海豚星空 纯K ChunK Hpplay LeBo Lelink 包厢",
+    ] {
+        r.description.name = room.into();
+        r.description.model_description = format!("{room} LeBo PureK");
+        t.renderer(&r);
+        let report = t.report();
+        assert_eq!(identification(&report), &baseline, "{room}");
+        assert_eq!(identification(&report)["brands"], json!(["sony"]));
+        for surface in export_surfaces(&report) {
+            assert!(!surface.contains(room), "leaked room {room}");
+        }
+        let name = &report.diagnostics()["cast"]["devices"][0]["device"]["friendly_name"];
+        assert!(name["digest"].is_string());
+        assert_eq!(name.as_object().unwrap().len(), 4);
+    }
+    // Authoritative fields still drive classification, independently of rooms.
+    for source in ["manufacturer", "model_name", "server"] {
+        for (raw, brand, purek, lebo) in [
+            ("chunk.cn", "purek", true, false),
+            ("ChunK", "purek", true, false),
+            ("Hpplay", "lebo", false, true),
+        ] {
+            r.description.manufacturer.clear();
+            r.description.model_name.clear();
+            r.context.server.clear();
+            match source {
+                "manufacturer" => r.description.manufacturer = raw.into(),
+                "model_name" => r.description.model_name = raw.into(),
+                _ => r.context.server = raw.into(),
+            }
+            t.renderer(&r);
+            let report = t.report();
+            let p = identification(&report);
+            assert_eq!(p["brands"], json!([brand]), "{source}: {raw}");
+            assert_eq!(p["rules"]["is_purek_room"], purek);
+            assert_eq!(p["rules"]["is_lebo_receiver"], lebo);
+        }
+    }
+}
+
+#[test]
+fn public_model_codes_remain_readable_and_brand_aliases_are_deduplicated() {
+    for (raw, expected, brands) in [
+        ("MiTV-MSSP3", "MiTV-MSSP3", json!(["xiaomi"])),
+        ("mitv-MSSP3", "MiTV-MSSP3", json!(["xiaomi"])),
+        ("Hisense 65E8D VIDAA", "Hisense 65E8D", json!(["hisense"])),
+        ("A12345 K8812", "A12345 K8812", json!(["unknown"])),
+        ("MiTV-A123456", "*", json!(["xiaomi"])),
+        ("MiTV-ABCDEF12", "*", json!(["xiaomi"])),
+        ("MiTV-Private8812", "*", json!(["xiaomi"])),
+    ] {
+        let mut r = renderer();
+        r.description.manufacturer.clear();
+        r.description.model_name = raw.into();
+        r.context.server.clear();
+        let t = trace(10);
+        t.renderer(&r);
+        let report = t.report();
+        let p = identification(&report);
+        assert_eq!(p["model"], expected, "{raw}");
+        assert_eq!(p["brands"], brands, "{raw}");
+    }
+}
+
+fn export_surfaces(report: &Report) -> Vec<String> {
+    let request:crate::DiagnosticRequest=serde_json::from_value(json!({"app_home":".tmp/no-metadata-data","log_dir":".tmp/no-metadata-logs","system":{},"tools_and_tasks":{},"cache_policy":{},"runtime_state":{},"connectivity_override":{}})).unwrap();
+    let artifact = report.artifact(&request).unwrap();
+    let mut surfaces = vec![
+        report.json(),
+        report.text().into(),
+        format!("{report:?}"),
+        artifact.markdown,
+    ];
+    let mut zip =
+        zip::ZipArchive::new(Cursor::new(STANDARD.decode(artifact.zip_base64).unwrap())).unwrap();
+    for i in 0..zip.len() {
+        let mut text = String::new();
+        zip.by_index(i).unwrap().read_to_string(&mut text).unwrap();
+        surfaces.push(text);
+    }
+    surfaces
+}
+
 fn forms(raw: &str) -> Vec<String> {
     let hex: String = raw.as_bytes().iter().map(|b| format!("{b:02x}")).collect();
     let percent: String = raw.as_bytes().iter().map(|b| format!("%{b:02X}")).collect();
@@ -191,22 +318,7 @@ fn hidden_secrets_in_all_metadata_and_encodings_never_escape_any_export() {
             let t = trace(10);
             t.renderer(&r);
             let report = t.report();
-            let request:crate::DiagnosticRequest=serde_json::from_value(json!({"app_home":".tmp/no-metadata-data","log_dir":".tmp/no-metadata-logs","system":{},"tools_and_tasks":{},"cache_policy":{},"runtime_state":{},"connectivity_override":{}})).unwrap();
-            let artifact = report.artifact(&request).unwrap();
-            let mut surfaces = vec![
-                report.json(),
-                report.text().into(),
-                format!("{report:?}"),
-                artifact.markdown,
-            ];
-            let mut zip =
-                zip::ZipArchive::new(Cursor::new(STANDARD.decode(artifact.zip_base64).unwrap()))
-                    .unwrap();
-            for i in 0..zip.len() {
-                let mut text = String::new();
-                zip.by_index(i).unwrap().read_to_string(&mut text).unwrap();
-                surfaces.push(text);
-            }
+            let surfaces = export_surfaces(&report);
             for forbidden in forms(secret) {
                 for text in &surfaces {
                     assert!(

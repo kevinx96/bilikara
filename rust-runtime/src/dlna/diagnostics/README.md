@@ -112,16 +112,17 @@ projection, in JSON and the text/ZIP summary:
 
 | Field | Export and purpose |
 | --- | --- |
-| `identification.brands` | Fixed normalized whitelist names, or `["unknown"]`. Includes manufacturer, modelName, modelDescription, friendlyName and SERVER evidence, allowing classification comparison across reports. |
-| `identification.brand_matches` | Fixed `{field, rule}` enum pairs. Shows which source matched which approved rule, without echoing its text. |
-| `identification.model` | Conservative ASCII model projection, at most 48 characters. Keeps known public product words/brands and short uppercase product codes containing both letters and digits (at most four leading letters). Whitespace becomes spaces and is compressed; other words, bare numbers, invalid characters and suspicious atoms become `*`. Empty input is `unknown`. |
+| `identification.brands` | Fixed normalized whitelist names, or `["unknown"]`. Only manufacturer, modelName and SERVER provide product evidence. Room names and free-form modelDescription do not influence brands or receiver classification. |
+| `identification.brand_matches` | Fixed `{field, rule}` enum pairs for those three product sources only. Shows which source matched which approved rule, without echoing its text. |
+| `identification.model` | Conservative ASCII model projection, at most 48 characters. Keeps known public product words/brands and short uppercase product codes containing both letters and digits (at most four leading letters), plus the explicit public `MiTV-` prefix followed by such a code. Repeated aliases of one brand are emitted once. Whitespace becomes spaces and is compressed; other words, bare numbers, invalid characters and suspicious atoms become `*`. Empty input is `unknown`. |
 | `identification.server_products` | Known canonical product/stack names and optional main version only; e.g. `{name:"Platinum",major:1}`. Linux always has `major:null`. Unknown products/extra text are omitted; no match gives `{name:"unknown",major:null}`. |
-| `identification.rules` | Boolean/enum evidence: `is_purek_room`, `is_lebo_receiver`, `has_avtransport`, `has_rendering_control`, `declares_ts` and `server_stack`. Unknown service/capability facts stay null; a truncated service list cannot prove absence. |
-| `friendly_name` | Session HMAC, length and truncation/control flags only. Never exports original or sanitized room/store/user text. Only fixed brand rule matches may be inferred from it. |
+| `identification.rules` | Boolean/enum evidence: `is_purek_room`, `is_lebo_receiver`, `has_avtransport`, `has_rendering_control`, `declares_ts` and `server_stack`. Brand-based flags use only manufacturer/modelName/SERVER; service/capability facts use structured observations. Unknown facts stay null; a truncated service list cannot prove absence. |
+| `friendly_name` | Session HMAC, length and truncation/control flags only. Never exports original or sanitized room/store/user text, and never participates in brand/stack matches or classification. |
 | `manufacturer`, `model_name`, `model_description`, `server` | Retain bounded HMAC metadata for correlation, not raw text. Readable facts are exclusively in `identification`. |
 
 The single extensible whitelist is the `RULES` table in `identification.rs`:
 normalized name, public display name, aliases and brand/stack/system kind.
+`chunk`/`ChunK` (including the whole word in `chunk.cn`) normalize to `purek`.
 Matching ignores case and requires whole words for Latin spellings; explicit
 Chinese spellings may adjoin Chinese prose, while a Latin suffix (e.g. K in
 纯K) still has a word boundary. No generic substring guessing is used.
@@ -132,12 +133,23 @@ are discarded. Linux kernel versions are never retained.
 Model atoms with six consecutive digits, eight consecutive hex digits, a
 UUID/MAC/IP shape, sensitive labels, oversized words or recognizable encoded
 payloads are replaced by `*`. Sensitive labels also suppress the next value.
+IPv4-shaped sequences use any of `-._` as separators, including mixed separators
+and sequences glued to product prefixes (`KD-192-168-1-5`, `IP192-168-31-86`).
+This check runs before the `MiTV-` exception, which never bypasses privacy masks.
 Path/URL/email, percent-encoding and key/value syntax suppress the entire model
 field so isolated path or room-value components cannot survive. Unknown ordinary
 words are masked rather than treating arbitrary usernames as public model names.
 Only ASCII letters/digits, `-._` and spaces (plus the `*` redaction marker) remain.
 The original device name and metadata are never logged. Brand/stack labels are
 fixed vocabulary, not evidence that a raw model or description was safe to echo.
+
+Short codes such as `A12345` and `K8812` remain readable because they are also
+ordinary public model identifiers needed to distinguish receiver behavior. The
+conservative syntax cannot distinguish such a model from a room/asset code with
+the same spelling. This exception applies only to modelName, never friendlyName;
+six-digit runs, eight-digit hex runs, address/UUID/MAC shapes, sensitive labels
+and encoded payloads still mask the atom. This is a diagnostic product-code
+projection, not a general sanitizer for arbitrary private text.
 
 Service-presence facts come from the renderer/T9 service summary or explicit
 capability observations. `declares_ts` describes an actual reported sink list;
