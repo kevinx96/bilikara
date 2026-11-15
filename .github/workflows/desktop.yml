@@ -172,6 +172,9 @@ jobs:
         run: |
           set -euo pipefail
           npm run test:libav-prerequisites
+          BILIKARA_TEST_CAST_COMPANION="${BILIKARA_TEST_LIBAV_COMPANION%/*}/libbilikara_media_libav_test.so" \
+            cargo test --manifest-path rust-runtime/Cargo.toml --locked --target host-tuple --lib --features native-host -- \
+            dlna::cast_http::tests::companion:: native_host::cast_session:: --ignored --test-threads=1
 
       - name: Run unit tests
         run: |

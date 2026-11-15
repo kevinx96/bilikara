@@ -445,6 +445,7 @@ fn privacy(text: &str) {
 }
 
 #[test]
+#[ignore = "requires trusted BILIKARA_TEST_CAST_COMPANION; real T3 mux + loopback receiver"]
 fn self_test_success_and_decision_rows_one_to_five() {
     for (name, row) in [
         ("success", 1),
@@ -463,6 +464,7 @@ fn self_test_success_and_decision_rows_one_to_five() {
     }
 }
 #[test]
+#[ignore = "requires trusted BILIKARA_TEST_CAST_COMPANION; real T3 mux + loopback receiver"]
 fn self_test_control_failures_are_independent_and_reports_complete() {
     for (name, row) in [
         ("stop_fault", 1),
@@ -486,6 +488,7 @@ fn self_test_control_failures_are_independent_and_reports_complete() {
     }
 }
 #[test]
+#[ignore = "requires trusted BILIKARA_TEST_CAST_COMPANION; real T3 mux + loopback receiver"]
 fn self_test_missing_bad_samples_and_unanswered_continue() {
     for name in [
         "bad_a",
@@ -522,6 +525,7 @@ fn self_test_missing_bad_samples_and_unanswered_continue() {
     }
 }
 #[test]
+#[ignore = "requires trusted BILIKARA_TEST_CAST_COMPANION; real T3 mux + loopback receiver"]
 fn self_test_pull_observations_preserve_peer_and_concurrency_facts() {
     for name in ["no_pull", "different_peer", "concurrent"] {
         let report = scenario(name);
@@ -555,22 +559,26 @@ fn self_test_pull_observations_preserve_peer_and_concurrency_facts() {
     }
 }
 #[test]
+#[ignore = "requires trusted BILIKARA_TEST_CAST_COMPANION; real T3 mux + loopback receiver"]
 fn self_test_cancel_awaits_revocation_within_three_seconds() {
     scenario("cancel");
 }
 
 #[test]
+#[ignore = "requires trusted BILIKARA_TEST_CAST_COMPANION; real T3 mux + loopback receiver"]
 fn self_test_handoff_keeps_registration_until_normal_session_ends() {
     scenario("handoff");
     scenario("finish");
 }
 
 #[test]
+#[ignore = "requires trusted BILIKARA_TEST_CAST_COMPANION; real T3 mux + loopback receiver"]
 fn self_test_long_original_is_recorded_once_with_twenty_second_bound() {
     scenario("long_a");
 }
 
 #[test]
+#[ignore = "requires trusted BILIKARA_TEST_CAST_COMPANION; real T3 mux + loopback receiver"]
 fn self_test_file_a_is_vbr_and_live_a_retains_cbr_without_another_merge() {
     let _serial = GLOBAL_APP_TEST_LOCK
         .lock()
