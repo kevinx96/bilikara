@@ -14,14 +14,16 @@
     // Static markup only; device text and diagnostic text use textContent.
     dialog.innerHTML = `<header class="selection-modal-head"><h2 id="cast-test-title" data-test-text="title"></h2><button type="button" class="banner-close" data-test-close aria-label="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" fill="none" stroke="currentColor" stroke-width="2"/></svg></button></header>
       <p data-test-text="intro"></p><label data-test-device-label><span data-test-text="target"></span><select data-test-device></select></label>
-      <p data-test-retention></p><p data-test-registration hidden></p><p data-test-status role="status" aria-live="polite"></p>
+      <p data-test-retention hidden></p><p data-test-registration hidden></p><p data-test-status role="status" aria-live="polite" tabindex="-1"></p>
       <form data-test-questions hidden>
+        <p data-test-countdown hidden><span data-test-countdown-text aria-hidden="true"></span><span data-test-countdown-live role="status" aria-live="polite" class="cast-test-announcement"></span></p>
         <fieldset data-answer="video"><legend data-test-text="video"></legend></fieldset>
         <fieldset data-answer="audio"><legend data-test-text="audio"></legend></fieldset>
         <fieldset data-answer="synchronized"><legend data-test-text="sync"></legend></fieldset>
         <button type="submit" class="next-button" data-test-submit data-test-text="submit"></button>
       </form>
-      <p data-test-result></p><pre data-test-summary hidden></pre>
+      <p data-test-result></p><p data-test-platform hidden></p><pre data-test-summary hidden></pre>
+      <div data-test-handoff hidden><p data-test-text="handoffHint"></p><div class="cast-actions"><button type="button" class="toolbar-button" data-test-finish data-test-text="finish"></button><button type="button" class="next-button" data-test-continue data-test-text="continue"></button></div></div>
       <footer><button type="button" class="toolbar-button" data-test-cancel data-test-text="cancel"></button><button type="button" class="toolbar-button" data-test-copy data-test-text="copy"></button><button type="button" class="next-button" data-test-start data-test-text="start"></button><button type="button" class="next-button" data-test-save data-test-text="save"></button></footer>`;
     document.body.append(dialog);
     const el = selector => dialog.querySelector(selector);
@@ -29,6 +31,25 @@
     const draft = {};
     let questionKey = "", reportKey = "", report = null, opener = trigger;
     let loadingReport = false;
+    let countdownTimer = null, countdownBucket = null, lastRunning = false;
+    function countdown() {
+      const test = current();
+      const active = dialog.open && test.running && test.question && Number.isFinite(test.question_deadline_ms);
+      el('[data-test-countdown]').hidden = !active;
+      if (!active) { clearInterval(countdownTimer); countdownTimer = null; countdownBucket = null; return; }
+      const seconds = Math.max(0, Math.ceil((test.question_deadline_ms - Date.now()) / 1000));
+      const text = labelText('remaining').replace('{seconds}', String(seconds));
+      el('[data-test-countdown-text]').textContent = text;
+      const bucket = seconds <= 5 ? (seconds === 0 ? 0 : 1) : Math.ceil(seconds / 15) + 1;
+      if (bucket !== countdownBucket) { countdownBucket = bucket; el('[data-test-countdown-live]').textContent = text; }
+      if (countdownTimer === null) countdownTimer = setInterval(countdown, 1000);
+    }
+    function errorText(error) {
+      if (error.code === 'cast_purek_required') return adapter.translate('cast.purekRequired');
+      const key = `cast.error.${error.code || 'unknown'}`;
+      const text = adapter.translate(key);
+      return text === key ? adapter.translate('cast.error.unknown') : text;
+    }
     const choices = {
       video: ["normal", "stuttering", "black", "unsupported", "uncertain"],
       audio: ["yes", "no", "uncertain"], synchronized: ["yes", "no", "uncertain"],
@@ -46,7 +67,7 @@
       const key = el("[data-test-device]").value;
       if (key === "purek") {
         const purek_qr = document.getElementById("cast-purek-url")?.value.trim();
-        if (!purek_qr) throw new Error(adapter.translate("cast.purekRequired"));
+        if (!purek_qr) throw Object.assign(new Error(), { code: 'cast_purek_required' });
         return { purek_qr, address_confirmed: Boolean(document.getElementById("cast-address-confirmed")?.checked) };
       }
       return key ? { device_key: key } : {};
@@ -56,16 +77,20 @@
       const disabled = button.disabled;
       buttons.add(button); button.disabled = true; button.setAttribute("aria-busy", "true"); render();
       try { await work(); }
-      catch (error) { adapter.error(error.message || adapter.translate("cast.error.unknown")); }
+      catch (error) { adapter.error(errorText(error)); }
       finally { buttons.delete(button); button.disabled = disabled; button.removeAttribute("aria-busy"); render(); }
     }
     async function post(actionName, payload = {}) {
       const value = await adapter.post(`/api/cast/self-test/${actionName}`, { generation: current().generation, ...payload });
       await adapter.refresh(); return value;
     }
-    function close() { if (!current().running && !buttons.size) { dialog.close(); opener?.focus(); } }
+    function close() { if (!current().running && !buttons.size) {
+      dialog.close(); countdown();
+      const target = opener?.getClientRects().length && !opener.disabled ? opener : document.getElementById('cast-open');
+      target?.focus();
+    } }
     trigger.hidden = false;
-    trigger.addEventListener("click", () => { opener = document.activeElement; render(); dialog.showModal(); });
+    trigger.addEventListener("click", () => { opener = trigger; render(); dialog.showModal(); countdown(); });
     el("[data-test-close]").addEventListener("click", close);
     dialog.addEventListener("cancel", event => { event.preventDefault(); close(); });
     el("[data-test-start]").addEventListener("click", event => action(event.currentTarget, async () => {
@@ -75,10 +100,13 @@
       await post("start", payload);
     }));
     el("[data-test-cancel]").addEventListener("click", event => action(event.currentTarget, () => post("cancel")));
+    for (const [name, keep] of [['continue', true], ['finish', false]]) {
+      el(`[data-test-${name}]`).addEventListener('click', event => action(event.currentTarget, () => post('handoff', { start_casting: keep })));
+    }
     el("[data-test-questions]").addEventListener("submit", event => {
       event.preventDefault();
-      const test = current(), cell = test.cell;
-      action(el("[data-test-submit]"), () => post("answer", { cell, answers: {
+      const test = current(), cell = test.cell, question_id = test.question_id;
+      action(el("[data-test-submit]"), () => post("answer", { cell, question_id, answers: {
         video: draft.video, audio: draft.audio, synchronized: test.ask_sync ? draft.synchronized || "uncertain" : "unanswered",
       } }));
     });
@@ -102,7 +130,7 @@
       try {
         const value = await adapter.getReport();
         if (current().generation === generation && !current().running) { report = value; reportKey = String(generation); }
-      } catch (error) { reportKey = String(generation); adapter.error(error.message); }
+      } catch (error) { reportKey = String(generation); adapter.error(errorText(error)); }
       finally { loadingReport = false; render(); }
     }
     function render() {
@@ -125,28 +153,41 @@
       select.disabled = running || buttons.size > 0;
       el("[data-test-device-label]").hidden = running;
       el("[data-test-retention]").textContent = labelText(test.preferences_persisted ? "retained" : "thisRun");
+      el("[data-test-retention]").hidden = !snapshot().selected;
       el("[data-test-registration]").hidden = !test.registration_attempted;
       el("[data-test-registration]").textContent = labelText(test.registered ? "registered" : "unregistered");
       el("[data-test-status]").textContent = running ? `${labelText(`stage.${test.stage || "s0"}`)}${test.cell ? ` · ${labelText(`cell.${test.cell}`)}` : ""}` : labelText(test.report_available ? "complete" : "ready");
-      const key = `${test.generation}:${test.cell}`;
+      const key = `${test.generation}:${test.cell}:${test.question_id}`;
       if (key !== questionKey) {
         questionKey = key;
         for (const field of Object.keys(choices)) delete draft[field];
         for (const input of dialog.querySelectorAll("input[type=radio]")) input.checked = false;
+        countdownBucket = null;
       }
       el("[data-test-questions]").hidden = !running || !test.question;
+      el('[data-test-handoff]').hidden = !running || !test.handoff_available;
+      for (const name of ['continue', 'finish']) el(`[data-test-${name}]`).disabled = buttons.size > 0;
       el('[data-answer="synchronized"]').hidden = !test.ask_sync || !["normal", "stuttering"].includes(draft.video);
       el("[data-test-submit]").disabled = !draft.video || !draft.audio || !test.question;
       el("[data-test-cancel]").hidden = !running;
       el("[data-test-start]").hidden = running;
       el("[data-test-start]").disabled = running || buttons.size > 0;
+      el("[data-test-start]").className = test.report_available ? 'toolbar-button' : 'next-button';
+      el("[data-test-start]").dataset.testText = test.report_available ? 'retest' : 'start';
+      el("[data-test-start]").textContent = labelText(test.report_available ? 'retest' : 'start');
       for (const name of ["copy", "save"]) { el(`[data-test-${name}]`).hidden = !test.report_available; el(`[data-test-${name}]`).disabled = running || loadingReport; }
       for (const button of buttons) { button.disabled = true; if (button.dataset.testText) button.textContent = labelText("busy"); }
       if (test.report_available && !running && reportKey !== String(test.generation) && !loadingReport) void loadReport(test.generation);
       const row = report?.diagnostics?.cast_self_test?.conclusion?.decision_row;
       el("[data-test-result]").textContent = report ? labelText(row ? `result.${row}` : "inconclusive") : "";
+      const unavailable = report?.diagnostics?.cast_self_test?.cells?.filter(cell => cell.skip_reason === 'platform_unavailable') || [];
+      el('[data-test-platform]').hidden = !unavailable.length;
+      el('[data-test-platform]').textContent = unavailable.map(cell => `${labelText(`cell.${cell.cell}`)}: ${labelText('platformUnavailable')}`).join(' · ');
       el("[data-test-summary]").hidden = !report;
       el("[data-test-summary]").textContent = report?.text || "";
+      if (running && !lastRunning && dialog.open) el('[data-test-status]').focus();
+      lastRunning = running;
+      countdown();
     }
     render();
     return { render, busy: () => buttons.size > 0 };

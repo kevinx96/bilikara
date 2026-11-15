@@ -23003,7 +23003,7 @@ function initializeCastHost() {
     getReport: async () => {
       const response = await fetch("/api/cast/self-test/report", { headers: clientHeaders() });
       const result = await response.json();
-      if (!response.ok || !result.ok) throw new Error(result.error || t("cast.error.unknown"));
+      if (!response.ok || !result.ok) throw Object.assign(new Error(t("cast.error.cast_report_unavailable")), { code: "cast_report_unavailable" });
       return result.data;
     },
     saveReport: () => saveTauriBackendDownload("/api/cast/self-test/download"),
