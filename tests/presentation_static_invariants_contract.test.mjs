@@ -67,7 +67,8 @@ assert.ok(contains("BroadcastChannel", block));
 assert.ok(contains("localStorage.setItem", block));
 assert.ok(contains("makeEnvelope(\"master-state\"", block));
 assert.ok(contains("playbackAuthority !== \"host\"", block));
-assert.ok(contains("mediaRendererOwner !== \"host\"", block));
+assert.ok(contains('candidate.mediaRendererOwner !== (mode === "networkRenderer" ? "networkRenderer" : "host")', block));
+assert.ok(contains('playbackAuthority: "host"', block));
 },
 async test_i18n_has_controller_and_presentation_keys_in_all_languages() {
 let catalog, key, keys, language, language_key_sets, reference_keys, reference_language, rejected, required, result, translations, value;
