@@ -50,6 +50,7 @@ fn self_test_discovery_links_udn_evidence_not_unrelated_salted_keys() {
 }
 
 fn scenario(name: &str) -> Value {
+    eprintln!("self-test scenario: {name}");
     let _serial = GLOBAL_APP_TEST_LOCK
         .lock()
         .unwrap_or_else(|p| p.into_inner());
@@ -58,28 +59,25 @@ fn scenario(name: &str) -> Value {
         "Set BILIKARA_TEST_CAST_COMPANION to the same-build test companion"
     );
     let mut host = Host::new();
-    let bad_sample = name == "bad_b";
-    Arc::get_mut(&mut host.context).unwrap().assets = Arc::new(move |name| {
-        if name != "cast-samples/sample-b.ts" {
-            return None;
-        }
-        let mut bytes = include_bytes!("../../../../../static/cast-samples/sample-b.ts").to_vec();
-        if bad_sample {
-            bytes[0] ^= 1;
-        }
-        Some(Asset {
-            bytes,
-            mime: "video/MP2T".into(),
-        })
-    });
-    if matches!(name, "bad_a" | "no_cache") {
+    if name == "long_a" {
+        host.use_long_media();
+    }
+    if name == "bad_b" {
+        let root = host.context.directory.join("bad-sample");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("sample-b.ts"), b"corrupt").unwrap();
+        Arc::get_mut(&mut host.context).unwrap().sample_root = Some(root);
+    }
+    if matches!(name, "bad_a" | "bad_audio" | "no_cache") {
         let snap = with_app(|app| app.native_core_snapshot()).unwrap();
         for item in snap.current_item.iter().chain(&snap.playlist) {
             let path = host
                 .context
                 .cache_root
                 .join(item.video_media_url.strip_prefix("/media/").unwrap());
-            if name == "bad_a" {
+            if name == "bad_audio" {
+                std::fs::write(path.with_file_name("audio.m4a"), b"not audio").unwrap();
+            } else if name == "bad_a" {
                 std::fs::write(path, b"not a video").unwrap();
             } else {
                 std::fs::remove_file(path).unwrap();
@@ -97,7 +95,7 @@ fn scenario(name: &str) -> Value {
             _ => None,
         };
         state.no_pull = name == "no_pull";
-        state.clients = if name == "concurrent" { 4 } else { 1 };
+        state.clients = if name == "concurrent" { 5 } else { 1 };
         state.different_peer = name == "different_peer";
         state.reject_files = name == "live_only";
     }
@@ -110,9 +108,13 @@ fn scenario(name: &str) -> Value {
         }
         Some(renderer)
     };
-    let qr = matches!(name, "registration_rejected" | "cancel").then(|| receiver.qr());
+    let qr = matches!(
+        name,
+        "registration_rejected" | "cancel" | "handoff" | "finish"
+    )
+    .then(|| receiver.qr());
     let cancel = CancellationToken::new();
-    let (send, receive) = tokio::sync::mpsc::channel(1);
+    let (send, receive) = tokio::sync::mpsc::channel(2);
     let report = runtime().block_on(async {
         let run = self_test::tests::run(
             host.context.clone(),
@@ -137,6 +139,7 @@ fn scenario(name: &str) -> Value {
                 },
                 between: Duration::ZERO,
                 poll: Duration::from_millis(50),
+                handoff_timeout: Duration::from_secs(5),
             },
         );
         let answer = async {
@@ -147,6 +150,32 @@ fn scenario(name: &str) -> Value {
                 let state = self_test::tests::question().await;
                 if state["running"] == false {
                     break;
+                }
+                if state["handoff_available"] == true {
+                    self_test::route(&host.context, &host.identity, &Method::POST, "/api/cast/self-test/handoff", &json!({"generation":1,"start_casting":name=="handoff"})).unwrap();
+                    if name == "handoff" {
+                        tokio::time::timeout(Duration::from_secs(10), async {
+                            loop {
+                                if host.snapshot()["cast"]["phase"] == "active" { break; }
+                                tokio::task::yield_now().await;
+                            }
+                        }).await.unwrap();
+                        assert_eq!(receiver.state.lock().unwrap().releases, 0);
+                        assert_eq!(receiver.state.lock().unwrap().actions.iter().filter(|a| a.as_str()=="SetDeviceAuthorization").count(), 1);
+                        receiver.release_hold.store(true, Ordering::Release);
+                        host.post("/api/cast/disconnect", json!({})).unwrap();
+                        tokio::time::timeout(Duration::from_secs(3), async {
+                            loop {
+                                if receiver.release_ready.load(Ordering::Acquire) { break; }
+                                tokio::task::yield_now().await;
+                            }
+                        }).await.unwrap();
+                        let owns = host.snapshot()["cast"]["owns_playback"].clone();
+                        receiver.release_hold.store(false, Ordering::Release);
+                        assert_eq!(owns, true, "ordinary worker must await handed-off room cleanup");
+                        break;
+                    }
+                    continue;
                 }
                 if name == "cancel" {
                     let start = Instant::now();
@@ -181,12 +210,18 @@ fn scenario(name: &str) -> Value {
                     audio: if yes { Answer::Yes } else { Answer::No },
                     synchronized: Answer::Yes,
                 };
+                let body = json!({"generation":1,"cell":cell,"question_id":state["question_id"],"answers":answer});
+                if name == "success" {
+                    let mut stale = body.clone(); stale["question_id"] = json!(0);
+                    assert_eq!(self_test::route(&host.context, &host.identity, &Method::POST, "/api/cast/self-test/answer", &stale).unwrap_err().code, "cast_self_test_stale");
+                    self_test::tests::expired_answer(&host.context, &host.identity, &body);
+                }
                 self_test::route(
                     &host.context,
                     &host.identity,
                     &Method::POST,
                     "/api/cast/self-test/answer",
-                    &json!({"generation":1,"cell":cell,"answers":answer}),
+                    &body,
                 )
                 .unwrap();
             }
@@ -196,11 +231,49 @@ fn scenario(name: &str) -> Value {
     });
     let value = report.diagnostics().clone();
     let result = &value["cast_self_test"];
+    if name == "bad_audio" {
+        assert_eq!(
+            self_test::tests::mux_count(),
+            1,
+            "failed merge must not retry every cached song"
+        );
+    }
+    if name == "long_a" {
+        assert!(
+            result["preflight"]["sample_a"]["synthesis_ms"]
+                .as_u64()
+                .unwrap()
+                < 20_000
+        );
+        assert_eq!(self_test::tests::mux_count(), 1);
+        assert!((19_000_000..20_000_000).contains(&self_test::tests::recorded_end_us()));
+    }
+    if matches!(
+        name,
+        "success" | "uniform_file" | "uniform_live" | "mp4" | "live_only"
+    ) {
+        let mp4 = result["cells"][4]["skip_reason"].is_null();
+        assert_eq!(
+            self_test::tests::mux_count(),
+            if mp4 { 2 } else { 1 },
+            "{name}: original inputs are merged at most twice"
+        );
+    }
+    if name == "mp4" {
+        assert!(
+            with_app(|app| Ok(app
+                .cast_preferences()?
+                .devices
+                .values()
+                .any(|d| d.learned_variant == Some(Variant::FileMp4))))
+            .unwrap()
+        );
+    }
     assert_eq!(
         result["environment"]["companion_aac"], true,
         "test companion must execute"
     );
-    if !matches!(name, "bad_a" | "no_cache") {
+    if !matches!(name, "bad_a" | "bad_audio" | "no_cache") {
         assert!(
             result["preflight"]["sample_a"].is_object(),
             "{name}: A must actually synthesize"
@@ -313,9 +386,9 @@ fn scenario(name: &str) -> Value {
         }
         assert!(found, "diagnostic ZIP must include self-test JSON");
     }
-    if name == "cancel" {
+    if matches!(name, "cancel" | "handoff" | "finish") {
         assert!(receiver.state.lock().unwrap().releases > 0);
-        assert_eq!(result["metadata"]["cancelled"], true);
+        assert_eq!(result["metadata"]["cancelled"], name == "cancel");
     }
     value
 }
@@ -390,14 +463,14 @@ fn self_test_control_failures_are_independent_and_reports_complete() {
 }
 #[test]
 fn self_test_missing_bad_samples_and_unanswered_continue() {
-    for name in ["bad_a", "no_cache", "bad_b", "unanswered"] {
+    for name in ["bad_a", "bad_audio", "no_cache", "bad_b", "unanswered"] {
         let report = scenario(name);
         let cells = report["cast_self_test"]["cells"].as_array().unwrap();
         if name == "bad_b" {
             assert_eq!(cells[1]["skip_reason"], "sample_integrity_failed");
             assert_eq!(cells[3]["skip_reason"], "sample_integrity_failed");
         }
-        if matches!(name, "bad_a" | "no_cache") {
+        if matches!(name, "bad_a" | "bad_audio" | "no_cache") {
             assert!(!cells[0]["skip_reason"].is_null());
             assert!(!cells[2]["skip_reason"].is_null());
         }
@@ -430,6 +503,13 @@ fn self_test_pull_observations_preserve_peer_and_concurrency_facts() {
         }
         if name == "concurrent" {
             assert!(
+                cells[1]["observations"]["over_client_limit"]
+                    .as_u64()
+                    .unwrap()
+                    >= 1
+            );
+            assert!(cells[1]["observations"]["last_byte_ms"].as_u64().unwrap() > 0);
+            assert!(
                 cells[1]["observations"]["maximum_concurrent_get"]
                     .as_u64()
                     .unwrap()
@@ -441,4 +521,15 @@ fn self_test_pull_observations_preserve_peer_and_concurrency_facts() {
 #[test]
 fn self_test_cancel_awaits_revocation_within_three_seconds() {
     scenario("cancel");
+}
+
+#[test]
+fn self_test_handoff_keeps_registration_until_normal_session_ends() {
+    scenario("handoff");
+    scenario("finish");
+}
+
+#[test]
+fn self_test_long_original_is_recorded_once_with_twenty_second_bound() {
+    scenario("long_a");
 }

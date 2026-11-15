@@ -109,8 +109,8 @@ impl Fixture {
         for (name, text) in [
             ("static/fonts/SourceHanSans-VF.ttf", "font bytes"),
             ("static/cast-self-test.js", "self-test module"),
-            ("static/cast-samples/sample-b.ts", "sample fixture"),
-            ("static/cast-samples/SOURCE.md", "sample provenance"),
+            ("cast-samples/sample-b.ts", "sample fixture"),
+            ("cast-samples/SOURCE.md", "sample provenance"),
             (
                 "vendor/signalsmith-stretch/SignalsmithStretch.js",
                 "WebAssembly",
@@ -239,6 +239,8 @@ fn missing_resources_notices_updater_and_top_level_fail() {
     fixture.inspect().unwrap();
     let mut files = vec![
         fixture.assets.join("static/fonts/SourceHanSans-VF.ttf"),
+        fixture.assets.join("cast-samples/sample-b.ts"),
+        fixture.assets.join("cast-samples/SOURCE.md"),
         fixture
             .assets
             .join("vendor/signalsmith-stretch/SignalsmithStretch.js"),
@@ -280,6 +282,24 @@ fn missing_resources_notices_updater_and_top_level_fail() {
         )
         .unwrap();
         assert!(fixture.inspect().is_err());
+    }
+}
+
+#[test]
+fn desktop_sample_staging_keeps_payload_outside_frontend_dist() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    for layout in ["windows/_internal", "macos/Contents/Resources"] {
+        let resources = temp.path().join(layout);
+        crate::files::stage_cast_samples(root, &resources).unwrap();
+        for file in ["sample-b.ts", "SOURCE.md"] {
+            assert_eq!(
+                fs::read(resources.join("cast-samples").join(file)).unwrap(),
+                fs::read(root.join("resources/cast-samples").join(file)).unwrap()
+            );
+            assert!(!resources.join("static/cast-samples").join(file).exists());
+            assert!(!root.join("static/cast-samples").join(file).exists());
+        }
     }
 }
 

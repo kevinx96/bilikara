@@ -137,7 +137,7 @@ pub(super) async fn produce(
 #[cfg(test)]
 mod tests {
     use super::*;
-    const BYTES: &[u8] = include_bytes!("../../../../../../static/cast-samples/sample-b.ts");
+    const BYTES: &[u8] = include_bytes!("../../../../../../resources/cast-samples/sample-b.ts");
     #[test]
     fn pinned_ts_index_covers_every_byte_and_all_keyframes() {
         let units = index(BYTES).unwrap();

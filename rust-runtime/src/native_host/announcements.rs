@@ -66,6 +66,9 @@ mod tests {
             std::env::temp_dir().join(format!("bilikara-announcement-route-{}", token().unwrap()));
         std::fs::create_dir_all(&directory).unwrap();
         let context = HostContext {
+            sample_root: Some(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../resources/cast-samples"),
+            ),
             directory: directory.clone(),
             cache_root: directory.join("media"),
             assets: Arc::new(|_| None),

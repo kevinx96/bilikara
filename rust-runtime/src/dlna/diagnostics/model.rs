@@ -32,6 +32,7 @@ choices!(NetworkProfile {
     Private,
     Public,
     Domain,
+    NotApplicable,
     Unavailable
 });
 choices!(SelfTestStage {
@@ -122,7 +123,8 @@ choices!(SkipReason {
     SampleIntegrityFailed,
     NoReceiver,
     Cancelled,
-    NotNeeded
+    NotNeeded,
+    PlatformUnavailable
 });
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -131,12 +133,21 @@ pub struct Environment {
     pub exit_address_class: Option<AddressClass>,
     pub same_subnet_24: Option<bool>,
     pub windows_network_type: Option<NetworkProfile>,
+    pub windows_network_reason: Option<NetworkProfileReason>,
     pub vpn_or_tun: Option<bool>,
     pub companion_mpegts: Option<bool>,
     pub companion_aac: Option<bool>,
     pub companion_annexb: Option<bool>,
     pub sample_b_verified: Option<bool>,
 }
+choices!(NetworkProfileReason {
+    NoReceiverRoute,
+    AdapterUnavailable,
+    ComUnavailable,
+    QueryFailed,
+    NoConnectedNetwork,
+    ConflictingCategories
+});
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct MediaPreflight {

@@ -166,6 +166,8 @@ pub fn stage_resources(
         }
     }
     fs::set_permissions(&assets, fs::metadata(&source_static)?.permissions())?;
+    // Desktop-only media is not frontendDist and must never enter the shell/APK.
+    stage_cast_samples(&config.root, resources)?;
     if source_static.join("vendor").is_dir() {
         tree(&source_static.join("vendor"), &vendor, true)?;
         for name in ["LICENSE.txt", "README.md"] {
@@ -220,4 +222,12 @@ pub fn stage_resources(
         libav::stage(config, prefix, &layout)?;
     }
     Ok(())
+}
+
+pub(crate) fn stage_cast_samples(root: &Path, resources: &Path) -> Result<()> {
+    tree(
+        &root.join("resources/cast-samples"),
+        &resources.join("cast-samples"),
+        false,
+    )
 }

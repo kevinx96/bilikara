@@ -15,13 +15,14 @@ const verify = 'cargo run --manifest-path xtask/Cargo.toml --locked --target hos
 const installed = 'cargo test --manifest-path xtask/Cargo.toml --locked --target host-tuple native_package::installed:: -- --ignored --nocapture';
 
 test('self-test sample B is pinned and required by the native package gate', () => {
-  const bytes = readFileSync(new URL('../static/cast-samples/sample-b.ts', import.meta.url));
+  const bytes = readFileSync(new URL('../resources/cast-samples/sample-b.ts', import.meta.url));
   assert.equal(bytes.length, 12079564);
   assert.equal(createHash('sha256').update(bytes).digest('hex'), '8624fbee0c7f4653e6f1c7c2f7a6de9aca5d2b3a3a729a218d7f740b9417aef3');
-  assert.equal(existsSync(new URL('../static/cast-samples/sample-b.mp4', import.meta.url)), false);
+  assert.equal(existsSync(new URL('../resources/cast-samples/sample-b.mp4', import.meta.url)), false);
   const gate = readFileSync(new URL('../xtask/src/native_package.rs', import.meta.url), 'utf8');
-  for (const resource of ['cast-self-test.js', 'cast-samples/sample-b.ts', 'cast-samples/SOURCE.md']) assert.ok(gate.includes(`"static/${resource}"`));
-  const source = readFileSync(new URL('../static/cast-samples/SOURCE.md', import.meta.url), 'utf8');
+  for (const resource of ['static/cast-self-test.js', 'cast-samples/sample-b.ts', 'cast-samples/SOURCE.md']) assert.ok(gate.includes(`"${resource}"`));
+  assert.equal(existsSync(new URL('../static/cast-samples', import.meta.url)), false, 'frontendDist and Android must not embed the desktop sample');
+  const source = readFileSync(new URL('../resources/cast-samples/SOURCE.md', import.meta.url), 'utf8');
   assert.ok(source.includes('8624fbee0c7f4653e6f1c7c2f7a6de9aca5d2b3a3a729a218d7f740b9417aef3'));
 });
 

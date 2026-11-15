@@ -64,6 +64,7 @@ pub(crate) struct State {
     pub mux_stop: Arc<AtomicBool>,
     pub trace: Option<Arc<SessionTrace>>,
     pub worker_started: bool,
+    pub self_test_handoff_active: bool,
     pub worker_mutation: bool,
 }
 impl State {

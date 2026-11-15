@@ -12,6 +12,8 @@ mod policy;
 mod posix;
 #[cfg(any(windows, test))]
 mod windows;
+#[cfg(all(windows, feature = "native-host"))]
+pub(crate) use windows::adapter_id;
 
 pub use policy::rank_lan_ipv4_candidates;
 

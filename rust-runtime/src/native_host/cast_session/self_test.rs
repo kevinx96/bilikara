@@ -3,6 +3,7 @@ use super::*;
 use crate::dlna::diagnostics::{self as diag, Cell, SkipReason, UserAnswers};
 use tokio::sync::mpsc;
 
+mod network_profile;
 pub(super) mod runner;
 mod samples;
 
@@ -14,12 +15,15 @@ pub(crate) struct State {
     stage: Option<diag::SelfTestStage>,
     cell: Option<Cell>,
     question: bool,
+    question_id: u64,
+    question_deadline_ms: Option<i64>,
     ask_sync: bool,
     registered: bool,
     registration_attempted: bool,
     preferences_persisted: bool,
     cancel: CancellationToken,
-    answers: Option<mpsc::Sender<UserAnswers>>,
+    answers: Option<mpsc::Sender<AnswerEnvelope>>,
+    handoff: Option<tokio::sync::oneshot::Sender<bool>>,
     #[cfg(test)]
     changed: Arc<tokio::sync::Notify>,
 }
@@ -27,9 +31,17 @@ impl State {
     pub fn snapshot(&self) -> Value {
         json!({"generation":self.generation,"running":self.running,"stage":self.stage,
             "cell":self.cell,"question":self.question,"ask_sync":self.ask_sync,
+            "question_id":self.question_id,"question_deadline_ms":self.question_deadline_ms,
+            "handoff_available":self.handoff.is_some(),
             "registered":self.registered,"registration_attempted":self.registration_attempted,"preferences_persisted":self.preferences_persisted,
             "report_available":self.trace.is_some() && !self.running})
     }
+}
+
+pub(super) struct AnswerEnvelope {
+    cell: Cell,
+    question_id: u64,
+    answers: UserAnswers,
 }
 
 struct Request {
@@ -238,10 +250,30 @@ pub(super) fn route(
         }
         match path {
             "/api/cast/self-test/cancel" => test.cancel.cancel(),
+            "/api/cast/self-test/handoff" => {
+                let keep = body["start_casting"]
+                    .as_bool()
+                    .ok_or_else(|| ApiError::invalid("Missing handoff choice"))?;
+                test.handoff
+                    .take()
+                    .ok_or_else(|| {
+                        ApiError::new(409, "cast_self_test_stale", "Handoff choice expired")
+                    })?
+                    .send(keep)
+                    .map_err(|_| {
+                        ApiError::new(409, "cast_self_test_stale", "Handoff choice expired")
+                    })?;
+            }
             "/api/cast/self-test/answer" => {
                 let cell: Cell = serde_json::from_value(body["cell"].clone())
                     .map_err(|_| ApiError::invalid("Invalid cell"))?;
-                if !test.question || test.cell != Some(cell) {
+                if !test.question
+                    || test.cell != Some(cell)
+                    || body["question_id"].as_u64() != Some(test.question_id)
+                    || test
+                        .question_deadline_ms
+                        .is_none_or(|deadline| chrono::Utc::now().timestamp_millis() >= deadline)
+                {
                     return Err(ApiError::new(
                         409,
                         "cast_self_test_stale",
@@ -253,7 +285,11 @@ pub(super) fn route(
                 test.answers
                     .as_ref()
                     .ok_or_else(|| ApiError::invalid("No question"))?
-                    .try_send(answer)
+                    .try_send(AnswerEnvelope {
+                        cell,
+                        question_id: test.question_id,
+                        answers: answer,
+                    })
                     .map_err(|_| ApiError::new(409, "cast_busy", "Answer already submitted"))?;
                 test.question = false;
             }
@@ -289,13 +325,14 @@ fn run(
     request: Request,
     trace: Arc<SessionTrace>,
     cancel: CancellationToken,
-    answers: mpsc::Receiver<UserAnswers>,
+    answers: mpsc::Receiver<AnswerEnvelope>,
 ) {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .max_blocking_threads(2)
         .enable_all()
         .build();
+    let mut handed_off = false;
     match runtime {
         Ok(runtime) => runtime.block_on(async {
             let watcher_context = context.clone();
@@ -310,9 +347,15 @@ fn run(
                     }
                 }
             });
-            runner::run(context,generation,request,trace.clone(),cancel.clone(),answers,runner::Timing::default()).await;
+            let next = runner::run(context.clone(),generation,request,trace.clone(),cancel.clone(),answers,runner::Timing::default()).await;
             // Finish precedes internal watcher cancellation, so normal completion stays normal.
             trace.finish(cancel.is_cancelled());
+            update(generation, |s| { s.question=false; s.answers=None; s.handoff=None; });
+            if let Some(next) = next {
+                handed_off = true;
+                worker::handoff(&context, operation, next.renderer, next.room, &cancel).await;
+                update(generation, |s| s.registered = false);
+            }
             cancel.cancel();
             let _ = watch.await;
         }),
@@ -323,7 +366,9 @@ fn run(
         s.question = false;
         s.answers = None;
     });
-    worker::restore(operation, None);
+    if !handed_off {
+        worker::restore(operation, None);
+    }
 }
 
 fn learn(generation: u64, renderer: &Renderer, trace: &SessionTrace) {
@@ -334,9 +379,13 @@ fn learn(generation: u64, renderer: &Renderer, trace: &SessionTrace) {
         Some("live") => Some(LearnedMode::Live),
         _ => None,
     };
-    let variant = match conclusion["learned_variant"].as_str() {
-        Some("a") => Some(Variant::Original),
-        Some("b") => Some(Variant::Uniform),
+    let variant = match (
+        conclusion["learned_mode"].as_str(),
+        conclusion["learned_variant"].as_str(),
+    ) {
+        (Some("file_mp4"), _) => Some(Variant::FileMp4),
+        (_, Some("a")) => Some(Variant::Original),
+        (_, Some("b")) => Some(Variant::Uniform),
         _ => None,
     };
     if mode.is_none() {

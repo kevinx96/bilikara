@@ -33,6 +33,8 @@ struct Receiver {
     address: std::net::SocketAddr,
     state: Arc<Mutex<ReceiverState>>,
     stop: Arc<AtomicBool>,
+    release_ready: Arc<AtomicBool>,
+    release_hold: Arc<AtomicBool>,
     worker: Option<thread::JoinHandle<()>>,
 }
 fn field<'a>(s: &'a str, name: &str) -> Option<&'a str> {
@@ -71,6 +73,10 @@ impl Receiver {
             bytes: 0,
         }));
         let stop = Arc::new(AtomicBool::new(false));
+        let release_ready = Arc::new(AtomicBool::new(false));
+        let release_hold = Arc::new(AtomicBool::new(false));
+        let releasing = release_ready.clone();
+        let holding_release = release_hold.clone();
         let stopping = stop.clone();
         let shared = state.clone();
         let worker = thread::spawn(move || {
@@ -166,11 +172,13 @@ impl Receiver {
                             state.state = "PLAYING";
                             if let Some(uri) = state.uri.clone().filter(|_| !state.no_pull) {
                                 let barrier = Arc::new(std::sync::Barrier::new(state.clients));
+                                let (ready_send, ready_receive) = std::sync::mpsc::channel();
                                 for _ in 0..state.clients {
                                     let uri = uri.clone();
                                     let barrier = barrier.clone();
                                     let different_peer = state.different_peer;
                                     let shared = shared.clone();
+                                    let ready = ready_send.clone();
                                     pulls.push(thread::spawn(move || {
                                         let client = reqwest::blocking::Client::builder()
                                             .local_address(different_peer.then_some(
@@ -181,8 +189,12 @@ impl Receiver {
                                             .timeout(Duration::from_secs(2))
                                             .build()
                                             .unwrap();
-                                        if let Ok(mut response) = client.get(uri).send() {
-                                            barrier.wait();
+                                        let response = client.get(uri).send();
+                                        let _ = ready.send(());
+                                        // Eviction can close a connection before its headers.
+                                        // Every participant must still release the rendezvous.
+                                        barrier.wait();
+                                        if let Ok(mut response) = response {
                                             if !response.status().is_success() {
                                                 return;
                                             } // superseded URI
@@ -195,6 +207,13 @@ impl Receiver {
                                             }
                                         }
                                     }));
+                                }
+                                // Start the test playback clock only once every
+                                // concurrent GET has reached headers or failed.
+                                if state.clients > 1 {
+                                    for _ in 0..state.clients {
+                                        ready_receive.recv_timeout(Duration::from_secs(3)).unwrap();
+                                    }
                                 }
                             }
                             String::new()
@@ -235,6 +254,12 @@ impl Receiver {
                         "SetDeviceAuthorization" => {
                             if field(&raw, "Enable") == Some("0") {
                                 state.releases += 1;
+                                releasing.store(true, Ordering::Release);
+                                while holding_release.load(Ordering::Acquire)
+                                    && !stopping.load(Ordering::Acquire)
+                                {
+                                    thread::sleep(Duration::from_millis(1));
+                                }
                                 thread::sleep(Duration::from_millis(200));
                             }
                             String::new()
@@ -286,6 +311,8 @@ impl Receiver {
             address,
             state,
             stop,
+            release_ready,
+            release_hold,
             worker: Some(worker),
         }
     }
@@ -362,6 +389,9 @@ impl Host {
         };
         assert!(initialized.error().is_none());
         let context = Arc::new(HostContext {
+            sample_root: Some(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../resources/cast-samples"),
+            ),
             directory: directory.clone(),
             cache_root: directory.join("media"),
             assets: Arc::new(|_| None),

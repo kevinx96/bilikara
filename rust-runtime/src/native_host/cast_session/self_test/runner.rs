@@ -18,6 +18,7 @@ pub(crate) struct Timing {
     pub answer_timeout: Duration,
     pub between: Duration,
     pub poll: Duration,
+    pub handoff_timeout: Duration,
 }
 impl Default for Timing {
     fn default() -> Self {
@@ -29,6 +30,7 @@ impl Default for Timing {
             answer_timeout: Duration::from_secs(60),
             between: Duration::from_secs(2),
             poll: Duration::from_secs(2),
+            handoff_timeout: Duration::from_secs(60),
         }
     }
 }
@@ -97,30 +99,42 @@ pub(in crate::native_host::cast_session) fn identity_match<'a>(
         .map(|r| &r.context)
 }
 
+pub(super) struct Handoff {
+    pub renderer: Renderer,
+    pub room: Option<purek::Session>,
+}
+
 pub(super) async fn run(
     context: Arc<HostContext>,
     generation: u64,
     request: Request,
     trace: Arc<SessionTrace>,
     cancel: CancellationToken,
-    mut answers: mpsc::Receiver<UserAnswers>,
+    mut answers: mpsc::Receiver<AnswerEnvelope>,
     timing: Timing,
-) {
+) -> Option<Handoff> {
     let connection = trace.begin_connection();
     let since = begin(generation, Stage::S0);
-    let sample_b = (context.assets)(samples::SAMPLE_ASSET)
-        .map(|a| a.bytes)
-        .filter(|b| samples::verified(b));
+    let sample_b = samples::read_uniform(&context);
     let companion =
         tokio::task::spawn_blocking(|| media::probe().is_ok_and(|p| p.cast_mux_available()))
             .await
             .unwrap_or(false);
+    let route = request.renderer.as_ref().map(|r| r.local_address);
+    let (profile, profile_reason) =
+        tokio::task::spawn_blocking(move || network_profile::query(route))
+            .await
+            .unwrap_or((
+                diag::NetworkProfile::Unavailable,
+                Some(diag::NetworkProfileReason::QueryFailed),
+            ));
     let mut environment = diag::Environment {
-        sample_b_verified: Some(sample_b.is_some()),
+        sample_b_verified: Some(sample_b.is_ok()),
         companion_mpegts: Some(companion),
         companion_annexb: Some(companion),
         companion_aac: Some(companion),
-        windows_network_type: cfg!(windows).then_some(diag::NetworkProfile::Unavailable),
+        windows_network_type: Some(profile),
+        windows_network_reason: profile_reason,
         ..Default::default()
     };
     let interfaces = crate::networking::local_interfaces();
@@ -218,6 +232,16 @@ pub(super) async fn run(
         target = before.first().cloned();
     }
     if let Some(renderer) = &target {
+        let local = renderer.local_address;
+        let (profile, reason) =
+            tokio::task::spawn_blocking(move || network_profile::query(Some(local)))
+                .await
+                .unwrap_or((
+                    diag::NetworkProfile::Unavailable,
+                    Some(diag::NetworkProfileReason::QueryFailed),
+                ));
+        environment.windows_network_type = Some(profile);
+        environment.windows_network_reason = reason;
         trace.renderer(renderer);
         let matched_before = identity_match(renderer, &before);
         let matched_after = identity_match(renderer, &after);
@@ -257,16 +281,19 @@ pub(super) async fn run(
     }
     // Revoke immediately when cancellation arrives, concurrently with media
     // teardown. Await this owned task at S7; never leave a registration behind.
-    let release_requested = CancellationToken::new();
-    let requested = release_requested.clone();
+    let (release_requested, requested) = tokio::sync::oneshot::channel();
     let cancelled = cancel.clone();
     let releasing_trace = trace.clone();
     let release = tokio::spawn(async move {
-        tokio::select! {_=cancelled.cancelled()=>{},_=requested.cancelled()=>{}}
+        let keep = tokio::select! {biased; _=cancelled.cancelled()=>false, choice=requested=>choice.unwrap_or(false)};
+        if keep && !cancelled.is_cancelled() {
+            return room;
+        }
         if let Some(room) = &mut room {
             let operation = room.release().await;
             releasing_trace.record_purek_operation(connection, &operation);
         }
+        None
     });
     let since = begin(generation, Stage::S4);
     let control = target.as_ref().and_then(|r| make_control(r.clone()).ok());
@@ -313,10 +340,10 @@ pub(super) async fn run(
         Err(SkipReason::SamplePreparationFailed)
     };
     let b = match (&session, sample_b) {
-        (Some(session), Some(bytes)) => {
+        (Some(session), Ok(bytes)) => {
             samples::prepare(context.clone(), session.clone(), Some(bytes), &cancel).await
         }
-        (_, None) => Err(SkipReason::SampleIntegrityFailed),
+        (_, Err(reason)) => Err(reason),
         _ => Err(SkipReason::SamplePreparationFailed),
     };
     if let Ok(sample) = &a {
@@ -444,6 +471,11 @@ pub(super) async fn run(
             |question| {
                 update(generation, |s| {
                     s.question = question;
+                    s.question_id = output;
+                    s.question_deadline_ms = question.then(|| {
+                        chrono::Utc::now().timestamp_millis()
+                            + timing.answer_timeout.as_millis() as i64
+                    });
                     s.ask_sync = !sync_asked;
                 })
             },
@@ -460,7 +492,16 @@ pub(super) async fn run(
     }
     step(&trace, Stage::S6, since, Outcome::Complete, &cancel);
     let since = begin(generation, Stage::S7);
-    release_requested.cancel();
+    let keep = if target.is_some() && !cancel.is_cancelled() {
+        let (send, receive) = tokio::sync::oneshot::channel();
+        update(generation, |s| s.handoff = Some(send));
+        let keep = tokio::select! {biased; _=cancel.cancelled()=>false, value=tokio::time::timeout(timing.handoff_timeout, receive)=>matches!(value, Ok(Ok(true)))};
+        update(generation, |s| s.handoff = None);
+        keep
+    } else {
+        false
+    };
+    let _ = release_requested.send(keep);
     let stop = async {
         if let Some(client) = &control {
             let cleanup = CancellationToken::new();
@@ -471,13 +512,19 @@ pub(super) async fn run(
             }
         }
     };
-    let _ = tokio::join!(release, stop);
+    let (retained, ()) = tokio::join!(release, stop);
+    let room = retained.ok().flatten();
     if !cancel.is_cancelled()
         && let Some(renderer) = &target
     {
         learn(generation, renderer, &trace);
     }
     step(&trace, Stage::S7, since, Outcome::Complete, &cancel);
+    if keep {
+        target.map(|renderer| Handoff { renderer, room })
+    } else {
+        None
+    }
 }
 
 fn make_control(renderer: Renderer) -> Result<ControlClient, dlna::DlnaError> {
@@ -508,12 +555,22 @@ struct Requests {
     active: HashSet<u64>,
     mismatched: HashSet<u64>,
     maximum: u64,
+    replaced: HashSet<u64>,
+    last_byte_ms: Option<u64>,
     seen: bool,
     all_match: bool,
     lost: bool,
 }
 impl Requests {
-    fn event(&mut self, event: &cast_http::HttpStageResult) {
+    fn event(&mut self, event: &cast_http::HttpStageResult, origin: Duration) {
+        if matches!(
+            event.stage,
+            HttpStage::FirstByte | HttpStage::BytesWritten | HttpStage::Disconnect
+        ) && event.bytes_written > 0
+        {
+            let at = (origin + event.elapsed).as_millis() as u64;
+            self.last_byte_ms = Some(self.last_byte_ms.map_or(at, |previous| previous.max(at)));
+        }
         match event.stage {
             HttpStage::PeerMismatch => {
                 self.mismatched.insert(event.connection_id);
@@ -530,6 +587,9 @@ impl Requests {
                 self.maximum = self.maximum.max(self.active.len() as u64);
             }
             HttpStage::Disconnect => {
+                if event.disconnect_reason == Some(cast_http::Reason::Replaced) {
+                    self.replaced.insert(event.connection_id);
+                }
                 self.active.remove(&event.connection_id);
                 self.mismatched.remove(&event.connection_id);
             }
@@ -541,6 +601,8 @@ impl Requests {
             source_matches_description: (!self.lost && self.seen).then_some(self.all_match),
             source_same_subnet_24: (!self.lost && self.seen && self.all_match).then_some(true),
             maximum_concurrent_get: (!self.lost).then_some(self.maximum),
+            over_client_limit: (!self.lost).then_some(self.replaced.len() as u64),
+            last_byte_ms: (!self.lost).then_some(self.last_byte_ms).flatten(),
             ..Default::default()
         }
     }
@@ -560,10 +622,10 @@ async fn play_cell(
     trace: &Arc<SessionTrace>,
     connection: u64,
     output: u64,
-    _cell: Cell,
+    cell: Cell,
     file: Media,
     cancel: &CancellationToken,
-    answers: &mut mpsc::Receiver<UserAnswers>,
+    answers: &mut mpsc::Receiver<AnswerEnvelope>,
     timing: Timing,
     question: impl Fn(bool),
 ) -> UserAnswers {
@@ -584,7 +646,7 @@ async fn play_cell(
         loop {
             match events.recv().await {
                 Ok(event) => {
-                    observations.event(&event);
+                    observations.event(&event, origin);
                     collecting.http_at(output, origin + event.elapsed, &event);
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
@@ -648,7 +710,7 @@ async fn play_cell(
     let observe = async {
         if success {
             observe(
-                client, trace, connection, output, cancel, answers, timing, &question,
+                client, trace, connection, output, cell, cancel, answers, timing, &question,
             )
             .await
         } else {
@@ -750,8 +812,9 @@ async fn observe(
     trace: &SessionTrace,
     connection: u64,
     output: u64,
+    cell: Cell,
     cancel: &CancellationToken,
-    answers: &mut mpsc::Receiver<UserAnswers>,
+    answers: &mut mpsc::Receiver<AnswerEnvelope>,
     timing: Timing,
     question: &impl Fn(bool),
 ) -> UserAnswers {
@@ -784,7 +847,14 @@ async fn observe(
         tokio::select! {
             biased;
             _=cancel.cancelled()=>return answer.unwrap_or_default(),
-            value=answers.recv(),if shown&&answer.is_none()=>{answer=Some(value.unwrap_or_default());question(false);},
+            value=answers.recv(),if shown&&answer.is_none()=>{
+                if value.is_none() { return answer.unwrap_or_default(); }
+                if let Some(value) = value
+                    && value.cell == cell && value.question_id == output
+                    && tokio::time::Instant::now() < start+timing.question_after+timing.answer_timeout {
+                    answer=Some(value.answers);question(false);
+                }
+            },
             _=tokio::time::sleep_until(start+timing.question_after),if !shown=>{shown=true;question(true);},
             _=tokio::time::sleep_until(start+timing.playback),if !stopped=>{
                 if let Ok(operation)=tokio::time::timeout(Duration::from_secs(2),client.stop(cancel)).await {trace.record_operation(Some(connection),Some(output),&operation);}stopped=true;
@@ -795,5 +865,66 @@ async fn observe(
         if stopped && let Some(answer) = answer {
             return answer;
         }
+    }
+}
+
+#[cfg(test)]
+mod observation_tests {
+    use super::*;
+    #[test]
+    fn self_test_observations_track_replacement_and_positive_bytes_without_inventing_headers() {
+        let mut requests = Requests::default();
+        let mut event = cast_http::HttpStageResult {
+            stage: HttpStage::Get,
+            context: DeviceContext {
+                device_key: "fixture".into(),
+                udn_hash: None,
+                source: DiscoverySource::Manual,
+                server: String::new(),
+                route: None,
+            },
+            generation: Some(1),
+            connection_id: 1,
+            elapsed: Duration::from_millis(10),
+            http_status: Some(200),
+            result: Ok(()),
+            bytes_written: 0,
+            disconnect_reason: None,
+            media_time_us: None,
+            live_start: None,
+        };
+        for id in 1..=5 {
+            event.connection_id = id;
+            requests.event(&event, Duration::from_secs(1));
+        }
+        event.stage = HttpStage::FirstByte;
+        event.bytes_written = 188;
+        requests.event(&event, Duration::from_secs(1));
+        event.stage = HttpStage::Disconnect;
+        event.connection_id = 1;
+        event.elapsed = Duration::from_millis(40);
+        event.disconnect_reason = Some(cast_http::Reason::Replaced);
+        requests.event(&event, Duration::from_secs(1));
+        requests.event(&event, Duration::from_secs(1)); // duplicate terminal event is not another kick
+        event.connection_id = 2;
+        event.bytes_written = 0;
+        event.elapsed = Duration::from_millis(90);
+        event.disconnect_reason = None;
+        requests.event(&event, Duration::from_secs(1));
+        let result = requests.finish();
+        assert_eq!(result.maximum_concurrent_get, Some(5));
+        assert_eq!(result.over_client_limit, Some(1));
+        assert_eq!(result.last_byte_ms, Some(1040));
+        assert_eq!(result.source_same_subnet_24, Some(true));
+        let result = Requests {
+            lost: true,
+            maximum: 8,
+            last_byte_ms: Some(12),
+            ..Default::default()
+        }
+        .finish();
+        assert_eq!(result.over_client_limit, None);
+        assert_eq!(result.last_byte_ms, None);
+        assert_eq!(Requests::default().finish().last_byte_ms, None);
     }
 }

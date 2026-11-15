@@ -145,8 +145,8 @@ pub(super) fn inspect(executable: &Path, expected: &str, platform: Platform) -> 
     for name in [
         "static/fonts/SourceHanSans-VF.ttf",
         "static/cast-self-test.js",
-        "static/cast-samples/sample-b.ts",
-        "static/cast-samples/SOURCE.md",
+        "cast-samples/sample-b.ts",
+        "cast-samples/SOURCE.md",
         "vendor/signalsmith-stretch/SignalsmithStretch.js",
         "vendor/ffmpeg-runtime.json",
     ] {

@@ -1,21 +1,135 @@
 use super::*;
 use crate::experimental_libav::cast_mux::{
-    CastFile, CastFormat, CastInputs, CastSession, CastSummary,
+    CastEvent, CastFile, CastFormat, CastInputs, CastPacing, CastSession, CastStart, CastSummary,
 };
 use sha2::{Digest, Sha256};
 mod transport;
 
 pub(super) const SAMPLE_HASH: &str =
     "8624fbee0c7f4653e6f1c7c2f7a6de9aca5d2b3a3a729a218d7f740b9417aef3";
-pub(super) const SAMPLE_ASSET: &str = "cast-samples/sample-b.ts";
 const SAMPLE_BYTES: usize = 12_079_564;
+pub(super) fn read_uniform(context: &HostContext) -> Result<Vec<u8>, SkipReason> {
+    if cfg!(target_os = "android") {
+        return Err(SkipReason::PlatformUnavailable);
+    }
+    let path = context
+        .sample_root
+        .as_ref()
+        .ok_or(SkipReason::SampleIntegrityFailed)?
+        .join("sample-b.ts");
+    let file = std::fs::File::open(path).map_err(|_| SkipReason::SampleIntegrityFailed)?;
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    file.take(SAMPLE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| SkipReason::SampleIntegrityFailed)?;
+    if !verified(&bytes) {
+        return Err(SkipReason::SampleIntegrityFailed);
+    }
+    Ok(bytes)
+}
 pub(super) fn verified(bytes: &[u8]) -> bool {
     bytes.len() == SAMPLE_BYTES && format!("{:x}", Sha256::digest(bytes)) == SAMPLE_HASH
 }
 
 enum Source {
-    Cached(media::Inputs),
+    Cached {
+        input: media::Inputs,
+        transport: Box<RecordedTs>,
+    },
     Uniform(Arc<[u8]>),
+}
+struct RecordedTs {
+    start: CastStart,
+    bytes: Vec<u8>,
+    chunks: Vec<(std::ops::Range<usize>, i64, bool)>,
+    summary: CastSummary,
+}
+#[cfg(test)]
+pub(super) static MUX_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+pub(super) static RECORDED_END_US: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(0);
+const PREPARE_LIMIT: Duration = Duration::from_secs(20);
+const SAMPLE_DURATION_US: i64 = 20_000_000;
+const MAX_SAMPLE_BYTES: usize = 128 * 1024 * 1024;
+
+// T3 supplies authenticated packet boundaries and decode-time watermarks. Keep
+// these once; neither file nor live playback reads/encodes the original again.
+fn record_ts(
+    probe: &crate::experimental_libav::LibavMetadataProbe,
+    input: &media::Inputs,
+    stop: &AtomicBool,
+) -> Result<RecordedTs, SkipReason> {
+    let mut start = None;
+    let mut bytes = Vec::new();
+    let mut chunks = Vec::new();
+    let mut clipped = false;
+    #[cfg(test)]
+    MUX_COUNT.fetch_add(1, Ordering::Relaxed);
+    let result = probe.cast_ts_with_events(
+        &CastInputs {
+            video: &input.video,
+            audio: &input.audio,
+            start_us: 0,
+        },
+        CastPacing::FullSpeed,
+        MAX_SAMPLE_BYTES as u64,
+        stop,
+        &mut |event| {
+            match event {
+                CastEvent::Start(value) => start = Some(value),
+                CastEvent::Data {
+                    bytes: data,
+                    time_us,
+                    key,
+                } => {
+                    if time_us >= SAMPLE_DURATION_US {
+                        clipped = true;
+                        return false;
+                    }
+                    if bytes.len().saturating_add(data.len()) > MAX_SAMPLE_BYTES {
+                        return false;
+                    }
+                    let begin = bytes.len();
+                    bytes.extend_from_slice(data);
+                    chunks.push((begin..bytes.len(), time_us, key));
+                }
+            }
+            !stop.load(Ordering::Acquire)
+        },
+    );
+    if stop.load(Ordering::Acquire) || (result.is_err() && !clipped) || bytes.is_empty() {
+        return Err(SkipReason::SamplePreparationFailed);
+    }
+    let start = start.ok_or(SkipReason::SamplePreparationFailed)?;
+    #[cfg(test)]
+    RECORDED_END_US.store(chunks.last().unwrap().1, Ordering::Relaxed);
+    let keys: Vec<_> = chunks
+        .iter()
+        .filter_map(|(_, time, key)| key.then_some(*time))
+        .collect();
+    let mut summary = result.unwrap_or(CastSummary {
+        packets: (bytes.len() / 188) as u64,
+        bytes: bytes.len() as u64,
+        profile: start.profile,
+        level: start.level,
+        width: start.width,
+        height: start.height,
+        has_b_frames: start.has_b_frames,
+        audio_transcoded: start.audio_transcoded,
+        source_start_us: start.source_start_us,
+        duration_us: SAMPLE_DURATION_US,
+        gop_us: keys.windows(2).map(|pair| pair[1] - pair[0]).max(),
+    });
+    summary.duration_us = summary.duration_us.min(SAMPLE_DURATION_US);
+    Ok(RecordedTs {
+        start,
+        bytes,
+        chunks,
+        summary,
+    })
 }
 pub(super) struct Sample {
     source: Source,
@@ -24,7 +138,7 @@ pub(super) struct Sample {
 }
 pub(super) async fn prepare(
     context: Arc<HostContext>,
-    session: Arc<CastSession>,
+    _session: Arc<CastSession>,
     uniform: Option<Vec<u8>>,
     cancel: &CancellationToken,
 ) -> Result<Arc<Sample>, SkipReason> {
@@ -88,25 +202,26 @@ pub(super) async fn prepare(
                 {
                     continue;
                 }
-                match session.mux(
-                    &probe,
-                    &CastInputs {
-                        video: &input.video,
-                        audio: &input.audio,
-                        start_us: 0,
-                    },
-                    CastFormat::Ts,
-                    &worker_stop,
-                ) {
-                    Ok(file) => {
-                        chosen = Some((input, file.summary.clone()));
+                match record_ts(&probe, &input, &worker_stop) {
+                    Ok(transport) => {
+                        let summary = transport.summary.clone();
+                        chosen = Some((
+                            Source::Cached {
+                                input,
+                                transport: Box::new(transport),
+                            },
+                            summary,
+                        ));
                         break;
                     }
-                    Err(_) => failure = SkipReason::SamplePreparationFailed,
+                    // Once an eligible source enters the muxer, do not try the
+                    // rest of the queue: one TS merge plus optional MP4 is the
+                    // entire test's generation budget, even on failure.
+                    Err(reason) => return Err(reason),
                 }
             }
-            let (input, summary) = chosen.ok_or(failure)?;
-            (Source::Cached(input), summary, None)
+            let (source, summary) = chosen.ok_or(failure)?;
+            (source, summary, None)
         };
         let facts = diag::MediaPreflight {
             video_codec: Some(diag::Codec::H264),
@@ -129,7 +244,7 @@ pub(super) async fn prepare(
     });
     tokio::select! {biased;
         _=cancel.cancelled()=>{stop.store(true,Ordering::Release);let _=task.await;Err(SkipReason::Cancelled)},
-        _=tokio::time::sleep(Duration::from_secs(30))=>{stop.store(true,Ordering::Release);let _=task.await;Err(SkipReason::SamplePreparationFailed)},
+        _=tokio::time::sleep(PREPARE_LIMIT)=>{stop.store(true,Ordering::Release);let _=task.await;Err(SkipReason::SamplePreparationFailed)},
         result=&mut task=>result.unwrap_or(Err(SkipReason::SamplePreparationFailed)),
     }
 }
@@ -146,25 +261,36 @@ pub(super) async fn remux(
             .retain_ts(bytes, SAMPLE_HASH, sample.summary.clone())
             .map_err(|_| SkipReason::SamplePreparationFailed),
         Source::Uniform(_) => Err(SkipReason::SamplePreparationFailed),
-        Source::Cached(input) => {
-            let probe = media::probe().map_err(|_| SkipReason::SamplePreparationFailed)?;
-            session
-                .mux(
-                    &probe,
-                    &CastInputs {
-                        video: &input.video,
-                        audio: &input.audio,
-                        start_us: 0,
-                    },
-                    format,
-                    &worker_stop,
+        Source::Cached { input, transport } => match format {
+            CastFormat::Mp4 => {
+                #[cfg(test)]
+                MUX_COUNT.fetch_add(1, Ordering::Relaxed);
+                let probe = media::probe().map_err(|_| SkipReason::SamplePreparationFailed)?;
+                session
+                    .mux(
+                        &probe,
+                        &CastInputs {
+                            video: &input.video,
+                            audio: &input.audio,
+                            start_us: 0,
+                        },
+                        CastFormat::Mp4,
+                        &worker_stop,
+                    )
+                    .map_err(|_| SkipReason::SamplePreparationFailed)
+            }
+            CastFormat::Ts => session
+                .retain_ts(
+                    &transport.bytes,
+                    &format!("{:x}", Sha256::digest(&transport.bytes)),
+                    sample.summary.clone(),
                 )
-                .map_err(|_| SkipReason::SamplePreparationFailed)
-        }
+                .map_err(|_| SkipReason::SamplePreparationFailed),
+        },
     });
     tokio::select! {biased;
         _=cancel.cancelled()=>{stop.store(true,Ordering::Release);let _=task.await;Err(SkipReason::Cancelled)},
-        _=tokio::time::sleep(Duration::from_secs(30))=>{stop.store(true,Ordering::Release);let _=task.await;Err(SkipReason::SamplePreparationFailed)},
+        _=tokio::time::sleep(PREPARE_LIMIT)=>{stop.store(true,Ordering::Release);let _=task.await;Err(SkipReason::SamplePreparationFailed)},
         result=&mut task=>result.unwrap_or(Err(SkipReason::SamplePreparationFailed)),
     }
 }
@@ -201,24 +327,25 @@ pub(super) async fn live(
                 producer.finish(ok);
             })
         }
-        Source::Cached(_) => tokio::task::spawn_blocking(move || {
-            let Source::Cached(input) = &sample.source else {
-                unreachable!()
-            };
-            let Ok(probe) = media::probe() else {
-                producer.finish(false);
-                return;
-            };
-            let _ = producer.generate(
-                &probe,
-                &CastInputs {
-                    video: &input.video,
-                    audio: &input.audio,
-                    start_us: 0,
-                },
-                media::MAX_BYTES,
-            );
-        }),
+        Source::Cached { .. } => {
+            let stopping = stop.clone();
+            tokio::spawn(async move {
+                let Source::Cached { transport, .. } = &sample.source else {
+                    unreachable!()
+                };
+                let ok: Result<(), ()> = async {
+                    producer.push(CastEvent::Start(transport.start)).map_err(|_| ())?;
+                    let began = tokio::time::Instant::now();
+                    for (range, time_us, key) in &transport.chunks {
+                        let pace = Duration::from_micros((*time_us).max(0) as u64).saturating_sub(Duration::from_secs(5));
+                        tokio::select! {biased; _=stopping.cancelled()=>return Err(()), _=tokio::time::sleep_until(began+pace)=>{}}
+                        producer.push(CastEvent::Data { bytes: &transport.bytes[range.clone()], time_us: *time_us, key: *key }).map_err(|_| ())?;
+                    }
+                    Ok(())
+                }.await;
+                producer.finish(ok.is_ok());
+            })
+        }
     };
     let live = Live { stream, task, stop };
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);

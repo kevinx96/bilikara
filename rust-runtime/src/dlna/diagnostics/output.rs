@@ -281,6 +281,11 @@ impl Output {
         value["stage"] = json!(stage);
         value["code"] = json!(code);
         value["media_time_basis"] = json!("dts_watermark_not_pts");
+        value["observation_limits"] = json!({
+            "range_requests":"unavailable: T4 events do not expose Range headers",
+            "source_same_subnet_24":"true only for exact description-peer match; otherwise unknown because T4 does not expose peer IP",
+            "last_byte_ms":"session elapsed time of last observed positive-byte event; disconnect events may follow the final socket write"
+        });
         value["elapsed_ms"] = json!(self.ended_ms.unwrap_or(now).saturating_sub(self.started_ms));
         let mut actions = self.actions.clone();
         actions.sort_by_key(|e| (e.at_ms, e.sequence));

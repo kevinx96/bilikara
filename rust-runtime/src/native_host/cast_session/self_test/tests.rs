@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn packaged_sample_is_pinned_and_corruption_is_rejected() {
-    let bytes = include_bytes!("../../../../../static/cast-samples/sample-b.ts");
+    let bytes = include_bytes!("../../../../../resources/cast-samples/sample-b.ts");
     assert!(samples::verified(bytes));
     let mut broken = bytes.to_vec();
     broken[0] ^= 1;
@@ -15,10 +15,21 @@ pub(crate) async fn run(
     renderer: Option<Renderer>,
     qr: Option<String>,
     cancel: CancellationToken,
-    send: mpsc::Sender<UserAnswers>,
-    receive: mpsc::Receiver<UserAnswers>,
+    send: mpsc::Sender<AnswerEnvelope>,
+    receive: mpsc::Receiver<AnswerEnvelope>,
     timing: runner::Timing,
 ) -> diag::Report {
+    samples::MUX_COUNT.store(0, Ordering::Relaxed);
+    // Queued answers from an earlier cell/run must never become current answers.
+    send.try_send(AnswerEnvelope {
+        cell: Cell::FileB,
+        question_id: 0,
+        answers: UserAnswers {
+            video: diag::VideoAnswer::Unsupported,
+            ..Default::default()
+        },
+    })
+    .unwrap();
     let trace = Arc::new(
         SessionTrace::new(
             worker::platform(),
@@ -45,8 +56,8 @@ pub(crate) async fn run(
         Ok(())
     })
     .unwrap();
-    runner::run(
-        context,
+    let next = runner::run(
+        context.clone(),
         1,
         Request {
             renderer,
@@ -60,6 +71,10 @@ pub(crate) async fn run(
     )
     .await;
     trace.finish(cancel.is_cancelled());
+    if let Some(next) = next {
+        let previous = with_app(|app| Ok(app.native().cast.operation)).unwrap();
+        worker::handoff(&context, previous, next.renderer, next.room, &cancel).await;
+    }
     update(1, |s| {
         s.running = false;
         s.question = false;
@@ -80,11 +95,45 @@ pub(crate) async fn question() -> Value {
         tokio::pin!(notified);
         notified.as_mut().enable();
         let state = with_app(|app| Ok(app.native().cast.self_test.snapshot())).unwrap_or(state);
-        if state["question"] == true || (state["generation"] == 1 && state["running"] == false) {
+        if state["question"] == true
+            || state["handoff_available"] == true
+            || (state["generation"] == 1 && state["running"] == false)
+        {
             return state;
         }
         tokio::time::timeout(Duration::from_secs(45), notified)
             .await
             .expect("self-test must make progress");
     }
+}
+
+pub(crate) fn mux_count() -> usize {
+    samples::MUX_COUNT.load(Ordering::Relaxed)
+}
+
+pub(crate) fn recorded_end_us() -> i64 {
+    samples::RECORDED_END_US.load(Ordering::Relaxed)
+}
+
+pub(crate) fn expired_answer(context: &Arc<HostContext>, identity: &Identity, body: &Value) {
+    let old = with_app(|app| {
+        let s = &mut app.native().cast.self_test;
+        let old = s.question_deadline_ms;
+        s.question_deadline_ms = Some(0);
+        Ok(old)
+    })
+    .unwrap();
+    assert_eq!(
+        route(
+            context,
+            identity,
+            &Method::POST,
+            "/api/cast/self-test/answer",
+            body
+        )
+        .unwrap_err()
+        .code,
+        "cast_self_test_stale"
+    );
+    update(1, |s| s.question_deadline_ms = old);
 }
