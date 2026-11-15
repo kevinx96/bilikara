@@ -38,6 +38,13 @@ This file is intended to document known third-party components and legal notices
   loopback fixtures in `rust-runtime/src/dlna/purek/`. These share the DLNA
   XML/SOAP and control layer; no C# runtime or vendor SDK is bundled.
 
+## General DLNA session diagnostics
+
+The diagnostics in `rust-runtime/src/dlna/diagnostics/` adapt stage priority
+and bounded retention from bilikara-next `7750dca`, `native_host/purek/trace.rs`,
+including `0870f2b` (MIT, Copyright (c) 2026 bilikara contributors).
+See that directory's `NOTICE.md` and the repository's `LICENSE`.
+
 ## Experimental automatic volume
 
 The shared Rust runtime uses [ebur128 0.1.10](https://github.com/sdroege/ebur128)
