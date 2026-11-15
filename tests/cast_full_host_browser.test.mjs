@@ -1,0 +1,106 @@
+// Whole production Host page: only HTTP responses are simulated. Media uses
+// real decoding, Range requests, renderPlayer, Web Audio and split-player seek.
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { test } from 'node:test';
+import { chromium } from 'playwright';
+
+test('production Host restores real media and gain across repeated cast sessions and a program change', { timeout: 90000 }, async t => {
+  const browser = await chromium.launch({ headless: true, args: ['--autoplay-policy=no-user-gesture-required'], ...(process.platform === 'win32' ? {channel:'msedge'} : {}) });
+  t.after(() => browser.close());
+  const page = await browser.newPage();
+  const errors = [], requests = [];
+  page.on('pageerror', error => errors.push(error.message));
+  let snapshot = {
+    state_revision:1, revision:1, playback_generation:1, playback_mode:'local',
+    playback_program:null, current_item:null, playlist:[], history:[],
+    player_settings:{volume_percent:60, muted:false, song_advance_delay_seconds:0, key_shift:0, av_offset_ms:0},
+    cast:{phase:'idle',operation_id:0,owns_playback:false,renderers:[],devices:{}},
+  };
+  await page.route('**/*', async route => {
+    const url = new URL(route.request().url()), name = url.pathname;
+    if (url.origin !== 'http://localhost') return route.abort();
+    if (name.startsWith('/api/')) {
+      requests.push({name, body:route.request().postDataJSON()});
+      const data = name === '/api/player/claim-program' ? {claimed:true} : snapshot;
+      return route.fulfill({json:{ok:true,data}});
+    }
+    if (name.startsWith('/media/fixture/')) {
+      const video = name.endsWith('.mp4');
+      const bytes = readFileSync(new URL(`../rust-runtime/src/native_host/cast_session/fixtures/${video ? 'keyframes-30s.mp4' : 'audio-30s.m4a'}`, import.meta.url));
+      const range = route.request().headers().range?.match(/^bytes=(\d+)-(\d*)$/);
+      const start = range ? Number(range[1]) : 0, end = range?.[2] ? Math.min(Number(range[2]),bytes.length-1) : bytes.length-1;
+      return route.fulfill({status:range?206:200,body:bytes.subarray(start,end+1),headers:{
+        'content-type':video?'video/mp4':'audio/mp4', 'accept-ranges':'bytes',
+        ...(range?{'content-range':`bytes ${start}-${end}/${bytes.length}`}:{})}});
+    }
+    const relative = name === '/' ? 'index.html' : name.replace(/^\/(?:static\/)?/, '');
+    try {
+      const file = new URL(`../static/${relative}`,import.meta.url);
+      const root = new URL('../static/',import.meta.url);
+      assert.ok(file.href.startsWith(root.href));
+      const type = {js:'text/javascript',css:'text/css',json:'application/json',html:'text/html',svg:'image/svg+xml'}[relative.split('.').at(-1)] || 'application/octet-stream';
+      return route.fulfill({body:readFileSync(file),contentType:type});
+    } catch { return route.fulfill({status:404,body:''}); }
+  });
+  await page.goto('http://localhost/');
+  await page.waitForFunction(() => state.hasValidStateResponse);
+  async function update(patch) {
+    snapshot = {...snapshot,...patch,state_revision:snapshot.state_revision+1,revision:snapshot.revision+1};
+    await page.evaluate(value => { if (!acceptHostStateSnapshot(value)) throw new Error('snapshot rejected'); render(); }, snapshot);
+  }
+  function program(id) {
+    const item = {id, item_incarnation_id:`${id}-incarnation`, selected_audio_variant_id:'original', artifact_set_id:`${id}-artifact`,
+      title:id, display_title:id, page:1, cache_status:'ready', video_media_url:'/media/fixture/video.mp4',
+      audio_variants:[{id:'original',page:1,label:'Original',audio_url:'/media/fixture/audio.m4a'}]};
+    return {current_item:item,playback_program:{item_id:id,item_incarnation_id:item.item_incarnation_id,selected_audio_variant_id:'original',artifact_set_id:item.artifact_set_id}};
+  }
+  await update({...program('first'),playback_generation:2});
+  try {
+    await page.waitForFunction(() => state.hostPlaybackSession?.readyCommitted);
+    await page.evaluate(async () => {
+      const {video,audio} = state.hostPlaybackSession;
+      ensureAudioPitchSource(audio);
+      applyStoredVolumeToMountedPlayer();
+      window.original = {video,audio,session:state.hostPlaybackSession,parents:[video.parentNode,audio.parentNode],gain:audio.bilikaraVolumeGain};
+      window.addedMediaListeners = 0;
+      for(const media of [video,audio]) {
+        const add = media.addEventListener.bind(media);
+        media.addEventListener = (...args) => {addedMediaListeners++; return add(...args);};
+      }
+      await state.audioContext.resume();
+      await video.play();
+    });
+    await page.waitForFunction(() => !original.video.paused && !original.audio.paused);
+    assert.deepEqual(await page.evaluate(() => [original.video.muted, original.audio.muted, original.gain.bilikaraTarget]), [false,false,0.6]);
+    for (let cycle=0; cycle<3; cycle++) {
+      const operation = cycle*2+1;
+      await update({cast:{...snapshot.cast,phase:'active',owns_playback:true,operation_id:operation,position:13+cycle*3,duration:30,is_paused:false}});
+      assert.deepEqual(await page.evaluate(() => [original.video.paused,original.audio.paused,original.video.muted,original.audio.muted,original.gain.bilikaraTarget]), [true,true,true,true,0]);
+      // AudioParam.value is advanced on the audio render thread. Observe its
+      // next quantum as well as the immediate mute/target on the UI thread.
+      await page.waitForFunction(() => original.gain.gain.value===0);
+      await page.evaluate(() => { original.video.play().catch(()=>{}); });
+      await page.waitForFunction(() => original.video.paused);
+      const paused = cycle === 1;
+      await update({cast:{...snapshot.cast,phase:'idle',owns_playback:false,operation_id:operation+1,resume:{operation_id:operation+1,item_id:'first',playback_generation:2,position:13+cycle*3,is_paused:paused}}});
+      await page.waitForFunction(({paused,position}) => original.video.paused===paused && original.audio.paused===paused && !original.video.seeking && Math.abs(original.video.currentTime-position)<1, {paused,position:13+cycle*3});
+      assert.deepEqual(await page.evaluate(() => [original.video.muted,original.audio.muted,original.gain.bilikaraTarget, state.localPlayerVolume]), [false,false,0.6,0.6]);
+      assert.deepEqual(await page.evaluate(() => [state.hostPlaybackSession===original.session,state.hostPlaybackSession.video===original.video,state.hostPlaybackSession.audio===original.audio,original.video.parentNode===original.parents[0],original.audio.parentNode===original.parents[1],original.audio.bilikaraVolumeGain===original.gain,addedMediaListeners]), [true,true,true,true,true,true,0]);
+    }
+    await update({cast:{...snapshot.cast,phase:'active',owns_playback:true,operation_id:7}});
+    await update({...program('second'),playback_generation:3});
+    assert.equal(await page.evaluate(() => state.hostPlaybackSession.video===original.video && original.video.paused && original.audio.muted),true);
+    await update({cast:{...snapshot.cast,phase:'idle',owns_playback:false,operation_id:8,resume:{operation_id:8,item_id:'second',playback_generation:3,position:21,is_paused:false}}});
+    await page.waitForFunction(() => {
+      const session = state.hostPlaybackSession;
+      return session?.playbackGeneration===3 && session.readyCommitted && !session.video.paused && !session.audio.paused && session.video.currentTime>=21 && session.video.currentTime<24;
+    });
+    assert.equal(await page.evaluate(() => state.hostPlaybackSession.video===original.video),false,'a new program mounts only after receiver releases playback');
+    assert.deepEqual(errors,[]);
+    assert.ok(requests.some(request => request.name==='/api/player/claim-program'));
+  } catch (error) {
+    console.error('production cast observation', await page.evaluate(() => ({session:Object.fromEntries(Object.entries(state.hostPlaybackSession||{}).filter(([,value]) => value===null || ['string','number','boolean'].includes(typeof value))),data:state.data,video:state.hostPlaybackSession?.video && {time:state.hostPlaybackSession.video.currentTime,paused:state.hostPlaybackSession.video.paused,error:state.hostPlaybackSession.video.error?.message}})), errors,requests);
+    throw error;
+  }
+});
