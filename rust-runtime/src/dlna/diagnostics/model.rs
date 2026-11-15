@@ -1,9 +1,9 @@
 use super::privacy::AddressClass;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 macro_rules! choices {
     ($name:ident { $($v:ident),+ $(,)? }) => {
-        #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
         #[serde(rename_all = "snake_case")]
         pub enum $name { $($v),+ }
     }
@@ -116,6 +116,14 @@ choices!(Failure {
     PipelineFailed,
     Interrupted
 });
+choices!(SkipReason {
+    NoCachedSong,
+    SamplePreparationFailed,
+    SampleIntegrityFailed,
+    NoReceiver,
+    Cancelled,
+    NotNeeded
+});
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct Environment {
@@ -145,7 +153,8 @@ pub struct MediaPreflight {
     pub file_size: Option<u64>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UserAnswers {
     pub video: VideoAnswer,
     pub audio: Answer,

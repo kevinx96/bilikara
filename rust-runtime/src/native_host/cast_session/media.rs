@@ -8,8 +8,8 @@ use crate::experimental_libav::{
 use std::path::Component;
 
 pub(super) struct Inputs {
-    video: PathBuf,
-    audio: PathBuf,
+    pub(super) video: PathBuf,
+    pub(super) audio: PathBuf,
     leases: Vec<String>,
 }
 impl Drop for Inputs {
@@ -46,7 +46,7 @@ fn path(root: &Path, route: &str) -> Result<PathBuf, ApiError> {
     }
     Ok(path)
 }
-fn inputs(context: &HostContext, item: &PlaylistItem) -> Result<Inputs, ApiError> {
+pub(super) fn inputs(context: &HostContext, item: &PlaylistItem) -> Result<Inputs, ApiError> {
     let audio = item
         .audio_variants
         .iter()
@@ -75,7 +75,7 @@ fn inputs(context: &HostContext, item: &PlaylistItem) -> Result<Inputs, ApiError
     input.audio = path(&context.cache_root, audio)?;
     Ok(input)
 }
-fn probe() -> Result<LibavMetadataProbe, ApiError> {
+pub(super) fn probe() -> Result<LibavMetadataProbe, ApiError> {
     #[cfg(test)]
     if let Some(path) = std::env::var_os("BILIKARA_TEST_CAST_COMPANION") {
         // Explicit test-only same-build companion, never an HTTP input.

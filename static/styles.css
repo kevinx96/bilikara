@@ -12344,3 +12344,24 @@ html .volume-adjust-popover::backdrop {
 #cast-panel > button, .cast-entry > button, .cast-actions > button, .cast-device > button { min-height: 44px; border-radius: 14px; font-size: 16px; font-weight: 400; white-space: normal; }
 .cast-address-confirmation { display: flex; align-items: center; gap: 8px; font-size: 13px; line-height: 1.5; }
 .cast-address-confirmation input { appearance: auto; width: 18px; height: 18px; min-height: 0; padding: 0; flex: 0 0 18px; }
+/* Host-only self-test. The shared floating surface owns fill, blur and title geometry. */
+dialog.cast-self-test {
+  display: block;
+  box-sizing: border-box; width: min(440px, calc(100vw - 24px)); max-width: calc(100vw - 24px);
+  max-height: calc(100dvh - 24px); margin: auto; overflow: auto; color: var(--ink);
+}
+dialog.cast-self-test::backdrop { background: transparent; }
+dialog.cast-self-test:not([open]) { display: none; }
+.cast-self-test > * { margin: 0; }
+.cast-self-test > * + * { margin-top: 12px; }
+.cast-self-test [hidden] { display: none !important; }
+.cast-self-test label[data-test-device-label] { display: grid; gap: 8px; }
+.cast-self-test select { width: 100%; min-width: 0; height: 44px; border-radius: 14px; font-size: 16px; }
+.cast-self-test fieldset { padding: 0; border: 0; margin: 0 0 12px; min-width: 0; }
+.cast-self-test legend { font-weight: 700; margin-bottom: 6px; }
+.cast-self-test fieldset label { display: flex; align-items: center; min-height: 44px; gap: 8px; }
+.cast-self-test input[type="radio"] { appearance: auto; width: 18px; height: 18px; min-height: 0; padding: 0; flex: 0 0 18px; }
+.cast-self-test footer { display: flex; flex-wrap: wrap; gap: 8px; }
+.cast-self-test footer button, .cast-self-test [data-test-submit] { min-height: 44px; height: auto; min-width: 0; border-radius: 14px; font-size: 16px; padding: 8px 12px; white-space: normal; }
+.cast-self-test footer button { flex: 1 1 110px; }
+.cast-self-test pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; max-height: 180px; overflow: auto; }

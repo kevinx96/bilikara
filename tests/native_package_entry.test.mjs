@@ -5,6 +5,7 @@ import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
+import { createHash } from 'node:crypto';
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const workflow = readFileSync(new URL('../.github/workflows/desktop.yml', import.meta.url), 'utf8');
@@ -12,6 +13,17 @@ const bundle = workflow.slice(workflow.indexOf('\n  bundle:'), workflow.length);
 const steps = bundle.split(/\n      - /).slice(1);
 const verify = 'cargo run --manifest-path xtask/Cargo.toml --locked --target host-tuple -- verify-native-desktop';
 const installed = 'cargo test --manifest-path xtask/Cargo.toml --locked --target host-tuple native_package::installed:: -- --ignored --nocapture';
+
+test('self-test sample B is pinned and required by the native package gate', () => {
+  const bytes = readFileSync(new URL('../static/cast-samples/sample-b.ts', import.meta.url));
+  assert.equal(bytes.length, 12079564);
+  assert.equal(createHash('sha256').update(bytes).digest('hex'), '8624fbee0c7f4653e6f1c7c2f7a6de9aca5d2b3a3a729a218d7f740b9417aef3');
+  assert.equal(existsSync(new URL('../static/cast-samples/sample-b.mp4', import.meta.url)), false);
+  const gate = readFileSync(new URL('../xtask/src/native_package.rs', import.meta.url), 'utf8');
+  for (const resource of ['cast-self-test.js', 'cast-samples/sample-b.ts', 'cast-samples/SOURCE.md']) assert.ok(gate.includes(`"static/${resource}"`));
+  const source = readFileSync(new URL('../static/cast-samples/SOURCE.md', import.meta.url), 'utf8');
+  assert.ok(source.includes('8624fbee0c7f4653e6f1c7c2f7a6de9aca5d2b3a3a729a218d7f740b9417aef3'));
+});
 
 test('both native gates verify the extracted artifact and then run actual installed regressions', () => {
   const gates = steps.filter(step => step.includes(verify));

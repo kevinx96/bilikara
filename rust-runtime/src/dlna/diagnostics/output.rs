@@ -23,6 +23,7 @@ pub(super) struct Output {
     pub id: u64,
     pub device: String,
     pub cell: Option<Cell>,
+    pub skip_reason: Option<SkipReason>,
     pub mode: Mode,
     pub mime: Mime,
     pub preflight: MediaPreflight,
@@ -70,6 +71,7 @@ impl Output {
             id,
             device,
             cell: config.cell,
+            skip_reason: None,
             mode: config.mode,
             mime: config.mime,
             preflight: config.preflight,
@@ -216,6 +218,9 @@ impl Output {
     }
 
     pub fn classification(&self, now: u64) -> (&'static str, Option<&'static str>) {
+        if self.skip_reason.is_some() {
+            return ("skipped", None);
+        }
         let now = self.ended_ms.unwrap_or(now);
         if self.failure == Some(Failure::PipelineFailed) && self.first_ts_packet_ms.is_none() {
             return ("media_preparation", Some("cast_media_prepare_failed"));

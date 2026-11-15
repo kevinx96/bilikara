@@ -744,6 +744,12 @@ impl SessionTrace {
             }
         }
     }
+    pub fn skip_output(&self, output: u64, reason: SkipReason) {
+        if let Some(o) = self.lock().outputs.iter_mut().find(|o| o.id == output) {
+            o.skip_reason = Some(reason);
+        }
+        self.complete_output(output, UserAnswers::default());
+    }
     pub fn finish(&self, cancelled: bool) {
         let mut s = self.lock();
         s.finished.get_or_insert((
@@ -803,9 +809,10 @@ impl SessionTrace {
                 }) {
                     Some(11)
                 } else if s.discovered.is_empty()
-                    && s.cells
-                        .iter()
-                        .any(|o| o.classification(now).1 == Some("cast_control_unreachable"))
+                    && s.cells.iter().any(|o| {
+                        o.classification(now).1 == Some("cast_control_unreachable")
+                            || o.skip_reason == Some(SkipReason::NoReceiver)
+                    })
                 {
                     Some(12)
                 } else {
@@ -853,7 +860,12 @@ impl SessionTrace {
                 d.identification.summary()
             ));
         }
-        for o in &s.outputs {
+        for o in s
+            .outputs
+            .iter()
+            .filter(|_| s.steps.is_empty())
+            .chain(s.cells.iter().filter(|_| !s.steps.is_empty()))
+        {
             let (stage, code) = o.classification(now);
             text.push_str(&format!(
                 "Output {} device {}: {} / {}; bytes={}\n",
@@ -863,8 +875,18 @@ impl SessionTrace {
                 code.unwrap_or("none"),
                 o.bytes_written
             ));
+            if !s.steps.is_empty() {
+                text.push_str(&format!(
+                    "  {:?}: video={:?}; audio={:?}; sync={:?}; skip={:?}\n",
+                    o.cell,
+                    o.user_answers.video,
+                    o.user_answers.audio,
+                    o.user_answers.synchronized,
+                    o.skip_reason
+                ));
+            }
         }
-        for e in &events {
+        for e in events.iter().filter(|_| s.steps.is_empty()) {
             text.push_str(&format!(
                 "{} ms {}: {} {} (HTTP {:?}, UPnP {:?}, duration {:?} ms)\n",
                 e.at_ms,

@@ -810,6 +810,9 @@ async fn handle_inner(
     };
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
+        if method == Method::GET && path == "/api/cast/self-test/download" {
+            return cast_session::self_test::download(&identity);
+        }
         if context.desktop && method == Method::POST && path == "/api/diagnostics/package" {
             return diagnostics::package(&context, &identity, &body);
         }

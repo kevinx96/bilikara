@@ -27,7 +27,7 @@ fn update<T>(operation: u64, action: impl FnOnce(&mut State) -> T) -> Option<T> 
     .ok()
     .flatten()
 }
-fn platform() -> diagnostics::Platform {
+pub(super) fn platform() -> diagnostics::Platform {
     if cfg!(windows) {
         diagnostics::Platform::Windows
     } else if cfg!(target_os = "macos") {
@@ -162,7 +162,7 @@ pub(super) fn run(context: Arc<HostContext>) {
     });
 }
 
-fn restore(id: u64, failure: Option<String>) {
+pub(super) fn restore(id: u64, failure: Option<String>) {
     let _ = with_app(|app| {
         let snap = app.native_cast_input()?;
         let state = &mut app.native().cast;

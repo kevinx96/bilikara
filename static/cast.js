@@ -10,7 +10,8 @@
     let pending = null;
     let open = false;
     let errorKey = "";
-    const busy = () => Boolean(pending || view().busy || ["connecting", "recovering", "discovering"].includes(view().phase));
+    let selfTest = null;
+    const busy = () => Boolean(pending || selfTest?.busy() || view().self_test?.running || view().busy || ["connecting", "recovering", "discovering"].includes(view().phase));
     const errorText = error => {
       const key = `cast.error.${error?.code || error || "unknown"}`;
       const value = t(key);
@@ -87,6 +88,7 @@
         if (errorKey !== nextKey) { errorKey = nextKey; adapter.error(errorText(cast.error_code)); }
       }
       for (const waiter of waiters) waiter();
+      selfTest?.render();
       if (pending) {
         pending.disabled = true;
         text(pending.querySelector("[data-presentation-host-play-label]") || (pending.children.length ? null : pending), t("gatcha.adding"));
@@ -178,6 +180,7 @@
         } else await connect({ device_key });
       });
     });
+    selfTest = globalThis.BilikaraCastSelfTest?.create({ ...adapter, disconnect, castBusy: () => Boolean(pending) });
     return { render, disconnect, busy, errorText, perform, waitUntil,
       command: payload => operation("command", payload) };
   }

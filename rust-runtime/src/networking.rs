@@ -124,17 +124,17 @@ pub fn local_lan_ipv4_addresses() -> Vec<String> {
 }
 
 #[cfg(windows)]
-fn local_interfaces() -> Vec<InterfaceAddress> {
+pub(crate) fn local_interfaces() -> Vec<InterfaceAddress> {
     windows::interfaces()
 }
 
 #[cfg(unix)]
-fn local_interfaces() -> Vec<InterfaceAddress> {
+pub(crate) fn local_interfaces() -> Vec<InterfaceAddress> {
     posix::interfaces()
 }
 
 #[cfg(not(any(windows, unix)))]
-fn local_interfaces() -> Vec<InterfaceAddress> {
+pub(crate) fn local_interfaces() -> Vec<InterfaceAddress> {
     Vec::new()
 }
 

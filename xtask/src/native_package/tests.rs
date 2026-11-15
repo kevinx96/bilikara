@@ -108,6 +108,9 @@ impl Fixture {
             "development":false,"version":"v0.8.0-preview.3","platform":platform.name(),"arch":platform.arch()}).to_string()).unwrap();
         for (name, text) in [
             ("static/fonts/SourceHanSans-VF.ttf", "font bytes"),
+            ("static/cast-self-test.js", "self-test module"),
+            ("static/cast-samples/sample-b.ts", "sample fixture"),
+            ("static/cast-samples/SOURCE.md", "sample provenance"),
             (
                 "vendor/signalsmith-stretch/SignalsmithStretch.js",
                 "WebAssembly",

@@ -211,6 +211,68 @@ impl Drop for CastFile {
     }
 }
 impl CastSession {
+    /// Retain a caller-verified preencoded TS in the same quota/lease boundary
+    /// as generated media. The self-test supplies its pinned bundled asset;
+    /// this is not an untrusted upload or a format-validation entry point.
+    #[cfg(feature = "native-host")]
+    pub(crate) fn retain_ts(
+        &self,
+        bytes: &[u8],
+        expected_sha256: &str,
+        mut summary: CastSummary,
+    ) -> Result<CastFile, ProbeError> {
+        use sha2::{Digest, Sha256};
+        if bytes.is_empty()
+            || !bytes.len().is_multiple_of(188)
+            || bytes.chunks_exact(188).any(|p| {
+                p[0] != 0x47
+                    || p[1] & 0x80 != 0
+                    || p[3] & 0x30 == 0
+                    || (p[3] & 0x20 != 0 && p[4] > 183)
+            })
+            || format!("{:x}", Sha256::digest(bytes)) != expected_sha256
+        {
+            return Err(io_error("invalid verified TS"));
+        }
+        let _generation = self.generator.lock().map_err(io_error)?;
+        let size = bytes.len() as u64;
+        if size == 0 || size > self.limit.saturating_sub(self.used.load(Ordering::Acquire)) {
+            return Err(io_error("session quota exhausted"));
+        }
+        let mut nonce = [0; 16];
+        getrandom::fill(&mut nonce).map_err(io_error)?;
+        let path = self
+            .directory
+            .path
+            .join(format!("{:032x}.ts", u128::from_le_bytes(nonce)));
+        let result = (|| {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .map_err(io_error)?;
+            file.write_all(bytes)
+                .and_then(|_| file.sync_all())
+                .map_err(io_error)
+        })();
+        if let Err(error) = result {
+            if fs::remove_file(&path).is_err()
+                && let Ok(meta) = fs::metadata(&path)
+            {
+                self.used.fetch_add(meta.len(), Ordering::AcqRel);
+            }
+            return Err(error);
+        }
+        self.used.fetch_add(size, Ordering::AcqRel);
+        summary.bytes = size;
+        Ok(CastFile {
+            path,
+            summary,
+            _directory: self.directory.clone(),
+            used: self.used.clone(),
+            charged: size,
+        })
+    }
     /// `cache_root` is runtime/data/cache (or its explicit configured override).
     /// The caller keeps this object until session end, and file leases until the
     /// last reader closes. No hard links, cache source mutation or external path.
@@ -391,6 +453,113 @@ impl CastSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "native-host")]
+    #[test]
+    fn retained_ts_is_verified_charged_leased_and_released() {
+        use sha2::{Digest, Sha256};
+        let root = root();
+        let mut bytes = vec![0xff; 188];
+        bytes[..4].copy_from_slice(&[0x47, 0x1f, 0xff, 0x10]);
+        let hash = format!("{:x}", Sha256::digest(&bytes));
+        let summary = CastSummary {
+            packets: 1,
+            bytes: 188,
+            profile: 77,
+            level: 40,
+            width: 1920,
+            height: 1080,
+            has_b_frames: false,
+            audio_transcoded: false,
+            source_start_us: 0,
+            duration_us: 1,
+            gop_us: None,
+        };
+        let session = CastSession::new(&root, 188).unwrap();
+        let file = session.retain_ts(&bytes, &hash, summary.clone()).unwrap();
+        let path = file.path().to_owned();
+        assert_eq!(session.used.load(Ordering::Acquire), 188);
+        assert!(session.retain_ts(&bytes, &hash, summary.clone()).is_err());
+        assert_eq!(CastSession::recover(&root).retained_live, 1);
+        drop(file);
+        assert!(!path.exists());
+        assert_eq!(session.used.load(Ordering::Acquire), 0);
+        let mut broken = bytes.clone();
+        broken[50] ^= 1;
+        assert!(session.retain_ts(&broken, &hash, summary.clone()).is_err());
+        assert!(
+            session
+                .retain_ts(&bytes[..187], &hash, summary.clone())
+                .is_err()
+        );
+        assert!(
+            session
+                .retain_ts(
+                    &[bytes.clone(), bytes.clone()].concat(),
+                    &hash,
+                    summary.clone()
+                )
+                .is_err()
+        );
+        let file = Arc::new(session.retain_ts(&bytes, &hash, summary).unwrap());
+        let reader = file.clone();
+        let directory = file.path().parent().unwrap().to_owned();
+        drop(session);
+        drop(file);
+        assert_eq!(CastSession::recover(&root).retained_live, 1);
+        assert_eq!(fs::read(reader.path()).unwrap(), bytes);
+        drop(reader);
+        assert!(!directory.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[cfg(feature = "native-host")]
+    #[test]
+    fn retained_ts_crash_child() {
+        let Some(root) = std::env::var_os("BILIKARA_RETAIN_TS_CRASH_ROOT") else {
+            return;
+        };
+        use sha2::{Digest, Sha256};
+        let mut bytes = vec![0xff; 188];
+        bytes[..4].copy_from_slice(&[0x47, 0x1f, 0xff, 0x10]);
+        let hash = format!("{:x}", Sha256::digest(&bytes));
+        let session = CastSession::new(Path::new(&root), 188).unwrap();
+        let summary = CastSummary {
+            packets: 1,
+            bytes: 188,
+            profile: 77,
+            level: 40,
+            width: 1920,
+            height: 1080,
+            has_b_frames: false,
+            audio_transcoded: false,
+            source_start_us: 0,
+            duration_us: 1,
+            gop_us: None,
+        };
+        let file = session.retain_ts(&bytes, &hash, summary).unwrap();
+        std::mem::forget(file);
+        std::mem::forget(session);
+        std::process::exit(0);
+    }
+    #[cfg(feature = "native-host")]
+    #[test]
+    fn retained_ts_crash_is_collected_without_touching_a_live_reader() {
+        let root = root();
+        let live = CastSession::new(&root, 188).unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "experimental_libav::cast_mux::files::tests::retained_ts_crash_child",
+            ])
+            .env("BILIKARA_RETAIN_TS_CRASH_ROOT", &root)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let report = CastSession::recover(&root);
+        assert_eq!(report.collected, 1);
+        assert_eq!(report.retained_live, 1);
+        drop(live);
+        fs::remove_dir_all(root).unwrap();
+    }
     fn root() -> PathBuf {
         let mut nonce = [0; 16];
         getrandom::fill(&mut nonce).unwrap();

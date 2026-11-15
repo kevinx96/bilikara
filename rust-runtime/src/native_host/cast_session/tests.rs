@@ -9,6 +9,12 @@ use std::{
 };
 
 struct ReceiverState {
+    fault_on: Option<&'static str>,
+    no_pull: bool,
+    clients: usize,
+    different_peer: bool,
+    reject_files: bool,
+    file_uri: bool,
     state: &'static str,
     position: u64,
     duration: u64,
@@ -42,6 +48,12 @@ impl Receiver {
         listener.set_nonblocking(true).unwrap();
         let address = listener.local_addr().unwrap();
         let state = Arc::new(Mutex::new(ReceiverState {
+            fault_on: None,
+            no_pull: false,
+            clients: 1,
+            different_peer: false,
+            reject_files: false,
+            file_uri: false,
             state: "PLAYING",
             position: 12,
             duration: 120,
@@ -104,6 +116,26 @@ impl Receiver {
                 let mut state = shared.lock().unwrap();
                 let (status, body) = if let Some(action) = action {
                     state.actions.push(action.clone());
+                    if action == "SetAVTransportURI" {
+                        let uri = field(&raw, "CurrentURI").map(str::to_owned);
+                        if uri != state.uri {
+                            state.file_uri = raw.contains("size=");
+                            state.uri = uri;
+                        }
+                    }
+                    if state.fault_on == Some(action.as_str())
+                        && !(action == "SetDeviceAuthorization"
+                            && field(&raw, "Enable") == Some("0"))
+                        || (action == "SetAVTransportURI" && state.reject_files && state.file_uri)
+                    {
+                        let body = "<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\"><s:Body><s:Fault><detail><UPnPError><errorCode>714</errorCode></UPnPError></detail></s:Fault></s:Body></s:Envelope>";
+                        let _ = write!(
+                            stream,
+                            "HTTP/1.1 500 Error\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        continue;
+                    }
                     if state.hang {
                         hung.push(stream);
                         continue;
@@ -122,26 +154,38 @@ impl Receiver {
                         }
                         "Play" => {
                             state.state = "PLAYING";
-                            if let Some(uri) = state.uri.clone() {
-                                let shared = shared.clone();
-                                pulls.push(thread::spawn(move || {
-                                    let client = reqwest::blocking::Client::builder()
-                                        .timeout(Duration::from_secs(2))
-                                        .build()
-                                        .unwrap();
-                                    if let Ok(mut response) = client.get(uri).send() {
-                                        if !response.status().is_success() {
-                                            return;
-                                        } // superseded URI
-                                        let mut data = [0u8; 8192];
-                                        while let Ok(n) = response.read(&mut data) {
-                                            if n == 0 {
-                                                break;
+                            if let Some(uri) = state.uri.clone().filter(|_| !state.no_pull) {
+                                let barrier = Arc::new(std::sync::Barrier::new(state.clients));
+                                for _ in 0..state.clients {
+                                    let uri = uri.clone();
+                                    let barrier = barrier.clone();
+                                    let different_peer = state.different_peer;
+                                    let shared = shared.clone();
+                                    pulls.push(thread::spawn(move || {
+                                        let client = reqwest::blocking::Client::builder()
+                                            .local_address(different_peer.then_some(
+                                                std::net::IpAddr::V4(std::net::Ipv4Addr::new(
+                                                    127, 0, 0, 2,
+                                                )),
+                                            ))
+                                            .timeout(Duration::from_secs(2))
+                                            .build()
+                                            .unwrap();
+                                        if let Ok(mut response) = client.get(uri).send() {
+                                            barrier.wait();
+                                            if !response.status().is_success() {
+                                                return;
+                                            } // superseded URI
+                                            let mut data = [0u8; 8192];
+                                            while let Ok(n) = response.read(&mut data) {
+                                                if n == 0 {
+                                                    break;
+                                                }
+                                                shared.lock().unwrap().bytes += n as u64;
                                             }
-                                            shared.lock().unwrap().bytes += n as u64;
                                         }
-                                    }
-                                }));
+                                    }));
+                                }
                             }
                             String::new()
                         }
@@ -243,6 +287,9 @@ impl Receiver {
         outer.into()
     }
 }
+
+#[path = "self_test/scenarios.rs"]
+mod self_test_scenarios;
 impl Drop for Receiver {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
