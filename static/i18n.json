@@ -2,6 +2,9 @@
   "defaultLanguage": "zh",
   "languages": {
     "zh": {
+      "cast.deliveryThisRun": "交付方式（本次有效）",
+      "cast.error.cast_device_preferences_unavailable": "设备已不可用，请重新查找后再设置",
+      "cast.error.cast_no_current_item": "当前歌曲已移除，请选择歌曲后重新投屏",
       "cast.title": "DLNA 投屏",
       "cast.discover": "查找设备",
       "cast.connect": "连接",
@@ -1113,6 +1116,9 @@
       "sources.dragToRemove": "从复选框拖入这里，确认移除所选来源。"
     },
     "en": {
+      "cast.deliveryThisRun": "Delivery mode (this run only)",
+      "cast.error.cast_device_preferences_unavailable": "The device is unavailable. Find devices again before changing settings.",
+      "cast.error.cast_no_current_item": "The current song was removed. Select a song and connect again.",
       "cast.title": "DLNA casting",
       "cast.discover": "Find devices",
       "cast.connect": "Connect",
@@ -2224,6 +2230,9 @@
       "sources.dragToRemove": "Drag from a checkbox here to confirm removal of the selected sources."
     },
     "ja": {
+      "cast.deliveryThisRun": "配信方式（今回のみ有効）",
+      "cast.error.cast_device_preferences_unavailable": "デバイスが見つかりません。再検索してから設定してください。",
+      "cast.error.cast_no_current_item": "現在の曲が削除されました。曲を選んで再接続してください。",
       "cast.title": "DLNA キャスト",
       "cast.discover": "機器を探す",
       "cast.connect": "接続",

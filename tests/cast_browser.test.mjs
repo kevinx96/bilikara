@@ -43,7 +43,7 @@ async function open(t) {
     let language='zh', pendingRequest=null, calls=[], messages=[], refreshes=0, seekCalls=0;
     const video=document.getElementById('video'), audio=document.getElementById('audio');
     const elements={playerFrame:document.getElementById('media'),keyShiftPanel:document.getElementById('key-shift-panel'),avSyncPanel:document.getElementById('av-sync-panel'),audioVariantBar:document.getElementById('audio-variant-bar')};
-    const state={data:{revision:5,playback_generation:3,current_item:{id:'song',display_title:'Song'},cast:{phase:'idle',operation_id:0,owns_playback:false,renderers:[{device_key:'one',label:'Living room'},{device_key:'two',label:'Other room'}],devices:{one:{mode:'auto'}}}},presentationSession:{mode:'singleScreen',phase:'inactive',generation:0},localPlayerMuted:false,localPlayerVolume:0.8,presentationAppliedComposition:'combined',hostPlaybackSession:{video,audio,playbackGeneration:3,readyCommitted:true,logicalPlayIntent:true},localShouldBePlaying:true};
+    const state={data:{revision:5,playback_generation:3,current_item:{id:'song',display_title:'Song'},cast:{phase:'idle',operation_id:0,owns_playback:false,renderers:[{device_key:'one',label:'Living room',preferences_persisted:false},{device_key:'two',label:'Other room',preferences_persisted:true}],devices:{one:{mode:'auto'}}}},presentationSession:{mode:'singleScreen',phase:'inactive',generation:0},localPlayerMuted:false,localPlayerVolume:0.8,presentationAppliedComposition:'combined',hostPlaybackSession:{video,audio,playbackGeneration:3,readyCommitted:true,logicalPlayIntent:true},localShouldBePlaying:true};
     const t=key=>dictionary[language][key]||key;
     const setTextContent=(node,text)=>{if(node)node.textContent=text;};
     const setAppMessage=text=>messages.push(text);
@@ -75,6 +75,7 @@ async function open(t) {
     ${section('function observedHostPlayerStatus(', 'function nextHostPlayerStatusSequence(')}
     ${section('async function handleLocalPlaybackEnded(', 'async function reorderPlaylist(')}
     ${section('async function activateLocalPresentation()', 'async function deactivateLocalPresentation()')}
+    ${section('function reconcileHostPlaybackSession(', 'function renderPlayer(')}
     ${section('function initializeCastHost()', 'initializeCastHost();')}
     initializeCastHost();BilikaraCastHost.sync();
     window.fixture={state,calls,messages,video,audio,parents:[video.parentNode,audio.parentNode],
@@ -106,6 +107,65 @@ test('cast rows retain identity, revision conflict refreshes, and pending button
   assert.equal(await page.locator('[data-cast-device="two"]').count(),0);
   assert.equal(await page.locator('[data-cast-compatibility-test]').isVisible(),false);
   assert.equal(await page.locator('[data-cast-compatibility-mount]').evaluate(node=>node.getBoundingClientRect().height),0);
+});
+
+test('temporary device preferences are labeled in every language without replacing rows or promising a save', { timeout: 60000 }, async t => {
+  const page=await open(t);
+  await page.locator('#cast-open').click();
+  await page.evaluate(()=>{window.transientRow=document.querySelector('[data-cast-device="one"]');});
+  for(const language of ['zh','ja','en']) {
+    await page.evaluate(language=>fixture.language(language),language);
+    assert.equal(await page.locator('[data-cast-device="one"] .cast-mode-label').textContent(),dict[language]['cast.deliveryThisRun']);
+    assert.equal(await page.locator('[data-cast-device="one"] [role="group"]').getAttribute('aria-label'),dict[language]['cast.deliveryThisRun']);
+    assert.equal(await page.locator('[data-cast-device="two"] .cast-mode-label').textContent(),dict[language]['cast.delivery']);
+    for(const code of ['cast_device_preferences_unavailable','cast_no_current_item']) {
+      assert.equal(await page.evaluate(code=>BilikaraCastHost.controller.errorText(code),code),dict[language][`cast.error.${code}`]);
+    }
+  }
+  await page.evaluate(()=>fixture.update({renderers:[{device_key:'one',label:'Renamed',preferences_persisted:true}]}));
+  assert.equal(await page.evaluate(()=>transientRow===document.querySelector('[data-cast-device="one"]')),true);
+  assert.equal(await page.locator('[data-cast-device="one"] .cast-mode-label').textContent(),dict.en['cast.delivery']);
+});
+
+test('program changes retain casting and local nodes, target the new generation, and restore only the latest program', { timeout: 60000 }, async t => {
+  const page=await open(t);
+  await page.evaluate(()=>fixture.update({phase:'active',owns_playback:true,operation_id:1,position:37,duration:120}));
+  await page.waitForFunction(()=>fixture.state.presentationSession.mode==='networkRenderer');
+  const nativeCalls=await page.evaluate(()=>fixture.calls.length);
+  for(const generation of [4,5]) {
+    const actual=await page.evaluate(generation=>{
+      fixture.state.data.current_item={id:`song-${generation}`,display_title:`Song ${generation}`};
+      fixture.state.data.playback_generation=generation;
+      fixture.state.data.playback_program={item_incarnation_id:generation,selected_audio_variant_id:'original'};
+      fixture.update({phase:'connecting',busy:true,position:0});
+      const result=reconcileHostPlaybackSession(fixture.state.data.current_item);
+      const retained=result.kind==='reused'&&result.video===fixture.video&&result.audio===fixture.audio;
+      fixture.update({phase:'active',busy:false,position:generation,duration:100});
+      return {retained,operation:fixture.state.data.cast.operation_id,mode:fixture.state.presentationSession.mode,
+        title:displayedPlayback.title,position:displayedPlayback.currentTimeSeconds,
+        held:fixture.video.paused&&fixture.audio.paused&&fixture.video.muted&&fixture.audio.muted};
+    },generation);
+    assert.deepEqual(actual,{retained:true,operation:1,mode:'networkRenderer',title:`Song ${generation}`,position:generation,held:true});
+  }
+  assert.equal(await page.evaluate(()=>fixture.calls.length),nativeCalls,'program changes do not disconnect or change presentation ownership');
+  assert.equal(await page.evaluate(()=>fixture.counts().seekCalls),0);
+  await page.evaluate(()=>{
+    const button=document.createElement('button');button.id='new-program-control';document.body.append(button);
+    button.addEventListener('click',()=>handlePresentationHostControl('toggle',button));
+  });
+  await page.locator('#new-program-control').click();
+  assert.deepEqual(await page.evaluate(()=>fixture.calls.at(-1).payload),{action:'toggle-pause',playback_generation:5});
+  await page.evaluate(()=>{fixture.update({busy:true});fixture.resolve({accepted:true,operation_id:1});});
+  assert.equal(await page.locator('#new-program-control').getAttribute('aria-busy'),'true');
+  await page.evaluate(()=>fixture.update({busy:false,is_paused:true}));
+  await page.waitForFunction(()=>!document.getElementById('new-program-control').hasAttribute('aria-busy'));
+  await page.evaluate(()=>fixture.update({phase:'idle',owns_playback:false,resume:{operation_id:2,item_id:'song',playback_generation:3,position:37,is_paused:false}}));
+  assert.equal(await page.evaluate(()=>fixture.state.pendingPlaybackRestore||null),null);
+  await page.evaluate(()=>fixture.update({resume:{operation_id:2,item_id:'song-5',playback_generation:5,position:12,is_paused:true}}));
+  assert.deepEqual(await page.evaluate(()=>fixture.state.pendingPlaybackRestore),{
+    itemId:'song-5',itemIncarnationId:5,variantId:'original',currentTime:12,wasPlaying:false,castOperationId:2,
+  });
+  assert.equal(await page.evaluate(()=>fixture.counts().seekCalls),0,'the old local program must not receive the new position');
 });
 
 test('cast connection waits for physical output release and disconnect waits for receiver ownership', { timeout: 60000 }, async t => {

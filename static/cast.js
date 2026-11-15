@@ -69,8 +69,9 @@
         const selected = cast.owns_playback && cast.selected === device.device_key;
         connect.disabled = blocked || selected;
         if (connect !== pending) text(connect, t(selected ? "cast.connected" : "cast.connect"));
-        text(row.querySelector("p"), t("cast.delivery"));
-        row.querySelector("[role=group]").setAttribute("aria-label", t("cast.delivery"));
+        const deliveryLabel = t(device.preferences_persisted === false ? "cast.deliveryThisRun" : "cast.delivery");
+        text(row.querySelector("p"), deliveryLabel);
+        row.querySelector("[role=group]").setAttribute("aria-label", deliveryLabel);
         for (const button of row.querySelectorAll("[data-cast-mode]")) {
           const mode = button.dataset.castMode;
           button.disabled = blocked;
