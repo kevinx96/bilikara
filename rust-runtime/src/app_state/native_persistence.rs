@@ -136,6 +136,9 @@ impl AppState {
             // prompt. Reloading a WebView/re-entering initialization is not a
             // new launch; reopening the checkpoint in a new process is.
             data.native_session_choice_pending = needs_session_choice;
+            let (storage, preferences) = cast::storage::Storage::load(directory);
+            data.cast = preferences;
+            self.cast_storage = Some(storage);
         }
         response
     }

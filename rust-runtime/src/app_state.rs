@@ -1,3 +1,4 @@
+pub mod cast;
 use crate::internet_remote::{
     InternetRemoteError, InternetRemotePeers, InternetRemoteValidation,
     PlaylistAddBindingSelection, project_remote_state,
@@ -1054,6 +1055,7 @@ impl AppStateResponse {
 
 #[derive(Debug, Clone, PartialEq)]
 struct AppStateData {
+    cast: cast::Preferences,
     automatic_volume: AutomaticVolumePreference,
     automatic_playback: automatic_volume::AutomaticPlayback,
     revision: u64,
@@ -1089,6 +1091,7 @@ pub struct AppState {
     analysis_signal: Option<automatic_volume::AnalysisSignal>,
     data: Option<AppStateData>,
     native_storage: Option<NativeHostStorage>,
+    cast_storage: Option<cast::storage::Storage>,
     next_cache_attempt_token: u64,
     next_item_incarnation_id: u64,
     next_artifact_set_id: u64,
@@ -1140,6 +1143,7 @@ impl Default for AppState {
             #[cfg(feature = "native-host")]
             analysis_signal: None,
             native_storage: None,
+            cast_storage: None,
             next_cache_attempt_token: 0,
             next_item_incarnation_id: 0,
             next_artifact_set_id: 0,
@@ -1944,6 +1948,7 @@ impl AppStateData {
         }
         validate_seed(&seed)?;
         let mut data = Self {
+            cast: Default::default(),
             automatic_volume: seed.automatic_volume,
             automatic_playback: automatic_volume::AutomaticPlayback {
                 manual_override: seed.current_item.is_some(),
@@ -4872,6 +4877,60 @@ impl AppState {
         {
             return execute_error_response(error);
         }
+        #[cfg(feature = "native-host")]
+        if self.native_session.cast.owns_playback
+            && matches!(
+                &request,
+                AppStateRequest::SetKeyShift { .. }
+                    | AppStateRequest::ApplyAvDelay {
+                        action: AvDelayCommand::SetEffective { .. }
+                            | AvDelayCommand::SetPersistent { .. }
+                            | AvDelayCommand::Adjust { .. }
+                            | AvDelayCommand::ResetLocal
+                            | AvDelayCommand::ToggleLock,
+                        ..
+                    }
+            )
+        {
+            return execute_error_response(rejected(
+                "cast_setting_unavailable",
+                "Pitch and AV delay cannot change during casting",
+            ));
+        }
+        #[cfg(feature = "native-host")]
+        if self.native_session.cast.owns_playback && !self.native_session.cast.worker_mutation {
+            let control = match &request {
+                AppStateRequest::IssuePlayerControl { control, .. } => Some(
+                    json!({"action":control.action,"playback_generation":control.playback_generation,"item_id":control.item_id,"delta_seconds":control.delta_seconds,"target_seconds":control.target_seconds}),
+                ),
+                AppStateRequest::AdvanceToNext {
+                    expected_playback_generation,
+                    ..
+                } => Some(
+                    json!({"action":"next","playback_generation":expected_playback_generation}),
+                ),
+                AppStateRequest::ApplyPlayerStatusObservation { .. } => {
+                    return execute_error_response(rejected(
+                        "cast_owns_playback",
+                        "Receiver owns playback",
+                    ));
+                }
+                AppStateRequest::SetAudioVariant { .. }
+                | AppStateRequest::RestartPlaybackProgram { .. } => {
+                    return execute_error_response(rejected(
+                        "cast_command_unsupported",
+                        "This cast command is not supported in R1",
+                    ));
+                }
+                _ => None,
+            };
+            if let Some(control) = control {
+                return match crate::native_host::cast_session::enqueue(self, &control) {
+                    Ok(()) => self.execute_inner(AppStateRequest::Snapshot { schema_version: 1 }),
+                    Err(e) => execute_error_response(rejected(&e.code, &e.message)),
+                };
+            }
+        }
         let terminal = match &request {
             AppStateRequest::ApplyCacheEvent {
                 item_id,
@@ -5277,6 +5336,7 @@ impl AppState {
                 self.notify_analysis(true);
                 let was_initialized = self.data.take().is_some();
                 self.native_storage = None;
+                self.cast_storage = None;
                 self.internet_remote_peers.clear();
                 self.player_controls.clear();
                 self.shutdown_artifact_lifetime();
