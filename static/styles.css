@@ -12326,3 +12326,21 @@ html .volume-adjust-popover::backdrop {
 }
 .bbdown-login-link[hidden] { display: none; }
 .bbdown-login-link[aria-busy="true"] { opacity: .55; cursor: wait; }
+/* Host DLNA lives inside the existing shared floating presentation surface. */
+.cast-entry { min-width: 0; padding: 20px; }
+#cast-panel:not([hidden]), #cast-devices { display: grid; gap: 12px; min-width: 0; }
+#cast-panel { margin-top: 12px; }
+#cast-panel[hidden], #cast-panel [hidden] { display: none !important; }
+#cast-compatibility-mount:not(:has(> :not([hidden]))) { display: none; }
+#cast-panel p { margin: 0; font-size: 13px; line-height: 1.5; }
+#cast-empty { color: var(--muted); text-align: center; padding-block: 8px; }
+.cast-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.cast-device { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+.cast-device h4 { margin: 0; align-self: center; overflow-wrap: anywhere; font-size: 16px; }
+.cast-device .cast-mode-label, .cast-modes { grid-column: 1 / -1; }
+.cast-modes { display: flex; min-width: 0; }
+:root .cast-modes > button { min-width: 0; flex: 1 1 0; padding-inline: 4px; }
+#cast-panel > input { box-sizing: border-box; width: 100%; min-width: 0; height: 44px; border-radius: 14px; font-size: 16px; }
+#cast-panel > button, .cast-entry > button, .cast-actions > button, .cast-device > button { min-height: 44px; border-radius: 14px; font-size: 16px; font-weight: 400; white-space: normal; }
+.cast-address-confirmation { display: flex; align-items: center; gap: 8px; font-size: 13px; line-height: 1.5; }
+.cast-address-confirmation input { appearance: auto; width: 18px; height: 18px; min-height: 0; padding: 0; flex: 0 0 18px; }

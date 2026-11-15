@@ -77,6 +77,7 @@ pub(crate) fn run() {
             presentation::show_presentation_display_identifiers,
             presentation::dismiss_presentation_display_identifiers,
             presentation::activate_local_presentation,
+            presentation::set_network_presentation,
             presentation::mark_presentation_host_ready,
             presentation::mark_presentation_controller_ready,
             presentation::send_presentation_command,

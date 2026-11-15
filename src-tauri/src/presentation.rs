@@ -154,6 +154,7 @@ pub enum PresentationMode {
     #[default]
     SingleScreen,
     LocalDualScreen,
+    NetworkRenderer,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -178,6 +179,7 @@ pub enum PlaybackAuthorityIdentity {
 pub enum MediaRendererOwner {
     #[default]
     Host,
+    NetworkRenderer,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -390,6 +392,40 @@ impl PresentationState {
         Ok(self.lock_runtime()?.session.clone())
     }
 
+    // Only the trusted Host mirrors AppState ownership here. A physical output
+    // must finish its existing recovery transaction before network ownership.
+    fn set_network_renderer(
+        &self,
+        active: bool,
+        expected_generation: u64,
+    ) -> Result<PresentationSession, String> {
+        let mut runtime = self.lock_runtime()?;
+        if runtime.session.generation != expected_generation
+            || runtime.native_lifecycle_owner.is_some()
+            || runtime.activation_attempt_generation.is_some()
+            || runtime.shutting_down
+        {
+            return Err("presentation transition is stale or busy".into());
+        }
+        if active {
+            if runtime.session.mode == PresentationMode::NetworkRenderer {
+                return Ok(runtime.session.clone());
+            }
+            if runtime.session.phase != PresentationPhase::Inactive {
+                return Err("physical presentation must finish recovery first".into());
+            }
+            let generation = next_sequence(runtime.session.generation, "presentation generation")?;
+            reset_runtime_to_inactive(&mut runtime, generation, None);
+            runtime.session.mode = PresentationMode::NetworkRenderer;
+            runtime.session.phase = PresentationPhase::Active;
+            runtime.session.media_renderer_owner = MediaRendererOwner::NetworkRenderer;
+        } else if runtime.session.mode == PresentationMode::NetworkRenderer {
+            let generation = next_sequence(runtime.session.generation, "presentation generation")?;
+            reset_runtime_to_inactive(&mut runtime, generation, None);
+        }
+        Ok(runtime.session.clone())
+    }
+
     fn begin_activation(
         &self,
         selected_display_id: String,
@@ -572,6 +608,9 @@ impl PresentationState {
         reason: PresentationRecoveryReason,
     ) -> Result<RecoveryClaim, String> {
         let mut runtime = self.lock_runtime()?;
+        if runtime.session.mode == PresentationMode::NetworkRenderer {
+            return Err("network playback must be released by AppState first".into());
+        }
         if let Some(expected_generation) = expected_generation
             && runtime.session.generation != expected_generation
         {
@@ -3223,6 +3262,21 @@ pub(crate) fn deactivate_local_presentation(
     begin_recovery_transaction(&app, &state, generation, PresentationRecoveryReason::User)
 }
 
+#[tauri::command]
+pub(crate) fn set_network_presentation(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    backend: tauri::State<'_, crate::backend_process::BackendProcess>,
+    state: tauri::State<'_, PresentationState>,
+    active: bool,
+    generation: u64,
+) -> Result<PresentationSession, String> {
+    authorize_window(&window, &backend, &["main"])?;
+    let session = state.set_network_renderer(active, generation)?;
+    emit_state(&app, &session)?;
+    Ok(session)
+}
+
 pub(crate) fn handle_controller_destroyed(app: &tauri::AppHandle) {
     let state = app.state::<PresentationState>();
     if state.is_shutting_down() {
@@ -3249,15 +3303,18 @@ pub(crate) fn handle_controller_destroyed(app: &tauri::AppHandle) {
         "controller_destroyed",
         format!("phase={:?}", session.phase),
     );
-    if matches!(
-        session.phase,
-        PresentationPhase::Activating | PresentationPhase::Active
-    ) && let Err(error) = begin_recovery_transaction(
-        app,
-        &state,
-        session.generation,
-        PresentationRecoveryReason::ControllerClosed,
-    ) {
+    if session.mode == PresentationMode::LocalDualScreen
+        && matches!(
+            session.phase,
+            PresentationPhase::Activating | PresentationPhase::Active
+        )
+        && let Err(error) = begin_recovery_transaction(
+            app,
+            &state,
+            session.generation,
+            PresentationRecoveryReason::ControllerClosed,
+        )
+    {
         eprintln!("Failed to recover after Controller closed: {error}");
     }
 }
@@ -3632,6 +3689,59 @@ mod tests {
         assert_eq!(session.media_renderer_owner, MediaRendererOwner::Host);
         assert!(session.host_ready);
         assert!(!session.controller_ready);
+    }
+
+    #[test]
+    fn network_renderer_is_generation_bound_and_excludes_physical_activation() {
+        let state = PresentationState::default();
+        let network = state.set_network_renderer(true, 0).unwrap();
+        assert_eq!(network.mode, PresentationMode::NetworkRenderer);
+        assert_eq!(
+            network.media_renderer_owner,
+            MediaRendererOwner::NetworkRenderer
+        );
+        assert_eq!(network.playback_authority, PlaybackAuthorityIdentity::Host);
+        assert!(network.selected_output_display_id.is_none());
+        assert!(
+            state
+                .begin_activation("screen".into(), "host".into(), host_placement(), false)
+                .is_err()
+        );
+        assert!(state.set_network_renderer(false, 0).is_err());
+        assert!(
+            state
+                .begin_recovery(Some(network.generation), PresentationRecoveryReason::User)
+                .is_err()
+        );
+        assert_eq!(state.snapshot().unwrap(), network);
+        let idle = state
+            .set_network_renderer(false, network.generation)
+            .unwrap();
+        assert_eq!(idle.mode, PresentationMode::SingleScreen);
+        assert_eq!(idle.media_renderer_owner, MediaRendererOwner::Host);
+        assert!(
+            state
+                .begin_activation("screen".into(), "host".into(), host_placement(), false)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn network_renderer_waits_for_physical_recovery_to_finish() {
+        let (state, generation) = active_state();
+        assert!(state.set_network_renderer(true, generation).is_err());
+        let recovery = state
+            .begin_recovery(Some(generation), PresentationRecoveryReason::User)
+            .unwrap();
+        assert!(
+            state
+                .set_network_renderer(true, recovery.session.generation)
+                .is_err()
+        );
+        let idle = state
+            .force_complete_recovery(recovery.session.generation)
+            .unwrap();
+        assert!(state.set_network_renderer(true, idle.generation).is_ok());
     }
 
     #[test]

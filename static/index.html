@@ -271,6 +271,23 @@
                 <span class="presentation-output-switch-thumb" aria-hidden="true"></span>
               </button>
             </div>
+            <div class="cast-entry">
+              <button type="button" id="cast-open" class="secondary" aria-expanded="false" aria-controls="cast-panel" data-i18n="cast.title">DLNA 投屏</button>
+              <section id="cast-panel" hidden aria-labelledby="cast-open">
+                <div class="cast-actions">
+                  <button type="button" id="cast-discover" class="secondary" data-cast-action data-label="cast.discover">查找设备</button>
+                  <button type="button" id="cast-disconnect" class="secondary" data-cast-action data-label="cast.disconnect">断开</button>
+                </div>
+                <p id="cast-status" role="status" aria-live="polite"></p>
+                <p id="cast-empty"></p>
+                <div id="cast-devices"></div>
+                <label for="cast-purek-url" data-i18n="cast.purek">纯 K 二维码链接</label>
+                <input type="url" id="cast-purek-url" autocomplete="off" spellcheck="false" data-i18n-placeholder="cast.purekPlaceholder" />
+                <label class="cast-address-confirmation"><input type="checkbox" id="cast-address-confirmed" /><span data-i18n="cast.addressConfirmation">确认二维码来自当前门店的房台</span></label>
+                <button type="button" id="cast-purek-connect" data-cast-action data-label="cast.purekConnect">已完成微信授权，连接</button>
+                <div id="cast-compatibility-mount" data-cast-compatibility-mount><button type="button" id="cast-compatibility-test" data-cast-compatibility-test hidden data-i18n="cast.compatibility">兼容性测试</button></div>
+              </section>
+            </div>
             <div class="presentation-target-section">
               <div class="presentation-target-heading">
                 <div>
@@ -1954,6 +1971,7 @@
   <script src="/desktop-platform.js" defer></script>
   <script src="/android-platform.js" defer></script>
   <script src="/host-updates.js" defer></script>
+  <script src="/cast.js" defer></script>
   <script src="/app.js" defer></script>
   <script src="/android-export.js" defer></script>
   <script src="/android-playback.js" defer></script>
