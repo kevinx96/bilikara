@@ -19,10 +19,10 @@
         <fieldset data-answer="video"><legend data-test-text="video"></legend></fieldset>
         <fieldset data-answer="audio"><legend data-test-text="audio"></legend></fieldset>
         <fieldset data-answer="synchronized"><legend data-test-text="sync"></legend></fieldset>
-        <button type="submit" data-test-submit data-test-text="submit"></button>
+        <button type="submit" class="next-button" data-test-submit data-test-text="submit"></button>
       </form>
       <p data-test-result></p><pre data-test-summary hidden></pre>
-      <footer><button type="button" class="secondary" data-test-cancel data-test-text="cancel"></button><button type="button" data-test-start data-test-text="start"></button><button type="button" class="secondary" data-test-copy data-test-text="copy"></button><button type="button" data-test-save data-test-text="save"></button></footer>`;
+      <footer><button type="button" class="toolbar-button" data-test-cancel data-test-text="cancel"></button><button type="button" class="toolbar-button" data-test-copy data-test-text="copy"></button><button type="button" class="next-button" data-test-start data-test-text="start"></button><button type="button" class="next-button" data-test-save data-test-text="save"></button></footer>`;
     document.body.append(dialog);
     const el = selector => dialog.querySelector(selector);
     const buttons = new Set();

@@ -10,10 +10,10 @@ test('compatibility translations retain real Chinese and Japanese text', () => {
     if (key.startsWith('cast.test.')) { assert.doesNotMatch(value, /\?\?|\uFFFD/, key); assert.match(value, /[\u3040-\u9fff]/, key); }
   }
 });
-async function open(t, width = 700, language = 'zh') {
+async function open(t, width = 700, language = 'zh', hasTouch = true) {
   const browser = await chromium.launch({ headless: true, ...(process.platform === 'win32' ? { channel: 'msedge' } : {}) });
   t.after(() => browser.close());
-  const page = await browser.newPage({ viewport: { width, height: 800 }, hasTouch: true });
+  const page = await browser.newPage({ viewport: { width, height: 800 }, hasTouch });
   const errors = []; page.on('pageerror', e => errors.push(e.message)); t.after(() => assert.deepEqual(errors, []));
   await page.setContent(`<style>${read('styles.css')}\n${read('ui-surfaces.css')}</style><button data-cast-compatibility-test hidden>Test</button><input id="cast-purek-url"><input id="cast-address-confirmed" type="checkbox"><video id="retained-video"></video>`);
   await page.addScriptTag({ content: read('cast-self-test.js') });
@@ -88,6 +88,56 @@ test('server question timeout advances without a fabricated answer and cancel st
   await page.evaluate(() => { fixture.update({ running: false, question: false }); fixture.resolve('cancel'); });
   await page.waitForFunction(() => !document.querySelector('[data-test-cancel]').hasAttribute('aria-busy'));
   assert.equal(await page.locator('[data-test-questions]').isVisible(), false);
+});
+
+test('self-test reuses shared controls in all themes and interaction states', { timeout: 90000 }, async t => {
+  const page = await open(t, 1100, 'en', false);
+  await page.evaluate(() => {
+    fixture.update({ generation: 1, report_available: true });
+    const reference = document.createElement('div');
+    reference.className = 'source-action-row';
+    reference.style.cssText = 'position:fixed;left:800px;top:20px;display:grid;width:250px;gap:12px';
+    reference.innerHTML = '<button class="toolbar-button" id="reference-secondary">Secondary</button><button class="next-button" id="reference-primary">Primary</button><select class="confirm-source" id="reference-select"><option>Target</option></select>';
+    document.querySelector('#cast-self-test').append(reference);
+  });
+  await page.waitForFunction(() => !document.querySelector('[data-test-copy]').disabled);
+  const metrics = node => {
+    const css = getComputedStyle(node);
+    return Object.fromEntries(['backgroundColor', 'backgroundImage', 'color', 'borderTopWidth', 'borderTopStyle', 'borderTopColor', 'height', 'fontSize', 'fontWeight', 'borderRadius', 'outlineColor', 'outlineWidth', 'boxShadow', 'opacity'].map(key => [key, css[key]]));
+  };
+  async function observe(selector, interaction) {
+    const control = page.locator(selector);
+    await page.mouse.move(1090, 790);
+    await page.evaluate(() => document.activeElement?.blur());
+    await control.evaluate((node, disabled) => { node.disabled = disabled; }, interaction === 'disabled');
+    if (interaction === 'hover') await control.hover();
+    if (interaction === 'focus') await control.focus();
+    if (interaction === 'pressed') { await control.hover(); await page.mouse.down(); }
+    await control.evaluate(async node => {
+      getComputedStyle(node).backgroundColor;
+      await Promise.all(node.getAnimations().map(animation => animation.finished.catch(() => {})));
+    });
+    const result = await control.evaluate(metrics);
+    if (interaction === 'pressed') { await page.mouse.move(1090, 790); await page.mouse.up(); }
+    await control.evaluate(node => { node.disabled = false; });
+    return result;
+  }
+  const backgrounds = [];
+  for (const theme of ['light', 'dark', 'blue']) {
+    await page.evaluate(theme => { document.documentElement.dataset.theme = theme; }, theme);
+    for (const [target, reference] of [['[data-test-copy]', '#reference-secondary'], ['[data-test-start]', '#reference-primary'], ['[data-test-save]', '#reference-primary'], ['[data-test-device]', '#reference-select']]) {
+      for (const interaction of ['normal', 'hover', 'focus', 'pressed', 'disabled']) {
+        assert.deepEqual(await observe(target, interaction), await observe(reference, interaction), `${theme}: ${target} ${interaction}`);
+      }
+    }
+    backgrounds.push((await observe('[data-test-copy]', 'normal')).backgroundColor);
+    const close = await page.locator('[data-test-close]').evaluate(node => {
+      const rect = node.getBoundingClientRect(), icon = node.querySelector('svg').getBoundingClientRect();
+      return { width: rect.width, height: rect.height, contained: icon.left >= rect.left && icon.right <= rect.right && icon.top >= rect.top && icon.bottom <= rect.bottom };
+    });
+    assert.deepEqual(close, { width: 32, height: 32, contained: true });
+  }
+  assert.equal(new Set(backgrounds).size, 3, 'secondary surfaces follow the selected theme');
 });
 
 for (const width of [320, 360, 700]) for (const language of ['zh', 'en', 'ja']) {
