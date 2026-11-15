@@ -1,5 +1,9 @@
 use super::*;
 
+#[path = "tests/inspect.rs"]
+mod inspect;
+pub(super) use inspect::inspect_ts;
+
 #[test]
 fn packaged_sample_is_pinned_and_corruption_is_rejected() {
     let bytes = include_bytes!("../../../../../resources/cast-samples/sample-b.ts");
@@ -70,7 +74,7 @@ pub(crate) async fn run(
         timing,
     )
     .await;
-    trace.finish(cancel.is_cancelled());
+    complete(1, &trace, cancel.is_cancelled());
     if let Some(next) = next {
         let previous = with_app(|app| Ok(app.native().cast.operation)).unwrap();
         worker::handoff(&context, previous, next.renderer, next.room, &cancel).await;
@@ -109,6 +113,10 @@ pub(crate) async fn question() -> Value {
 
 pub(crate) fn mux_count() -> usize {
     samples::MUX_COUNT.load(Ordering::Relaxed)
+}
+
+pub(crate) async fn file_sample_is_vbr(context: Arc<HostContext>) {
+    samples::assert_file_sample_is_vbr(context).await;
 }
 
 pub(crate) fn recorded_end_us() -> i64 {

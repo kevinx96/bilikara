@@ -68,6 +68,13 @@ fn scenario(name: &str) -> Value {
         std::fs::write(root.join("sample-b.ts"), b"corrupt").unwrap();
         Arc::get_mut(&mut host.context).unwrap().sample_root = Some(root);
     }
+    if name == "no_sample_root" {
+        Arc::get_mut(&mut host.context).unwrap().sample_root = None;
+    }
+    if name == "missing_b" {
+        let root = host.context.directory.join("missing-samples");
+        Arc::get_mut(&mut host.context).unwrap().sample_root = Some(root);
+    }
     if matches!(name, "bad_a" | "bad_audio" | "no_cache") {
         let snap = with_app(|app| app.native_core_snapshot()).unwrap();
         for item in snap.current_item.iter().chain(&snap.playlist) {
@@ -97,6 +104,7 @@ fn scenario(name: &str) -> Value {
         state.no_pull = name == "no_pull";
         state.clients = if name == "concurrent" { 5 } else { 1 };
         state.different_peer = name == "different_peer";
+        state.synchronize_pulls = matches!(name, "different_peer" | "concurrent");
         state.reject_files = name == "live_only";
     }
     let renderer = if name == "empty" {
@@ -115,6 +123,7 @@ fn scenario(name: &str) -> Value {
     .then(|| receiver.qr());
     let cancel = CancellationToken::new();
     let (send, receive) = tokio::sync::mpsc::channel(2);
+    let mut handoff_report = None;
     let report = runtime().block_on(async {
         let run = self_test::tests::run(
             host.context.clone(),
@@ -160,6 +169,15 @@ fn scenario(name: &str) -> Value {
                                 tokio::task::yield_now().await;
                             }
                         }).await.unwrap();
+                        let state = host.snapshot();
+                        assert_eq!(state["cast"]["self_test"]["running"], false);
+                        assert_eq!(state["cast"]["self_test"]["report_available"], true);
+                        let report = self_test::route(&host.context, &host.identity, &Method::GET, "/api/cast/self-test/report", &json!({})).unwrap();
+                        let metadata = &report["diagnostics"]["cast_self_test"]["metadata"];
+                        assert!(metadata["finished_at"].is_string(), "self-test must finish while handed-off playback is still active");
+                        assert_eq!(metadata["cancelled"], false);
+                        assert!(report["text"].as_str().is_some_and(|text| !text.is_empty()));
+                        handoff_report = Some(report["diagnostics"].clone());
                         assert_eq!(receiver.state.lock().unwrap().releases, 0);
                         assert_eq!(receiver.state.lock().unwrap().actions.iter().filter(|a| a.as_str()=="SetDeviceAuthorization").count(), 1);
                         receiver.release_hold.store(true, Ordering::Release);
@@ -231,6 +249,12 @@ fn scenario(name: &str) -> Value {
     });
     let value = report.diagnostics().clone();
     let result = &value["cast_self_test"];
+    if let Some(handoff_report) = handoff_report {
+        assert_eq!(
+            value, handoff_report,
+            "later playback cancellation must not alter the finished self-test report"
+        );
+    }
     if name == "bad_audio" {
         assert_eq!(
             self_test::tests::mux_count(),
@@ -279,7 +303,7 @@ fn scenario(name: &str) -> Value {
             "{name}: A must actually synthesize"
         );
     }
-    if name != "bad_b" {
+    if !matches!(name, "bad_b" | "no_sample_root" | "missing_b") {
         assert!(
             result["preflight"]["sample_b"].is_object(),
             "{name}: B must actually prepare"
@@ -463,12 +487,24 @@ fn self_test_control_failures_are_independent_and_reports_complete() {
 }
 #[test]
 fn self_test_missing_bad_samples_and_unanswered_continue() {
-    for name in ["bad_a", "bad_audio", "no_cache", "bad_b", "unanswered"] {
+    for name in [
+        "bad_a",
+        "bad_audio",
+        "no_cache",
+        "bad_b",
+        "no_sample_root",
+        "missing_b",
+        "unanswered",
+    ] {
         let report = scenario(name);
         let cells = report["cast_self_test"]["cells"].as_array().unwrap();
         if name == "bad_b" {
             assert_eq!(cells[1]["skip_reason"], "sample_integrity_failed");
             assert_eq!(cells[3]["skip_reason"], "sample_integrity_failed");
+        }
+        if matches!(name, "no_sample_root" | "missing_b") {
+            assert_eq!(cells[1]["skip_reason"], "sample_unavailable");
+            assert_eq!(cells[3]["skip_reason"], "sample_unavailable");
         }
         if matches!(name, "bad_a" | "bad_audio" | "no_cache") {
             assert!(!cells[0]["skip_reason"].is_null());
@@ -532,4 +568,13 @@ fn self_test_handoff_keeps_registration_until_normal_session_ends() {
 #[test]
 fn self_test_long_original_is_recorded_once_with_twenty_second_bound() {
     scenario("long_a");
+}
+
+#[test]
+fn self_test_file_a_is_vbr_and_live_a_retains_cbr_without_another_merge() {
+    let _serial = GLOBAL_APP_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let host = Host::new();
+    runtime().block_on(self_test::tests::file_sample_is_vbr(host.context.clone()));
 }

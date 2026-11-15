@@ -15,14 +15,14 @@ pub(super) fn read_uniform(context: &HostContext) -> Result<Vec<u8>, SkipReason>
     let path = context
         .sample_root
         .as_ref()
-        .ok_or(SkipReason::SampleIntegrityFailed)?
+        .ok_or(SkipReason::SampleUnavailable)?
         .join("sample-b.ts");
-    let file = std::fs::File::open(path).map_err(|_| SkipReason::SampleIntegrityFailed)?;
+    let file = std::fs::File::open(path).map_err(|_| SkipReason::SampleUnavailable)?;
     use std::io::Read;
     let mut bytes = Vec::new();
     file.take(SAMPLE_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
-        .map_err(|_| SkipReason::SampleIntegrityFailed)?;
+        .map_err(|_| SkipReason::SampleUnavailable)?;
     if !verified(&bytes) {
         return Err(SkipReason::SampleIntegrityFailed);
     }
@@ -54,6 +54,87 @@ pub(super) static RECORDED_END_US: std::sync::atomic::AtomicI64 =
 const PREPARE_LIMIT: Duration = Duration::from_secs(20);
 const SAMPLE_DURATION_US: i64 = 20_000_000;
 const MAX_SAMPLE_BYTES: usize = 128 * 1024 * 1024;
+
+// File delivery, like production mode F, is VBR. Strip only MPEG-TS null PID
+// padding from the recorded CBR stream; retain PSI, PCR, PES and continuity
+// counters verbatim. Live playback keeps the original CBR chunks. This is a
+// bounded packet filter, not another mux/encode or a change to T3's contract.
+fn file_ts(bytes: &[u8]) -> Result<Vec<u8>, SkipReason> {
+    if bytes.len() > MAX_SAMPLE_BYTES || !bytes.len().is_multiple_of(188) {
+        return Err(SkipReason::SamplePreparationFailed);
+    }
+    let mut file = Vec::with_capacity(bytes.len());
+    for packet in bytes.chunks_exact(188) {
+        if packet[0] != 0x47 {
+            return Err(SkipReason::SamplePreparationFailed);
+        }
+        if packet[1] & 0x1f != 0x1f || packet[2] != 0xff {
+            file.extend_from_slice(packet);
+        }
+    }
+    if file.is_empty() {
+        return Err(SkipReason::SamplePreparationFailed);
+    }
+    Ok(file)
+}
+
+#[cfg(test)]
+pub(super) async fn assert_file_sample_is_vbr(context: Arc<HostContext>) {
+    MUX_COUNT.store(0, Ordering::Relaxed);
+    let cancel = CancellationToken::new();
+    let session = Arc::new(CastSession::new(&context.cache_root, media::MAX_BYTES).unwrap());
+    let sample = prepare(context, session.clone(), None, &cancel)
+        .await
+        .unwrap();
+    let Source::Cached { transport, .. } = &sample.source else {
+        panic!("cached A")
+    };
+    let source = transport.bytes.clone();
+    let nulls = |bytes: &[u8]| {
+        bytes
+            .chunks_exact(188)
+            .filter(|p| ((u16::from(p[1]) & 31) << 8 | u16::from(p[2])) == 8191)
+            .count()
+    };
+    assert!(nulls(&source) > 0, "live recording must remain CBR");
+    let file = remux(session, sample.clone(), CastFormat::Ts, &cancel)
+        .await
+        .unwrap();
+    let bytes = std::fs::read(file.path()).unwrap();
+    assert_eq!(nulls(&bytes), 0, "file A must have no CBR padding");
+    assert_eq!(source.len() - bytes.len(), nulls(&source) * 188);
+    let mut original = source
+        .chunks_exact(188)
+        .filter(|p| ((u16::from(p[1]) & 31) << 8 | u16::from(p[2])) != 8191);
+    for packet in bytes.chunks_exact(188) {
+        assert_eq!(
+            Some(packet),
+            original.next(),
+            "PSI/PCR/PES and continuity counters remain intact"
+        );
+    }
+    assert!(original.next().is_none());
+    super::tests::inspect_ts(file.path());
+    let live = live(sample.clone(), &cancel).await.unwrap();
+    live.stop().await;
+    let Source::Cached { transport, .. } = &sample.source else {
+        unreachable!()
+    };
+    assert_eq!(transport.bytes, source);
+    assert_eq!(MUX_COUNT.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        file_ts(&[0; 187]).unwrap_err(),
+        SkipReason::SamplePreparationFailed
+    );
+    assert_eq!(
+        file_ts(&[0; 188]).unwrap_err(),
+        SkipReason::SamplePreparationFailed
+    );
+    assert_eq!(
+        file_ts(&[]).unwrap_err(),
+        SkipReason::SamplePreparationFailed
+    );
+}
 
 // T3 supplies authenticated packet boundaries and decode-time watermarks. Keep
 // these once; neither file nor live playback reads/encodes the original again.
@@ -279,13 +360,16 @@ pub(super) async fn remux(
                     )
                     .map_err(|_| SkipReason::SamplePreparationFailed)
             }
-            CastFormat::Ts => session
-                .retain_ts(
-                    &transport.bytes,
-                    &format!("{:x}", Sha256::digest(&transport.bytes)),
-                    sample.summary.clone(),
-                )
-                .map_err(|_| SkipReason::SamplePreparationFailed),
+            CastFormat::Ts => {
+                let bytes = file_ts(&transport.bytes)?;
+                session
+                    .retain_ts(
+                        &bytes,
+                        &format!("{:x}", Sha256::digest(&bytes)),
+                        sample.summary.clone(),
+                    )
+                    .map_err(|_| SkipReason::SamplePreparationFailed)
+            }
         },
     });
     tokio::select! {biased;

@@ -348,9 +348,9 @@ fn run(
                 }
             });
             let next = runner::run(context.clone(),generation,request,trace.clone(),cancel.clone(),answers,runner::Timing::default()).await;
-            // Finish precedes internal watcher cancellation, so normal completion stays normal.
-            trace.finish(cancel.is_cancelled());
-            update(generation, |s| { s.question=false; s.answers=None; s.handoff=None; });
+            // Publish the completed self-test before the ordinary cast can run
+            // indefinitely. Its trace/elapsed time must not follow that session.
+            complete(generation, &trace, cancel.is_cancelled());
             if let Some(next) = next {
                 handed_off = true;
                 worker::handoff(&context, operation, next.renderer, next.room, &cancel).await;
@@ -369,6 +369,18 @@ fn run(
     if !handed_off {
         worker::restore(operation, None);
     }
+}
+
+fn complete(generation: u64, trace: &SessionTrace, cancelled: bool) {
+    trace.finish(cancelled);
+    update(generation, |s| {
+        // Keep admission closed until worker::handoff atomically transfers
+        // playback ownership (or the ordinary completion path restores it).
+        s.question = false;
+        s.question_deadline_ms = None;
+        s.answers = None;
+        s.handoff = None;
+    });
 }
 
 fn learn(generation: u64, renderer: &Renderer, trace: &SessionTrace) {

@@ -120,6 +120,7 @@ choices!(Failure {
 choices!(SkipReason {
     NoCachedSong,
     SamplePreparationFailed,
+    SampleUnavailable,
     SampleIntegrityFailed,
     NoReceiver,
     Cancelled,

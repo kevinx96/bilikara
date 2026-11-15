@@ -13,6 +13,7 @@ struct ReceiverState {
     no_pull: bool,
     clients: usize,
     different_peer: bool,
+    synchronize_pulls: bool,
     reject_files: bool,
     file_uri: bool,
     state: &'static str,
@@ -56,6 +57,7 @@ impl Receiver {
             no_pull: false,
             clients: 1,
             different_peer: false,
+            synchronize_pulls: false,
             reject_files: false,
             file_uri: false,
             state: "PLAYING",
@@ -171,29 +173,37 @@ impl Receiver {
                         "Play" => {
                             state.state = "PLAYING";
                             if let Some(uri) = state.uri.clone().filter(|_| !state.no_pull) {
-                                let barrier = Arc::new(std::sync::Barrier::new(state.clients));
-                                let (ready_send, ready_receive) = std::sync::mpsc::channel();
+                                let client = reqwest::blocking::Client::builder()
+                                    .no_proxy()
+                                    .local_address(state.different_peer.then_some(
+                                        std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 2)),
+                                    ))
+                                    .timeout(Duration::from_secs(30))
+                                    .build()
+                                    .unwrap();
+                                let mut release_reads = Vec::new();
                                 for _ in 0..state.clients {
                                     let uri = uri.clone();
-                                    let barrier = barrier.clone();
-                                    let different_peer = state.different_peer;
+                                    let client = client.clone();
                                     let shared = shared.clone();
-                                    let ready = ready_send.clone();
+                                    let synchronize = state.synchronize_pulls;
+                                    let (ready, received) = std::sync::mpsc::channel();
+                                    let (release, read) = std::sync::mpsc::channel();
                                     pulls.push(thread::spawn(move || {
-                                        let client = reqwest::blocking::Client::builder()
-                                            .local_address(different_peer.then_some(
-                                                std::net::IpAddr::V4(std::net::Ipv4Addr::new(
-                                                    127, 0, 0, 2,
-                                                )),
-                                            ))
-                                            .timeout(Duration::from_secs(2))
-                                            .build()
-                                            .unwrap();
                                         let response = client.get(uri).send();
-                                        let _ = ready.send(());
-                                        // Eviction can close a connection before its headers.
-                                        // Every participant must still release the rendezvous.
-                                        barrier.wait();
+                                        if synchronize {
+                                            // A successful response header is the endpoint's
+                                            // acknowledgement of this GET, not merely an attempt.
+                                            let _ = ready.send(
+                                                response
+                                                    .as_ref()
+                                                    .map(|r| r.status())
+                                                    .map_err(ToString::to_string),
+                                            );
+                                            if read.recv_timeout(Duration::from_secs(30)).is_err() {
+                                                return;
+                                            }
+                                        }
                                         if let Ok(mut response) = response {
                                             if !response.status().is_success() {
                                                 return;
@@ -207,13 +217,19 @@ impl Receiver {
                                             }
                                         }
                                     }));
-                                }
-                                // Start the test playback clock only once every
-                                // concurrent GET has reached headers or failed.
-                                if state.clients > 1 {
-                                    for _ in 0..state.clients {
-                                        ready_receive.recv_timeout(Duration::from_secs(3)).unwrap();
+                                    if synchronize {
+                                        let status = received
+                                            .recv_timeout(Duration::from_secs(30))
+                                            .expect("endpoint must acknowledge each GET")
+                                            .expect("loopback GET must reach the endpoint");
+                                        assert!(status.is_success(), "loopback GET: {status}");
+                                        // Keep earlier readers open until the Nth GET is admitted.
+                                        // In particular the fifth GET must evict an active reader.
+                                        release_reads.push(release);
                                     }
+                                }
+                                for release in release_reads {
+                                    let _ = release.send(());
                                 }
                             }
                             String::new()
