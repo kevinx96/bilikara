@@ -710,7 +710,6 @@ mod tests {
         let response = state.execute(AppStateRequest::Initialize {
             schema_version: 1,
             state: Box::new(AppStateSeed {
-                cast: Default::default(),
                 automatic_volume: Default::default(),
                 session_user_ids: std::collections::HashMap::new(),
                 requester_user_ids: std::collections::HashMap::new(),

@@ -1065,6 +1065,22 @@ the first upgrade, not subsequent edits. A new schema-3 installation has no old
 manifest backup. Migration preserves the loaded configuration; it cannot recover
 preferences already discarded by an earlier build.
 Copy the whole data directory, including `host-records/`, when backing up or moving data.
+
+Cast device preferences are Rust AppState data stored separately in
+`cast-devices.json` under the selected native data root (`runtime/data/` on
+Windows; the same application data root on macOS and Android). They never add
+fields to `host-state.json`, so using casting does not prevent schema-3 rollback.
+The bounded, validated file is committed by a same-directory atomic rename;
+`cast-devices.v1.backup.json` preserves the first valid file before replacement.
+An unreadable or corrupt file is preserved, preferences default for that run,
+and the Host still starts; preference writes remain blocked until the preserved
+file is repaired or moved aside with the Host closed. Device keys derive only
+from normalized UDNs; addresses, credentials and friendly names are not saved.
+Devices without a UDN can select modes for the current Host run, but have no
+durable preferences. Include this file when manually backing up the complete
+data directory. The import tool does not transfer cast preferences; devices can
+be discovered and learned again after import.
+
 The queue retains its admission limit; historical collections no longer share
 that queue limit. Resetting runtime data preserves played archives and resets
 all users' Gacha preferences to defaults.

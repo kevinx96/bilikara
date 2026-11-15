@@ -154,6 +154,7 @@ pub(super) async fn live(
     context: Arc<HostContext>,
     item: PlaylistItem,
     position: f64,
+    cancel: &CancellationToken,
 ) -> Result<Live, ApiError> {
     // Fail before publishing a URI when the selected input or companion is absent.
     let stream = Arc::new(
@@ -207,8 +208,25 @@ pub(super) async fn live(
         let _ = task.await;
         return Err(e);
     }
-    Ok(Live {
+    let mut live = Live {
         stream,
         task: Some(task),
-    })
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while live.stream.snapshot().start.is_none() {
+        if cancel.is_cancelled() || tokio::time::Instant::now() >= deadline {
+            live.stop().await;
+            return Err(ApiError::new(
+                409,
+                "cast_prepare_failed",
+                "Live start unavailable",
+            ));
+        }
+        if let Err(error) = live.check().await {
+            live.stop().await;
+            return Err(error);
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    Ok(live)
 }

@@ -638,7 +638,8 @@ impl SessionTrace {
             }
         }
     }
-    fn lagged(&self, n: u64) {
+    /// Record events lost by an external, generation-aware HTTP receiver.
+    pub fn lagged(&self, n: u64) {
         let mut s = self.lock();
         s.delivery_lagged_stages = s.delivery_lagged_stages.saturating_add(n);
     }

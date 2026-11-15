@@ -297,8 +297,6 @@ impl Default for PlayerSettingsSeed {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct AppStateSeed {
-    #[serde(default, skip_serializing_if = "cast::Preferences::is_empty")]
-    pub cast: cast::Preferences,
     #[serde(default, deserialize_with = "automatic_volume::read_preference")]
     pub automatic_volume: AutomaticVolumePreference,
     #[serde(default = "default_playback_mode")]
@@ -973,8 +971,6 @@ pub struct AppSnapshot {
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct PersistenceSnapshot {
-    #[serde(skip_serializing_if = "cast::Preferences::is_empty")]
-    cast: cast::Preferences,
     automatic_volume: AutomaticVolumePreference,
     playback_mode: String,
     player_settings: PlayerSettingsSeed,
@@ -1095,6 +1091,7 @@ pub struct AppState {
     analysis_signal: Option<automatic_volume::AnalysisSignal>,
     data: Option<AppStateData>,
     native_storage: Option<NativeHostStorage>,
+    cast_storage: Option<cast::storage::Storage>,
     next_cache_attempt_token: u64,
     next_item_incarnation_id: u64,
     next_artifact_set_id: u64,
@@ -1146,6 +1143,7 @@ impl Default for AppState {
             #[cfg(feature = "native-host")]
             analysis_signal: None,
             native_storage: None,
+            cast_storage: None,
             next_cache_attempt_token: 0,
             next_item_incarnation_id: 0,
             next_artifact_set_id: 0,
@@ -1851,7 +1849,6 @@ fn validate_backup(backup: &BackupSeed) -> Result<(), ExecuteError> {
 }
 
 fn validate_seed(seed: &AppStateSeed) -> Result<(), ExecuteError> {
-    seed.cast.validate()?;
     session_users::validate_user_ids(seed)?;
     if seed.remote_identities.iter().any(|(digest, name)| {
         digest.len() != 64
@@ -1951,7 +1948,7 @@ impl AppStateData {
         }
         validate_seed(&seed)?;
         let mut data = Self {
-            cast: seed.cast,
+            cast: Default::default(),
             automatic_volume: seed.automatic_volume,
             automatic_playback: automatic_volume::AutomaticPlayback {
                 manual_override: seed.current_item.is_some(),
@@ -2154,7 +2151,6 @@ impl AppStateData {
 
     fn persistence_snapshot(&self) -> PersistenceSnapshot {
         PersistenceSnapshot {
-            cast: self.cast.clone(),
             automatic_volume: self.automatic_volume.clone(),
             playback_mode: self.playback_mode.clone(),
             player_settings: self.player_settings.clone(),
@@ -5340,6 +5336,7 @@ impl AppState {
                 self.notify_analysis(true);
                 let was_initialized = self.data.take().is_some();
                 self.native_storage = None;
+                self.cast_storage = None;
                 self.internet_remote_peers.clear();
                 self.player_controls.clear();
                 self.shutdown_artifact_lifetime();
@@ -6060,7 +6057,6 @@ mod tests {
 
     fn seed() -> AppStateSeed {
         AppStateSeed {
-            cast: Default::default(),
             automatic_volume: Default::default(),
             session_user_ids: std::collections::HashMap::new(),
             requester_user_ids: std::collections::HashMap::new(),
