@@ -13,6 +13,7 @@ use std::{
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+mod identification;
 mod review;
 
 fn trace(capacity: usize) -> SessionTrace {

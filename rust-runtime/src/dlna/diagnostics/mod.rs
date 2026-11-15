@@ -4,6 +4,7 @@
 //! Stage priority and bounded connection/output traces adapted from
 //! bilikara-next 7750dca, native_host/purek/trace.rs (MIT), including 0870f2b.
 //! Copyright (c) 2026 bilikara contributors. See NOTICE.md and README.md.
+mod identification;
 mod model;
 mod output;
 mod privacy;
@@ -67,6 +68,7 @@ struct Device {
     model_name: Option<Metadata>,
     model_description: Option<Metadata>,
     friendly_name: Option<Metadata>,
+    identification: identification::Identification,
     address_class: Option<AddressClass>,
     local_address_class: Option<AddressClass>,
     same_subnet_24: Option<bool>,
@@ -292,11 +294,16 @@ impl SessionTrace {
             model_name: None,
             model_description: None,
             friendly_name: None,
+            identification: identification::Identification::default(),
             address_class: None,
             local_address_class: None,
             same_subnet_24: None,
         };
+        let server_changed = previous
+            .as_ref()
+            .is_none_or(|old| old.server.digest != d.server.digest);
         if let Some(old) = previous {
+            d.identification = old.identification;
             d.sources = old.sources;
             d.udn_hash = d.udn_hash.or(old.udn_hash);
             d.route = d.route.or(old.route);
@@ -309,6 +316,9 @@ impl SessionTrace {
             d.local_address_class = old.local_address_class;
             d.same_subnet_24 = old.same_subnet_24;
         }
+        if server_changed {
+            d.identification.server(&context.server);
+        }
         if !d.sources.contains(&d.source) {
             d.sources.push(d.source);
         }
@@ -320,6 +330,7 @@ impl SessionTrace {
         let key = self.device(&mut s, &renderer.context);
         if let Some(d) = s.devices.get_mut(&key) {
             let r = &renderer.description;
+            d.identification.description(r);
             d.vendor_class = Some(r.vendor_class.as_str());
             d.manufacturer = Some(self.privacy.metadata(&r.manufacturer, 256));
             d.model_name = Some(self.privacy.metadata(&r.model_name, 256));
@@ -507,6 +518,28 @@ impl SessionTrace {
         e.stage = phase.phase.as_str();
         e.code = phase.error_code.map(|c| c.as_str());
         let f = &phase.facts;
+        if let Some(d) = e.device_key.as_ref().and_then(|key| s.devices.get_mut(key))
+            && let Some(summary) = &f.services
+        {
+            let av = summary
+                .entries
+                .iter()
+                .any(|e| e.kind == purek::ServiceKind::AvTransport);
+            let rc = summary
+                .entries
+                .iter()
+                .any(|e| e.kind == purek::ServiceKind::RenderingControl);
+            d.identification.rules.has_avtransport = if av || !summary.truncated {
+                Some(av)
+            } else {
+                None
+            };
+            d.identification.rules.has_rendering_control = if rc || !summary.truncated {
+                Some(rc)
+            } else {
+                None
+            };
+        }
         let services = f.services.as_ref().map(|summary| json!({"advertised":summary.advertised,
             "truncated":summary.truncated || summary.entries.len() > 32,
             "entries":summary.entries.iter().take(32).map(|entry| {
@@ -632,7 +665,9 @@ impl SessionTrace {
         av_transport: bool,
         rendering_control: bool,
     ) {
-        if let Some(o) = self.lock().outputs.iter_mut().find(|o| o.id == output) {
+        let mut s = self.lock();
+        let mut facts = None;
+        if let Some(o) = s.outputs.iter_mut().find(|o| o.id == output) {
             o.protocol_info_state = state;
             o.sink_mime_classes.clear();
             for sink in sinks.iter().take(512) {
@@ -644,6 +679,17 @@ impl SessionTrace {
             }
             o.av_transport_present = Some(av_transport);
             o.rendering_control_present = Some(rendering_control);
+            facts = Some((o.device.clone(), o.sink_mime_classes.contains(&Mime::Ts)));
+        }
+        if let Some((key, ts)) = facts
+            && let Some(d) = s.devices.get_mut(&key)
+        {
+            d.identification.rules.has_avtransport = Some(av_transport);
+            d.identification.rules.has_rendering_control = Some(rendering_control);
+            d.identification.rules.declares_ts = match state {
+                ProtocolState::Reported | ProtocolState::Empty => Some(ts),
+                _ => None,
+            };
         }
     }
     pub fn first_ts_packet(&self, output: u64) {
@@ -799,6 +845,13 @@ impl SessionTrace {
             self.app_version.as_deref().unwrap_or("unknown"),
             self.os_version.as_deref().unwrap_or("unknown")
         ));
+        for d in s.devices.values() {
+            text.push_str(&format!(
+                "Device {}: {}\n",
+                d.device_key,
+                d.identification.summary()
+            ));
+        }
         for o in &s.outputs {
             let (stage, code) = o.classification(now);
             text.push_str(&format!(

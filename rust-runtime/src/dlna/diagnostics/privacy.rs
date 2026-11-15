@@ -1,4 +1,4 @@
-//! Fail-closed diagnostic boundary. No caller-controlled text is exported.
+//! Fail-closed diagnostic boundary. Unchecked text never enters reports.
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::net::Ipv4Addr;
@@ -40,11 +40,7 @@ impl Privacy {
     pub fn metadata(&self, value: &str, limit: usize) -> Metadata {
         // Bound BEFORE hashing or retaining metadata. Discard controls, including
         // newlines/NUL; never keep a raw device name that might be a room/user.
-        let bounded: String = value
-            .chars()
-            .filter(|c| !diagnostic_control(*c))
-            .take(limit.min(256))
-            .collect();
+        let bounded = bounded_metadata(value, limit);
         Metadata {
             digest: self.id("metadata", &bounded),
             characters: bounded.chars().count(),
@@ -57,6 +53,30 @@ impl Privacy {
             controls_removed: value.chars().any(diagnostic_control),
         }
     }
+}
+
+pub(super) fn bounded_metadata(value: &str, limit: usize) -> String {
+    value
+        .chars()
+        .filter(|c| !diagnostic_control(*c))
+        .take(limit.min(256))
+        .collect()
+}
+
+pub(super) fn bounded_model(value: &str) -> String {
+    value
+        .chars()
+        .filter_map(|c| {
+            if c.is_whitespace() {
+                Some(' ')
+            } else if diagnostic_control(c) {
+                None
+            } else {
+                Some(c)
+            }
+        })
+        .take(256)
+        .collect()
 }
 
 /// Only the diagnostic projection is normalized. Device/UI text stays intact.

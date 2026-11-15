@@ -102,17 +102,48 @@ original identifiers never enter retained state, JSON, summary, Debug or logs.
 Repeated snapshots of one session correlate; fresh sessions do not correlate.
 The HMAC primitive has an RFC 4231 test vector. No new crypto dependency is used.
 
-Before entering retained diagnostic state, manufacturer/model/modelDescription
-and SERVER discard Unicode Cc controls and Cf format characters (including
-RLO/LRO, ZWJ/ZWSP and BOM) and truncate to 256 Unicode
-characters; friendlyName uses the report's stricter 64-character limit. These
-arbitrary fields can themselves be tokens, room names or usernames. Therefore
-each exports `{digest, characters, truncated, controls_removed}` rather than
-text. `vendor_class` remains readable. This intentionally exceeds simple regex
-redaction: even an unlabeled opaque secret never escapes in device metadata.
-T1 parsing is unchanged. No URL, port, raw error/body, QR payload, room/user,
-MAC, local path or address enters the report. Only enums, numbers, booleans,
-internally generated local-time timestamps and pseudonyms are serialized.
+Before identification or hashing, manufacturer/modelName/modelDescription and
+SERVER discard Unicode Cc controls and Cf format characters (including
+RLO/LRO, ZWJ/ZWSP and BOM) and truncate to 256 Unicode characters; friendlyName
+uses the stricter 64-character limit. T1/UI text is untouched. The existing
+metadata fields still contain only `{digest, characters, truncated,
+controls_removed}`. Device `identification` adds the approved readable S1
+projection, in JSON and the text/ZIP summary:
+
+| Field | Export and purpose |
+| --- | --- |
+| `identification.brands` | Fixed normalized whitelist names, or `["unknown"]`. Includes manufacturer, modelName, modelDescription, friendlyName and SERVER evidence, allowing classification comparison across reports. |
+| `identification.brand_matches` | Fixed `{field, rule}` enum pairs. Shows which source matched which approved rule, without echoing its text. |
+| `identification.model` | Conservative ASCII model projection, at most 48 characters. Keeps known public product words/brands and short uppercase product codes containing both letters and digits (at most four leading letters). Whitespace becomes spaces and is compressed; other words, bare numbers, invalid characters and suspicious atoms become `*`. Empty input is `unknown`. |
+| `identification.server_products` | Known canonical product/stack names and optional main version only; e.g. `{name:"Platinum",major:1}`. Linux always has `major:null`. Unknown products/extra text are omitted; no match gives `{name:"unknown",major:null}`. |
+| `identification.rules` | Boolean/enum evidence: `is_purek_room`, `is_lebo_receiver`, `has_avtransport`, `has_rendering_control`, `declares_ts` and `server_stack`. Unknown service/capability facts stay null; a truncated service list cannot prove absence. |
+| `friendly_name` | Session HMAC, length and truncation/control flags only. Never exports original or sanitized room/store/user text. Only fixed brand rule matches may be inferred from it. |
+| `manufacturer`, `model_name`, `model_description`, `server` | Retain bounded HMAC metadata for correlation, not raw text. Readable facts are exclusively in `identification`. |
+
+The single extensible whitelist is the `RULES` table in `identification.rs`:
+normalized name, public display name, aliases and brand/stack/system kind.
+Matching ignores case and requires whole words for Latin spellings; explicit
+Chinese spellings may adjoin Chinese prose, while a Latin suffix (e.g. K in
+纯K) still has a word boundary. No generic substring guessing is used.
+SERVER version parsing permits at most three digits immediately following a
+known product and `/`; minor/build versions, hostnames and arbitrary suffixes
+are discarded. Linux kernel versions are never retained.
+
+Model atoms with six consecutive digits, eight consecutive hex digits, a
+UUID/MAC/IP shape, sensitive labels, oversized words or recognizable encoded
+payloads are replaced by `*`. Sensitive labels also suppress the next value.
+Path/URL/email, percent-encoding and key/value syntax suppress the entire model
+field so isolated path or room-value components cannot survive. Unknown ordinary
+words are masked rather than treating arbitrary usernames as public model names.
+Only ASCII letters/digits, `-._` and spaces (plus the `*` redaction marker) remain.
+The original device name and metadata are never logged. Brand/stack labels are
+fixed vocabulary, not evidence that a raw model or description was safe to echo.
+
+Service-presence facts come from the renderer/T9 service summary or explicit
+capability observations. `declares_ts` describes an actual reported sink list;
+failed/not-yet-queried capabilities do not become false. Brand rules remain
+diagnostic evidence, not admission policy. Existing `vendor_class` is preserved
+independently, so whitelist evidence can reveal gaps in T1's classification.
 
 ## Result interpretation and upstream gaps
 
@@ -162,7 +193,7 @@ without errorCode; either kind can match decision row 9. Missing actions have
 no record (not attempted), and human questions retain their explicit
 `unanswered`/`uncertain` values. Text summaries use the same action result.
 
-### Interpretation of decision rows 3 and 4 (awaiting confirmation)
+### Interpretation of decision rows 3 and 4
 
 The plan says row 3 covers “F×B or L×B” and stops at the first matching row,
 which makes its row 4 (“only L×B”) unreachable. We interpret row 3 as **F×B
@@ -170,7 +201,7 @@ works**, whether or not L×B also works, and row 4 as **only L×B works**; any
 working A cell still wins rows 1/2. This preserves the useful distinction
 between video recoding alone and recoding plus mandatory live delivery. The
 code already used this interpretation; this review documents it without
-changing the plan itself. User/orchestrator confirmation remains pending.
+changing the plan itself. This interpretation has been confirmed by the orchestrator.
 
 ## Verification
 
