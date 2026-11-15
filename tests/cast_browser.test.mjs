@@ -150,13 +150,44 @@ test('Pure K rejects malformed and oversized links locally with the specific tra
   await page.locator('#cast-open').click();
   assert.equal(await page.locator('#cast-purek-url').getAttribute('maxlength'),'32768');
   const prefix = 'https://wx.chunk.cn/projection/login?place_code=';
-  for (const link of ['javascript:alert(1)','https://example.com/projection/login?a=b',prefix+'x'.repeat(32768),prefix+'房'.repeat(11000),prefix+'\u0001']) {
+  for (const link of ['not a URL','ftp://wx.chunk.cn/projection/login','javascript:alert(1)','https://wx.chunk.cn.example.com/projection/login?a=b',prefix+'x'.repeat(32768),prefix+'房'.repeat(11000),prefix+'\u0001']) {
     await page.locator('#cast-purek-url').evaluate((node,value) => {node.value=value;}, link);
     await page.locator('#cast-purek-connect').click();
     await page.waitForFunction(() => !document.getElementById('cast-purek-connect').hasAttribute('aria-busy'));
     assert.equal(await page.evaluate(() => fixture.messages.at(-1)),dict.zh['cast.error.cast_purek_qr_invalid']);
   }
   assert.deepEqual(await page.evaluate(() => fixture.calls),[]);
+  await page.locator('#cast-purek-url').fill('   ');
+  await page.locator('#cast-purek-connect').click();
+  await page.waitForFunction(() => !document.getElementById('cast-purek-connect').hasAttribute('aria-busy'));
+  assert.equal(await page.evaluate(() => fixture.messages.at(-1)),dict.zh['cast.purekRequired']);
+  assert.deepEqual(await page.evaluate(() => fixture.calls),[]);
+});
+
+test('Pure K forwards supported QR variants unchanged and leaves semantic validation to Rust', {timeout:60000}, async t => {
+  const page = await open(t);
+  await page.locator('#cast-open').click();
+  const inner = Buffer.from('http://conn.dolphinstar.cn/Remote?url=http%3A%2F%2F192.168.1.8%3A8080%2Fdescription.xml&token=fixture').toString('base64');
+  const query = `place_code=fixture&projection_url=${inner}`;
+  const links = [
+    `http://wx.chunk.cn/projection/login?${query}`,
+    `https://wx.chunk.cn/projection/login/?${query}`,
+    `https://wx.chunk.cn/Projection/Login?${query}`,
+    `https://wx.chunk.cn/projection/login?place_code=fixture&projection_url=${inner.slice(0,16)} ${inner.slice(16)}`,
+    `  https://WX.CHUNK.CN:443/projection/login?${query}  `,
+    // The frontend does not duplicate Rust's semantic path/query rules.
+    'https://wx.chunk.cn/unknown-path?unknown=value',
+  ];
+  for (const [index,link] of links.entries()) {
+    await page.locator('#cast-purek-url').fill(link);
+    await page.locator('#cast-purek-connect').click();
+    await page.waitForFunction(count => fixture.calls.filter(call=>call.path==='/api/cast/connect').length===count,index+1);
+    assert.deepEqual(await page.evaluate(() => fixture.calls.filter(call=>call.path==='/api/cast/connect').at(-1).payload),{purek_qr:link.trim(),address_confirmed:false});
+    // A backend semantic rejection still uses the specific translated error.
+    await page.evaluate(() => fixture.reject('cast_purek_qr_invalid'));
+    await page.waitForFunction(() => !document.getElementById('cast-purek-connect').hasAttribute('aria-busy'));
+    assert.equal(await page.evaluate(() => fixture.messages.at(-1)),dict.zh['cast.error.cast_purek_qr_invalid']);
+  }
 });
 
 test('cast controls share theme colors, borders and interaction states with ordinary Host controls', {timeout:90000}, async t => {

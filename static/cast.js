@@ -179,9 +179,10 @@
       if (!purek_qr) throw new Error(t("cast.purekRequired"));
       let url;
       try { url = new URL(purek_qr); } catch { /* report the same localized validation error */ }
-      if (new TextEncoder().encode(purek_qr).length > 32768 || /[\x00-\x20\x7f]/u.test(purek_qr)
-        || !url || url.protocol !== "https:" || url.hostname !== "wx.chunk.cn"
-        || url.pathname !== "/projection/login" || url.port || url.username || url.password || !url.search) {
+      // Only reject obvious input mistakes here. Rust owns QR path/query,
+      // nested projection URL and receiver-address validation.
+      if (new TextEncoder().encode(purek_qr).length > 32768 || /[\x00-\x1f\x7f]/u.test(purek_qr)
+        || !url || !["http:", "https:"].includes(url.protocol) || url.hostname !== "wx.chunk.cn") {
         throw { code: "cast_purek_qr_invalid" };
       }
       return connect({ purek_qr, address_confirmed: el("cast-address-confirmed").checked });
