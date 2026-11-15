@@ -4,6 +4,7 @@ mod announcements;
 mod api;
 mod automatic_volume;
 mod cache;
+pub(crate) mod cast_session;
 mod catalog;
 mod catalog_append;
 pub mod desktop;

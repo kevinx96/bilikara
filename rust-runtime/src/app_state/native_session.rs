@@ -26,6 +26,7 @@ mod tests;
 
 #[derive(Default)]
 pub(crate) struct NativeSession {
+    pub cast: crate::native_host::cast_session::State,
     pub desktop: bool,
     sse_frames: [Option<(u64, std::sync::Arc<str>)>; 2],
     pub bbdown_available: bool,
@@ -75,6 +76,13 @@ pub(crate) struct NativeSession {
     remote_connection_diagnostics: VecDeque<Value>,
     login_diagnostics: VecDeque<crate::native_host::LoginDiagnostic>,
     library_diagnostics: VecDeque<crate::native_host::LibraryDiagnostic>,
+}
+
+/// Bounded worker input: never clone queue history on the polling hot path.
+pub(crate) struct NativeCastInput {
+    pub current_item: Option<PlaylistItem>,
+    pub next_item: Option<PlaylistItem>,
+    pub playback_generation: u64,
 }
 
 impl std::fmt::Debug for NativeSession {
@@ -558,6 +566,18 @@ impl AppState {
             .map_err(|_| ApiError::new(500, "snapshot", "无法读取 Rust 状态"))
     }
 
+    pub(crate) fn native_cast_input(&self) -> Result<NativeCastInput, ApiError> {
+        let data = self
+            .data
+            .as_ref()
+            .ok_or_else(|| ApiError::new(503, "state_unavailable", "Host is not initialized"))?;
+        Ok(NativeCastInput {
+            current_item: data.current_item.clone(),
+            next_item: data.playlist.first().cloned(),
+            playback_generation: data.playback_generation,
+        })
+    }
+
     pub(crate) fn native_execute(
         &mut self,
         mut command: AppStateRequest,
@@ -677,6 +697,9 @@ impl AppState {
         let session = &self.native_session;
         if host {
             value["startup_warning"] = json!(session.startup_warning);
+        }
+        if session.cast.visible() || !self.cast_preferences()?.is_empty() {
+            value["cast"] = session.cast.snapshot(self.cast_preferences()?);
         }
         value["state_epoch"] = json!(session.state_epoch);
         value["state_revision"] = json!(
@@ -927,6 +950,13 @@ impl AppState {
         now: f64,
     ) -> Result<Value, ApiError> {
         self.native_authorize(identity, true)?;
+        if self.native_session.cast.owns_playback {
+            return Err(ApiError::new(
+                409,
+                "cast_owns_playback",
+                "The receiver owns playback",
+            ));
+        }
         let generation = positive(body, "playback_generation")?;
         let sequence = positive(body, "status_sequence")?;
         let item_id = text(body, "item_id")?;
@@ -995,6 +1025,41 @@ impl AppState {
         Ok(json!({"accepted":true,"duplicate":false}))
     }
 
+    pub(crate) fn native_cast_observation(
+        &mut self,
+        operation: u64,
+        generation: u64,
+    ) -> Result<(), ApiError> {
+        let snapshot = self.native_core_snapshot()?;
+        if self.native_session.cast.operation != operation
+            || generation != snapshot.playback_generation
+        {
+            return Err(ApiError::new(409, "stale_player", "Playback changed"));
+        }
+        let item = snapshot
+            .current_item
+            .ok_or_else(|| ApiError::new(409, "cast_no_media", "No current song"))?;
+        let state = &self.native_session.cast;
+        let (position, duration, paused) = (state.position, state.duration, state.paused);
+        self.native_session.cast.worker_mutation = true;
+        let result = self.native_execute(AppStateRequest::ApplyPlayerStatusObservation {
+            schema_version: 1,
+            expected_playback_generation: generation,
+            item_id: item.id.clone(),
+            is_paused: paused,
+            current_time: position,
+            duration,
+            now: crate::native_host::now(),
+        });
+        self.native_session.cast.worker_mutation = false;
+        result?;
+        self.native_session.observation = Some(
+            json!({"item_id":item.id,"playback_generation":generation,"observed_phase":if paused {"paused"} else {"playing"},"is_paused":paused,"current_time":position,"duration":duration}),
+        );
+        self.native_session.revision += 1;
+        Ok(())
+    }
+
     pub(crate) fn native_control(
         &mut self,
         identity: &Identity,
@@ -1002,6 +1067,9 @@ impl AppState {
         now: f64,
     ) -> Result<(), ApiError> {
         self.native_authorize(identity, false)?;
+        if self.native_session.cast.owns_playback {
+            return crate::native_host::cast_session::enqueue(self, body);
+        }
         let generation = positive(body, "playback_generation")?;
         let item_id = text(body, "item_id")?;
         let action = text(body, "action")?;
