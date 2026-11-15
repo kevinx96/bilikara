@@ -15,6 +15,27 @@ use crate::dlna::{
 use crate::experimental_libav::cast_mux::{CastFile, CastSession};
 use std::time::Instant;
 
+// Allow slow receivers (including two 2.5s replies in one poll). Commands can
+// interrupt either RPC; responsiveness must not depend on a short RPC timeout.
+const MONITOR_TIMEOUT: Duration = Duration::from_secs(4);
+const RECEIVER_SILENCE: Duration = Duration::from_secs(8);
+const RECOVERY_WINDOW: Duration = Duration::from_secs(4);
+
+fn receiver_silent(last_response: Instant, failures: u8, now: Instant) -> bool {
+    failures > 0 && now.saturating_duration_since(last_response) >= RECEIVER_SILENCE
+}
+
+fn clock_after_observation(running: bool, state: TransportState) -> bool {
+    match state {
+        TransportState::Playing => true,
+        TransportState::Unknown => running, // Disabled monitor: retain the last known state.
+        TransportState::Paused
+        | TransportState::Stopped
+        | TransportState::NoMedia
+        | TransportState::Transitioning => false,
+    }
+}
+
 fn update<T>(operation: u64, action: impl FnOnce(&mut State) -> T) -> Option<T> {
     with_app(|app| {
         if app.native().cast.operation != operation {
@@ -265,6 +286,7 @@ struct Output {
     last_position: Option<f64>,
     position_advanced: Instant,
     position_usable: bool,
+    clock_running: bool,
     intentional_stop: bool,
 }
 type Prefetch = (
@@ -399,7 +421,7 @@ async fn play_session(
         let mut monitor = TransportMonitor::default();
         let mut position_enabled = true;
         let mut poll_failures = 0u8;
-        let mut failure_since: Option<Instant> = None;
+        let mut last_response = Instant::now();
         let mut next_poll = Instant::now();
         let mut recovery: Option<Instant> = None;
         let mut stopped = 0u8;
@@ -408,10 +430,10 @@ async fn play_session(
             if cancel.is_cancelled() {
                 break;
             }
-            if failure_since.is_some_and(|since| since.elapsed() >= Duration::from_secs(6)) {
-                let since = recovery.get_or_insert_with(Instant::now);
+            if receiver_silent(last_response, poll_failures, Instant::now()) {
+                let since = recovery.get_or_insert(last_response + RECEIVER_SILENCE);
                 update(id, |s| { s.phase = Phase::Recovering; s.error_code = Some("cast_receiver_unreachable".into()); });
-                if since.elapsed() >= Duration::from_secs(4) { return Err(error("cast_receiver_unreachable")); }
+                if since.elapsed() >= RECOVERY_WINDOW { return Err(error("cast_receiver_unreachable")); }
             }
             let out = output.as_mut().unwrap();
             if let Some(live) = &mut out.live {
@@ -448,6 +470,7 @@ async fn play_session(
                         }
                         endpoint.clear_generation();
                         out.paused = true;
+                        out.clock_running = false;
                         out.intentional_stop = true;
                         update(id, |s| {
                             s.paused = true;
@@ -463,7 +486,10 @@ async fn play_session(
                         };
                         match record(trace, connection, Some(out.id), action) {
                             Ok(()) => {
+                                last_response = Instant::now();
+                                poll_failures = 0;
                                 out.paused = pause;
+                                out.clock_running = !pause;
                                 out.start = with_app(|app| Ok(app.native().cast.position))?;
                                 out.began = Instant::now();
                                 update(id, |s| {
@@ -485,6 +511,8 @@ async fn play_session(
                             soap(client.seek(Duration::from_secs_f64(position), cancel)).await,
                         ) {
                             Ok(()) => {
+                                last_response = Instant::now();
+                                poll_failures = 0;
                                 out.seek_settles = Instant::now() + Duration::from_secs(4);
                                 out.last_position = None;
                                 out.position_advanced = Instant::now();
@@ -544,7 +572,7 @@ async fn play_session(
                         monitor = TransportMonitor::default();
                         position_enabled = true;
                         poll_failures = 0;
-                        failure_since = None;
+                        last_response = Instant::now();
                         stopped = 0;
                         recovery = None;
                     }
@@ -569,30 +597,47 @@ async fn play_session(
             if Instant::now() >= next_poll {
                 next_poll = Instant::now() + Duration::from_secs(2);
                 // T2 retains its 5s per-request bound. The session gives a
-                // monitor RPC 1s and a command 2s. Commands interrupt polling
-                // within 20ms; dropping a poll future aborts its HTTP request.
+                // monitor RPC 4s and a command 2s. Check pending commands every
+                // 20ms; dropping a poll future aborts its HTTP request.
                 let sample = tokio::select! {
                     biased;
                     _ = cancel.cancelled() => break,
                     _ = command_pending(id) => { next_poll = Instant::now(); continue; },
-                    result = tokio::time::timeout(Duration::from_secs(1), monitor.poll(&client, cancel)) =>
+                    result = tokio::time::timeout(MONITOR_TIMEOUT, monitor.poll(&client, cancel)) =>
                         result.unwrap_or(MonitorSample { decision: MonitorDecision::TransientFailure, state: None, operation: None }),
                 };
                 if let Some(op) = &sample.operation {
                     trace.record_operation(Some(connection), Some(out.id), op);
                 }
                 let transport_failed = matches!(sample.decision, MonitorDecision::TransientFailure | MonitorDecision::Disconnected);
+                if !transport_failed && sample.operation.is_some() {
+                    last_response = Instant::now();
+                }
                 let old_position = with_app(|app| Ok(app.native().cast.position))?;
+                // Freeze on the observation, before reading position or applying
+                // the fallback clock. Keep the last credible position when a TV
+                // resets RelTime on STOPPED; never add recovery time to resume.
+                if let Some(state) = sample.state {
+                    let running = clock_after_observation(out.clock_running, state);
+                    if running != out.clock_running {
+                        out.start = old_position;
+                        out.began = Instant::now();
+                    }
+                    out.clock_running = running;
+                }
                 let mut position_failed = false;
                 if position_enabled && !transport_failed && !out.intentional_stop {
                     let result = tokio::select! {
                         biased;
                         _ = cancel.cancelled() => break,
                         _ = command_pending(id) => { next_poll = Instant::now(); continue; },
-                        result = tokio::time::timeout(Duration::from_secs(1), client.get_position_info(cancel)) => result,
+                        result = tokio::time::timeout(MONITOR_TIMEOUT, client.get_position_info(cancel)) => result,
                     };
                     match result {
                         Ok(op) => {
+                            if !op.result.as_ref().is_err_and(|e| e.is_network() || e.is_cancelled()) {
+                                last_response = Instant::now();
+                            }
                             trace.record_operation(Some(connection), Some(out.id), &op);
                             match op.result {
                                 Ok(info) => {
@@ -627,15 +672,13 @@ async fn play_session(
                 }
                 // A healthy transport with missing/constant position is not an
                 // unreachable receiver. Use the actual keyframe clock for live.
-                if !transport_failed && !out.paused && (!position_enabled || !out.position_usable) {
+                if !transport_failed && out.clock_running && !out.paused && (!position_enabled || !out.position_usable) {
                     update(id, |s| s.position = bounded_position(out.start + out.began.elapsed().as_secs_f64(), s.duration));
                 }
                 if transport_failed || (sample.decision == MonitorDecision::Disabled && position_failed) {
                     poll_failures = poll_failures.saturating_add(1);
-                    failure_since.get_or_insert_with(Instant::now);
                 } else {
                     poll_failures = 0;
-                    failure_since = None;
                 }
                 if let Some(state) = sample.state {
                     // Hardware controls are observations too: the receiver, not
@@ -687,15 +730,15 @@ async fn play_session(
                         stopped = stopped.saturating_add(1);
                     }
                 }
-                let failed = poll_failures >= 3 || stopped >= 3
-                    || failure_since.is_some_and(|since| since.elapsed() >= Duration::from_secs(6));
+                let silent = receiver_silent(last_response, poll_failures, Instant::now());
+                let failed = silent || stopped >= 3;
                 if failed {
-                    let since = recovery.get_or_insert_with(Instant::now);
+                    let since = recovery.get_or_insert(if silent { last_response + RECEIVER_SILENCE } else { Instant::now() });
                     update(id, |s| {
                         s.phase = Phase::Recovering;
                         s.error_code = Some("cast_receiver_unreachable".into());
                     });
-                    if since.elapsed() >= Duration::from_secs(4) {
+                    if since.elapsed() >= RECOVERY_WINDOW {
                         return Err(error("cast_receiver_unreachable"));
                     }
                 } else if poll_failures == 0 && stopped == 0
@@ -1039,6 +1082,7 @@ async fn start_output_once(
         last_position: None,
         position_advanced: Instant::now(),
         position_usable: false,
+        clock_running: true,
         intentional_stop: false,
     })
 }
@@ -1128,6 +1172,7 @@ fn drain_http(
                         && out.generation == event.generation.unwrap_or(0)
                         && !out.position_usable
                         && !out.paused
+                        && out.clock_running
                         && out.live.is_some()
                         && let (Some(start), Some(dts)) = (event.live_start, event.media_time_us)
                     {
@@ -1170,6 +1215,38 @@ fn presentation_elapsed(start: crate::experimental_libav::cast_mux::CastStart, d
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn receiver_liveness_uses_success_clock_not_failure_count() {
+        let start = Instant::now();
+        // Many immediate failures cannot accelerate the silence allowance.
+        assert!(!receiver_silent(start, 20, start + Duration::from_secs(7)));
+        assert!(receiver_silent(start, 2, start + Duration::from_secs(8)));
+        // A successful response, even on a slow receiver, starts a new window.
+        let success = start + Duration::from_millis(7500);
+        assert!(!receiver_silent(
+            success,
+            1,
+            start + Duration::from_secs(12)
+        ));
+        assert!(receiver_silent(success, 1, success + RECEIVER_SILENCE));
+        // Unsupported monitors are disabled, not treated as network failures.
+        assert!(!receiver_silent(start, 0, start + Duration::from_secs(60)));
+        for state in [
+            TransportState::Paused,
+            TransportState::Stopped,
+            TransportState::NoMedia,
+            TransportState::Transitioning,
+        ] {
+            assert!(!clock_after_observation(true, state));
+        }
+        assert!(clock_after_observation(false, TransportState::Playing));
+        for running in [false, true] {
+            assert_eq!(
+                clock_after_observation(running, TransportState::Unknown),
+                running
+            );
+        }
+    }
     #[test]
     fn lagged_and_terminal_http_events_reach_cast_diagnostic_package() {
         use crate::dlna::cast_http::{HttpStage, Reason};

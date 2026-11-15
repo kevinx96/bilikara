@@ -197,6 +197,11 @@ fn stopped_mid_song_after_pause_and_during_seek_never_advances() {
             let snap = host.wait(|s| s["cast"]["phase"] == "idle");
             assert_eq!(snap["current_item"]["id"], "song-one");
             assert_eq!(snap["cast"]["owns_playback"], false);
+            assert_eq!(
+                snap["cast"]["resume"]["position"],
+                if scenario == "paused" { 119.0 } else { 40.0 },
+                "STOPPED must freeze the last receiver position throughout recovery"
+            );
         }
     }
 }
@@ -207,13 +212,34 @@ fn hung_poll_is_interrupted_by_command_and_recovers_within_deadline() {
     let _serial = GLOBAL_APP_TEST_LOCK
         .lock()
         .unwrap_or_else(|p| p.into_inner());
+    for delay in [1500, 2500] {
+        slow_receiver_keeps_session_and_changes_program(delay);
+    }
     let host = Host::new();
     let receiver = Receiver::new();
     host.connect(receiver.renderer());
     host.wait(|s| s["cast"]["duration"] == 120.0);
-    receiver.state.lock().unwrap().hang = true;
+    let polls = {
+        let mut state = receiver.state.lock().unwrap();
+        state.hang = true;
+        state
+            .actions
+            .iter()
+            .filter(|a| *a == "GetTransportInfo")
+            .count()
+    };
     let began = Instant::now();
-    thread::sleep(Duration::from_millis(2050));
+    host.wait(|_| {
+        receiver
+            .state
+            .lock()
+            .unwrap()
+            .actions
+            .iter()
+            .filter(|a| *a == "GetTransportInfo")
+            .count()
+            > polls
+    });
     let command = Instant::now();
     host.command("pause");
     assert!(command.elapsed() < Duration::from_millis(2600));
@@ -225,6 +251,83 @@ fn hung_poll_is_interrupted_by_command_and_recovers_within_deadline() {
         host.snapshot()["cast"]["error_code"],
         "cast_receiver_unreachable"
     );
+    drop(host);
+    // A hung monitor must not delay Next's AppState transition or URI work.
+    let host = Host::new();
+    receiver.state.lock().unwrap().hang = false;
+    host.connect(receiver.renderer());
+    host.wait(|s| s["cast"]["duration"] == 120.0);
+    let polls = {
+        let mut state = receiver.state.lock().unwrap();
+        state.hang = true;
+        state
+            .actions
+            .iter()
+            .filter(|a| *a == "GetTransportInfo")
+            .count()
+    };
+    host.wait(|_| {
+        receiver
+            .state
+            .lock()
+            .unwrap()
+            .actions
+            .iter()
+            .filter(|a| *a == "GetTransportInfo")
+            .count()
+            > polls
+    });
+    let began = Instant::now();
+    host.post(
+        "/api/cast/command",
+        json!({"action":"next", "playback_generation":host.snapshot()["playback_generation"]}),
+    )
+    .unwrap();
+    host.wait(|s| s["current_item"]["id"] == "song-two");
+    assert!(
+        began.elapsed() < Duration::from_millis(600),
+        "Next waited for the hung poll"
+    );
+    let cancel = Instant::now();
+    host.post("/api/cast/disconnect", json!({})).unwrap();
+    host.wait(|s| s["cast"]["phase"] == "idle" && s["cast"]["busy"] == false);
+    assert!(cancel.elapsed() < Duration::from_secs(3));
+}
+
+fn slow_receiver_keeps_session_and_changes_program(delay_ms: u64) {
+    let host = Host::new();
+    let receiver = Receiver::new();
+    receiver.state.lock().unwrap().response_delay = Duration::from_millis(delay_ms);
+    host.connect(receiver.renderer());
+    // Three complete real SOAP poll pairs, not a sleep followed by one lucky
+    // snapshot. Every observed snapshot must retain the session and ownership.
+    host.wait(|s| {
+        assert_eq!(s["cast"]["phase"], "active", "{delay_ms}ms: {}", s["cast"]);
+        assert_eq!(s["cast"]["owns_playback"], true);
+        receiver
+            .state
+            .lock()
+            .unwrap()
+            .completed
+            .iter()
+            .filter(|a| *a == "GetPositionInfo")
+            .count()
+            >= 3
+    });
+    assert_eq!(host.command("next")["current_item"]["id"], "song-two");
+    host.wait(|s| s["cast"]["duration"] == 120.0);
+    {
+        let mut state = receiver.state.lock().unwrap();
+        state.position = 119;
+        state.state = "STOPPED";
+    }
+    let next = host.wait(|s| {
+        assert_ne!(s["cast"]["phase"], "recovering");
+        assert_ne!(s["cast"]["phase"], "idle");
+        s["current_item"]["id"] == "song-three" && s["cast"]["phase"] == "active"
+    });
+    assert_eq!(next["cast"]["operation_id"], 1);
+    assert!(next["cast"]["error_code"].is_null());
 }
 
 #[test]

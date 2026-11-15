@@ -14,6 +14,8 @@ struct ReceiverState {
     duration: u64,
     offline: bool,
     hang: bool,
+    response_delay: Duration,
+    completed: Vec<String>,
     no_position: bool,
     unsupported: bool,
     actions: Vec<String>,
@@ -47,6 +49,8 @@ impl Receiver {
             duration: 120,
             offline: false,
             hang: false,
+            response_delay: Duration::ZERO,
+            completed: Vec::new(),
             no_position: false,
             unsupported: false,
             actions: Vec::new(),
@@ -102,6 +106,12 @@ impl Receiver {
                     .and_then(|l| l.rsplit_once('#'))
                     .map(|(_, a)| a.trim_matches(['"', '\r', ' ']).to_owned());
                 let mut state = shared.lock().unwrap();
+                let delay = if action.is_some() {
+                    state.response_delay
+                } else {
+                    Duration::ZERO
+                };
+                let completed_action = action.clone();
                 let (status, body) = if let Some(action) = action {
                     state.actions.push(action.clone());
                     if state.hang {
@@ -207,7 +217,22 @@ impl Receiver {
                     "HTTP/1.1 {status} OK\r\nContent-Length: {}\r\nContent-Type: text/xml\r\nConnection: close\r\n\r\n{body}",
                     body.len()
                 );
-                let _ = stream.write_all(response.as_bytes());
+                let shared = shared.clone();
+                let respond = move || {
+                    if !delay.is_zero() {
+                        thread::sleep(delay);
+                    }
+                    if stream.write_all(response.as_bytes()).is_ok()
+                        && let Some(action) = completed_action
+                    {
+                        shared.lock().unwrap().completed.push(action);
+                    }
+                };
+                if delay.is_zero() {
+                    respond();
+                } else {
+                    pulls.push(thread::spawn(respond));
+                }
             }
             for pull in pulls {
                 pull.join().unwrap();
@@ -400,6 +425,26 @@ impl Host {
     }
     fn snapshot(&self) -> Value {
         with_app(|app| app.native_snapshot(true)).unwrap()
+    }
+    fn use_long_media(&self) {
+        // The short upstream fixture ends around 1s. A live pause under CPU
+        // load can legitimately resume later; use actual 30s media, not a
+        // fictitious duration or a longer assertion deadline.
+        let snapshot = with_app(|app| app.native_core_snapshot()).unwrap();
+        let fixtures =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("src/native_host/cast_session/fixtures");
+        for item in snapshot.current_item.iter().chain(&snapshot.playlist) {
+            let video = self
+                .context
+                .cache_root
+                .join(item.video_media_url.strip_prefix("/media/").unwrap());
+            std::fs::copy(fixtures.join("keyframes-30s.mp4"), &video).unwrap();
+            std::fs::copy(
+                fixtures.join("audio-30s.m4a"),
+                video.with_file_name("audio.m4a"),
+            )
+            .unwrap();
+        }
     }
     fn wait(&self, predicate: impl Fn(&Value) -> bool) -> Value {
         let deadline = Instant::now() + Duration::from_secs(20);
@@ -710,6 +755,7 @@ fn learned_live_mode_pause_resume_mode_switch_and_connect_cancellation() {
         .unwrap_or_else(|p| p.into_inner());
     let receiver = Receiver::new();
     let host = Host::new();
+    host.use_long_media();
     let renderer = receiver.renderer();
     let key = renderer_key(&renderer);
     with_app(|app| {
