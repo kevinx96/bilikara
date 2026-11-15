@@ -723,24 +723,26 @@ fn fresh_delivery_extends_health_failure_tolerance_in_real_http_probes() {
 
 #[test]
 fn cancellation_after_register_request_reaches_receiver_attempts_independent_revoke() {
-    let fixture = Fixture::start(vec![
-        device("uuid:fixture", false),
-        authorized().delayed(Duration::from_millis(400)),
-        authorized(),
-    ]);
+    let cancel = CancellationToken::new();
+    let request_cancel = cancel.clone();
+    let fixture = Fixture::start_with_request_hook(
+        vec![
+            device("uuid:fixture", false),
+            authorized().delayed(Duration::from_millis(400)),
+            authorized(),
+        ],
+        move |index, request| {
+            if index == 1 {
+                assert!(request.body.contains("<Enable>1</Enable>"));
+                // Cancel while registration is awaiting its delayed reply,
+                // regardless of how long the preceding description took.
+                request_cancel.cancel();
+            }
+        },
+    );
     let client = client();
     let raw = fixture_qr(&fixture);
-    let cancel = CancellationToken::new();
-    let operation = run(async {
-        tokio::join!(
-            client.connect(&raw, AddressApproval::LanLiteralOnly, &cancel),
-            async {
-                tokio::time::sleep(Duration::from_millis(80)).await;
-                cancel.cancel();
-            }
-        )
-        .0
-    });
+    let operation = run(client.connect(&raw, AddressApproval::LanLiteralOnly, &cancel));
     assert_eq!(
         operation.result.unwrap_err().code,
         PureKErrorCode::Cancelled
@@ -868,25 +870,27 @@ fn cancellation_during_route_renewal_never_starts_a_new_registration() {
             Ipv4Addr::new(127, 0, 0, 2)
         })
     };
-    let fixture = Fixture::start(vec![
-        device("uuid:fixture", false),
-        authorized(),
-        device("uuid:fixture", true),
-        authorized().delayed(Duration::from_millis(500)),
-        authorized(),
-    ]);
     let cancel = CancellationToken::new();
-    let raw = fixture_qr(&fixture);
-    let operation = run(async {
-        tokio::join!(
-            client.connect(&raw, AddressApproval::LanLiteralOnly, &cancel),
-            async {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                cancel.cancel();
+    let request_cancel = cancel.clone();
+    let fixture = Fixture::start_with_request_hook(
+        vec![
+            device("uuid:fixture", false),
+            authorized(),
+            device("uuid:fixture", true),
+            authorized().delayed(Duration::from_millis(500)),
+            authorized(),
+        ],
+        move |index, request| {
+            if index == 3 {
+                assert!(request.body.contains("<Enable>0</Enable>"));
+                // The old route's revoke must have reached the receiver before
+                // cancellation can test that renewal never registers again.
+                request_cancel.cancel();
             }
-        )
-        .0
-    });
+        },
+    );
+    let raw = fixture_qr(&fixture);
+    let operation = run(client.connect(&raw, AddressApproval::LanLiteralOnly, &cancel));
     assert_eq!(
         operation.result.unwrap_err().code,
         PureKErrorCode::Cancelled
