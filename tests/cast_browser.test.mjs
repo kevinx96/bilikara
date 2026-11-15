@@ -18,14 +18,14 @@ const section = (start, end) => {
   return app.slice(from, to);
 };
 const html = read('index.html');
-const entry = html.slice(html.indexOf('<div class="cast-entry">'), html.indexOf('<div class="presentation-target-section">'));
+const entry = html.match(/<div class="cast-entry">[\s\S]*?<\/section>\s*<\/div>/)[0];
 const dict = JSON.parse(read('i18n.json')).languages;
-const styles = ['styles.css', 'ui-surfaces.css', 'request-tabs.css'].map(read).join('\n');
+const styles = ['styles.css', 'request-tabs.css', 'ui-surfaces.css'].map(read).join('\n');
 
-async function open(t) {
-  const browser = await chromium.launch({ headless: true, ...(process.platform === 'win32' ? { channel: 'msedge' } : {}) });
+async function open(t, options = {}) {
+  const browser = await chromium.launch({ headless: true, args: ['--autoplay-policy=no-user-gesture-required'], ...(process.platform === 'win32' ? { channel: 'msedge' } : {}) });
   t.after(() => browser.close());
-  const page = await browser.newPage({ viewport: { width: 700, height: 700 }, hasTouch: true });
+  const page = await browser.newPage({ viewport: { width: 700, height: 700 }, hasTouch: true, ...options });
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
   t.after(() => assert.deepEqual(errors, []));
@@ -33,7 +33,7 @@ async function open(t) {
     html,body { margin:0; min-width:0; }
     #presentation-settings-panel { display:block; position:relative; inset:auto; width:min(420px,calc(100vw - 24px)); max-height:calc(100vh - 24px); margin:12px; box-sizing:border-box; overflow:auto; }
     </style><div id="presentation-settings-panel" class="cache-panel presentation-output-panel">${entry}</div>
-    <section id="media"><video id="video" muted loop></video><audio id="audio" muted loop></audio></section>
+    <section id="media"><video id="video" loop></video><audio id="audio" loop></audio></section>
     <section id="key-shift-panel"><button>−1</button><input value="0"><button class="cache-advanced-info-button">i</button><span id="host-key-shift-info"></span></section>
     <section id="av-sync-panel"><button>−50</button><input value="0"><button class="cache-advanced-info-button">i</button><span id="host-av-sync-info"></span></section>
     <div id="audio-variant-bar"><button>Original</button></div>`);
@@ -51,7 +51,7 @@ async function open(t) {
     const renderPresentationOutputControl=()=>{};
     const render=()=>BilikaraCastHost.sync();
     const acceptHostStateSnapshot=snapshot=>{state.data=snapshot;BilikaraCastHost.sync();};
-    const fetchState=async()=>{refreshes++;BilikaraCastHost.sync();};
+    const fetchState=async()=>{refreshes++;state.data.revision++;BilikaraCastHost.sync();};
     const tauriInvoke=()=>async(command,args)=>{
       calls.push({command,args});
       if(command==='activate_local_presentation')return {mode:'localDualScreen',phase:'active',generation:state.presentationSession.generation+1};
@@ -98,15 +98,109 @@ test('cast rows retain identity, revision conflict refreshes, and pending button
   assert.equal(await page.evaluate(()=>fixture.calls.length), 1);
   assert.deepEqual(await page.evaluate(()=>fixture.calls[0].payload), { command:'cast.set_device_mode',device_key:'one',mode:'live',revision:5 });
   await page.evaluate(()=>{window.savedRow=document.querySelector('[data-cast-device="one"]');fixture.reject('cast_revision_conflict');});
+  await page.waitForFunction(()=>fixture.calls.length===2);
+  assert.deepEqual(await page.evaluate(()=>fixture.calls[1].payload),{command:'cast.set_device_mode',device_key:'one',mode:'live',revision:6});
+  assert.equal(await mode.getAttribute('aria-busy'),'true');
+  await page.evaluate(()=>fixture.reject('cast_revision_conflict'));
   await page.waitForFunction(()=>!document.querySelector('[data-cast-mode="live"]').hasAttribute('aria-busy'));
-  assert.equal(await page.evaluate(()=>fixture.counts().refreshes), 1);
-  assert.match(await page.evaluate(()=>fixture.messages.at(-1)), /设置已更新/u);
+  assert.equal(await page.evaluate(()=>fixture.counts().refreshes), 2);
+  assert.match(await page.evaluate(()=>fixture.messages.at(-1)), /状态已更新/u);
   await page.evaluate(()=>fixture.update({renderers:[{device_key:'one',label:'Renamed'},{device_key:'three',label:'New'}],position:12}));
   assert.equal(await page.evaluate(()=>window.savedRow===document.querySelector('[data-cast-device="one"]')),true);
   assert.equal(await page.locator('#cast-open').getAttribute('aria-expanded'),'true');
   assert.equal(await page.locator('[data-cast-device="two"]').count(),0);
   assert.equal(await page.locator('[data-cast-compatibility-test]').isVisible(),false);
   assert.equal(await page.locator('[data-cast-compatibility-mount]').evaluate(node=>node.getBoundingClientRect().height),0);
+});
+
+test('mode conflict retries once and rechecks whether the selected device still exists', {timeout:60000}, async t => {
+  const page = await open(t);
+  await page.locator('#cast-open').click();
+  const mode = page.locator('[data-cast-device="one"] [data-cast-mode="live"]');
+  await mode.click();
+  await page.evaluate(() => fixture.reject('cast_revision_conflict'));
+  await page.waitForFunction(() => fixture.calls.length===2);
+  await page.evaluate(() => fixture.resolve({...fixture.state.data,devices:undefined,cast:{...fixture.state.data.cast,devices:{one:{mode:'live'}}}}));
+  await page.waitForFunction(() => !document.querySelector('[data-cast-mode="live"]').hasAttribute('aria-busy'));
+  assert.equal(await mode.getAttribute('aria-pressed'),'true');
+  assert.equal(await mode.getAttribute('aria-selected'),null);
+  assert.deepEqual(await page.evaluate(() => fixture.messages),[]);
+  await page.locator('[data-cast-device="one"] [data-cast-mode="file"]').click();
+  await page.evaluate(() => { fixture.state.data.cast.renderers=[]; fixture.reject('cast_revision_conflict'); });
+  await page.waitForFunction(() => fixture.messages.length===1);
+  assert.equal(await page.evaluate(() => fixture.calls.length),3,'a disappeared device must not be retried');
+});
+
+test('discovery waits beyond 45 seconds for the authoritative terminal phase', {timeout:60000}, async t => {
+  const page = await open(t);
+  await page.clock.install();
+  await page.locator('#cast-open').click();
+  await page.locator('#cast-discover').click();
+  await page.evaluate(() => {fixture.update({phase:'discovering',busy:true,operation_id:1});fixture.resolve({accepted:true,operation_id:1});});
+  await page.clock.fastForward(90000);
+  assert.equal(await page.locator('#cast-discover').getAttribute('aria-busy'),'true');
+  assert.deepEqual(await page.evaluate(() => fixture.messages),[]);
+  await page.evaluate(() => fixture.update({phase:'idle',busy:false}));
+  await page.waitForFunction(() => !document.getElementById('cast-discover').hasAttribute('aria-busy'));
+  assert.equal(await page.locator('#cast-discover').isDisabled(),false);
+});
+
+test('Pure K rejects malformed and oversized links locally with the specific translated error', {timeout:60000}, async t => {
+  const page = await open(t);
+  await page.locator('#cast-open').click();
+  assert.equal(await page.locator('#cast-purek-url').getAttribute('maxlength'),'32768');
+  const prefix = 'https://wx.chunk.cn/projection/login?place_code=';
+  for (const link of ['javascript:alert(1)','https://example.com/projection/login?a=b',prefix+'x'.repeat(32768),prefix+'房'.repeat(11000),prefix+'\u0001']) {
+    await page.locator('#cast-purek-url').evaluate((node,value) => {node.value=value;}, link);
+    await page.locator('#cast-purek-connect').click();
+    await page.waitForFunction(() => !document.getElementById('cast-purek-connect').hasAttribute('aria-busy'));
+    assert.equal(await page.evaluate(() => fixture.messages.at(-1)),dict.zh['cast.error.cast_purek_qr_invalid']);
+  }
+  assert.deepEqual(await page.evaluate(() => fixture.calls),[]);
+});
+
+test('cast controls share theme colors, borders and interaction states with ordinary Host controls', {timeout:90000}, async t => {
+  const page = await open(t,{hasTouch:false,viewport:{width:1100,height:1100}});
+  await page.locator('#cast-open').click();
+  await page.evaluate(() => {
+    const reference = document.createElement('div');
+    reference.className='source-action-row';
+    reference.style.cssText='position:fixed;left:500px;top:20px;display:grid;width:300px;gap:12px';
+    reference.innerHTML='<button class="toolbar-button" id="reference-secondary">Secondary</button><button class="next-button" id="reference-primary">Primary</button><input type="text" id="reference-input">';
+    document.body.append(reference);
+    document.querySelector('#cast-disconnect').disabled=false;
+  });
+  const pairs = [['#cast-discover','#reference-secondary'],['[data-cast-connect="one"]','#reference-secondary'],['#cast-purek-connect','#reference-primary'],['#cast-purek-url','#reference-input']];
+  const metrics = node => {const css=getComputedStyle(node);return Object.fromEntries(['backgroundColor','backgroundImage','color','borderTopWidth','borderTopStyle','borderTopColor','height','borderRadius','outlineColor','outlineWidth','boxShadow','opacity'].map(key=>[key,css[key]]));};
+  async function observe(selector, interaction) {
+    const control = page.locator(selector);
+    await page.mouse.move(1090,1090);
+    await page.evaluate(() => document.activeElement?.blur());
+    await control.evaluate((node,disabled) => {node.disabled=disabled;},interaction==='disabled');
+    if (interaction==='hover') await control.hover();
+    if (interaction==='focus') await control.focus();
+    if (interaction==='pressed') {await control.hover();await page.mouse.down();}
+    await control.evaluate(async node => {
+      getComputedStyle(node).backgroundColor;
+      await Promise.all(node.getAnimations().map(animation=>animation.finished.catch(()=>{})));
+    });
+    const result=await control.evaluate(metrics);
+    if(interaction==='pressed') {await page.mouse.move(1090,1090);await page.mouse.up();}
+    await control.evaluate(node=>{node.disabled=false;});
+    return result;
+  }
+  const backgrounds=[];
+  for(const theme of ['light','dark','blue']) {
+    await page.evaluate(theme => {document.documentElement.dataset.theme=theme;},theme);
+    for(const [target,reference] of pairs) {
+      for(const interaction of ['normal','hover','focus','pressed','disabled']) {
+        assert.deepEqual(await observe(target,interaction),await observe(reference,interaction),`${theme}: ${target} ${interaction}`);
+      }
+      assert.equal(await page.locator(target).evaluate(node=>node.getBoundingClientRect().height),44);
+    }
+    backgrounds.push((await observe('#cast-discover','normal')).backgroundColor);
+  }
+  assert.equal(new Set(backgrounds).size,3,'secondary surfaces must actually follow the theme');
 });
 
 test('temporary device preferences are labeled in every language without replacing rows or promising a save', { timeout: 60000 }, async t => {
@@ -206,6 +300,7 @@ test('cast retains media, mutes and pauses it, shows receiver time, and applies 
   const audio=readFileSync(new URL('./fixtures/bbdown/audio.m4a',import.meta.url)).toString('base64');
   await page.evaluate(({video,audio})=>{fixture.video.src='data:video/mp4;base64,'+video;fixture.audio.src='data:audio/mp4;base64,'+audio;},{video,audio});
   await page.waitForFunction(()=>fixture.video.readyState>=2&&fixture.audio.readyState>=2);
+  assert.deepEqual(await page.evaluate(()=>[fixture.video.muted,fixture.audio.muted,fixture.video.volume,fixture.audio.volume]),[false,false,1,1]);
   await page.evaluate(async()=>{await fixture.video.play();await fixture.audio.play();fixture.update({phase:'active',owns_playback:true,operation_id:1,position:37,duration:120,is_paused:false});});
   assert.deepEqual(await page.evaluate(()=>[fixture.video.paused,fixture.audio.paused,fixture.video.muted,fixture.audio.muted]),[true,true,true,true]);
   assert.equal(await page.evaluate(()=>displayedPlayback.currentTimeSeconds),37);

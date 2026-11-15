@@ -48,7 +48,7 @@
           const name = document.createElement("h4");
           const connect = document.createElement("button");
           connect.type = "button";
-          connect.className = "secondary";
+          connect.className = "toolbar-button";
           connect.dataset.castConnect = device.device_key;
           const label = document.createElement("p");
           label.className = "cast-mode-label";
@@ -77,7 +77,6 @@
           const mode = button.dataset.castMode;
           button.disabled = blocked;
           button.setAttribute("aria-pressed", String((cast.devices?.[device.device_key]?.mode || "auto") === mode));
-          button.setAttribute("aria-selected", button.getAttribute("aria-pressed"));
           if (button !== pending) text(button, t(`cast.mode.${mode}`));
         }
       }
@@ -98,13 +97,10 @@
 
     function waitUntil(predicate) {
       if (predicate()) return Promise.resolve();
-      return new Promise((resolve, reject) => {
-        const check = () => { if (predicate()) finish(); };
-        const timeout = setTimeout(() => finish(new Error(t("cast.error.operationTimeout"))), 45000);
-        function finish(error) {
-          clearTimeout(timeout); waiters.delete(check);
-          if (error) reject(error); else resolve();
-        }
+      // Discovery and preparation have different backend deadlines. Keep the
+      // activated guard until the authoritative terminal/cancellation snapshot.
+      return new Promise(resolve => {
+        const check = () => { if (predicate()) { waiters.delete(check); resolve(); } };
         waiters.add(check);
       });
     }
@@ -157,12 +153,39 @@
       if (view().owns_playback) await disconnect();
       await operation("connect", payload);
     }
+    async function setDeviceMode(device_key, mode) {
+      const post = () => adapter.post("/api/cast/command", {
+        command: "cast.set_device_mode", device_key, mode, revision: adapter.snapshot().revision,
+      });
+      let snapshot;
+      try { snapshot = await post(); }
+      catch (error) {
+        if (error?.code !== "cast_revision_conflict") throw error;
+        await adapter.refresh();
+        // Recheck the user's target and availability before one bounded retry.
+        if (!view().renderers?.some(device => device.device_key === device_key)) {
+          throw { code: "cast_device_preferences_unavailable" };
+        }
+        if (view().busy || ["connecting", "recovering", "discovering"].includes(view().phase)) {
+          throw { code: "cast_busy" };
+        }
+        snapshot = await post();
+      }
+      adapter.accept(snapshot);
+    }
     el("cast-open").addEventListener("click", () => { open = !open; render(); adapter.reposition(); });
     el("cast-discover").addEventListener("click", event => perform(event.currentTarget, () => operation("discover")));
     el("cast-disconnect").addEventListener("click", event => perform(event.currentTarget, disconnect));
     el("cast-purek-connect").addEventListener("click", event => perform(event.currentTarget, () => {
       const purek_qr = el("cast-purek-url").value.trim();
       if (!purek_qr) throw new Error(t("cast.purekRequired"));
+      let url;
+      try { url = new URL(purek_qr); } catch { /* report the same localized validation error */ }
+      if (new TextEncoder().encode(purek_qr).length > 32768 || /[\x00-\x20\x7f]/u.test(purek_qr)
+        || !url || url.protocol !== "https:" || url.hostname !== "wx.chunk.cn"
+        || url.pathname !== "/projection/login" || url.port || url.username || url.password || !url.search) {
+        throw { code: "cast_purek_qr_invalid" };
+      }
       return connect({ purek_qr, address_confirmed: el("cast-address-confirmed").checked });
     }));
     el("cast-devices").addEventListener("click", event => {
@@ -172,11 +195,7 @@
       perform(button, async () => {
         const device_key = row.dataset.castDevice;
         if (button.dataset.castMode) {
-          const snapshot = await adapter.post("/api/cast/command", {
-            command: "cast.set_device_mode", device_key,
-            mode: button.dataset.castMode, revision: adapter.snapshot().revision,
-          });
-          adapter.accept(snapshot);
+          await setDeviceMode(device_key, button.dataset.castMode);
         } else await connect({ device_key });
       });
     });

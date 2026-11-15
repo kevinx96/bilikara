@@ -765,6 +765,7 @@ impl PresentationState {
         validate_controller_command(&request.command)?;
         let mut runtime = self.lock_runtime()?;
         if runtime.session.generation != request.generation
+            || runtime.session.mode != PresentationMode::LocalDualScreen
             || runtime.session.phase != PresentationPhase::Active
         {
             return Err("controller command generation is stale".to_string());
@@ -809,6 +810,7 @@ impl PresentationState {
     ) -> Result<(PresentationSession, Option<ControllerCommandEnvelope>), String> {
         let mut runtime = self.lock_runtime()?;
         if runtime.session.generation != generation
+            || runtime.session.mode != PresentationMode::LocalDualScreen
             || runtime.session.phase != PresentationPhase::Active
         {
             return Err("controller command generation is stale".to_string());
@@ -847,6 +849,7 @@ impl PresentationState {
         validate_playback_state(&candidate)?;
         let mut runtime = self.lock_runtime()?;
         if runtime.session.generation != generation
+            || runtime.session.mode != PresentationMode::LocalDualScreen
             || !matches!(
                 runtime.session.phase,
                 PresentationPhase::Activating | PresentationPhase::Active
@@ -3724,6 +3727,49 @@ mod tests {
                 .begin_activation("screen".into(), "host".into(), host_placement(), false)
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn network_renderer_rejects_physical_controller_transport_without_mutation() {
+        let state = PresentationState::default();
+        let network = state.set_network_renderer(true, 0).unwrap();
+        assert_eq!(
+            state
+                .enqueue_command(ControllerCommandRequest {
+                    generation: network.generation,
+                    sequence: 1,
+                    command: ControllerCommand::Play,
+                })
+                .unwrap_err(),
+            "controller command generation is stale"
+        );
+        assert_eq!(
+            state
+                .acknowledge_command(network.generation, 1)
+                .unwrap_err(),
+            "controller command generation is stale"
+        );
+        let candidate = ControllerPlaybackState {
+            revision: 1,
+            playback_generation: Some(41),
+            item_identity: Some("song".into()),
+            title: "Song".into(),
+            paused: false,
+            current_time_seconds: 1.0,
+            duration_seconds: Some(120.0),
+            volume_percent: 80,
+            muted: false,
+            can_skip: true,
+        };
+        assert!(
+            state
+                .publish_playback_state(network.generation, candidate)
+                .is_err()
+        );
+        assert_eq!(state.snapshot().unwrap(), network);
+        let runtime = state.lock_runtime().unwrap();
+        assert!(runtime.pending_commands.is_empty());
+        assert!(runtime.playback_state.is_none());
     }
 
     #[test]
