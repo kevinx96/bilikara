@@ -38,6 +38,9 @@ pub(super) fn dispatch(
     body: Value,
 ) -> Result<Value, ApiError> {
     with_app(|app| app.native_authorize(identity, false))?;
+    if path.starts_with("/api/cast/") {
+        return cast_session::route(context, identity, method, path, &body);
+    }
     if context.desktop {
         if path.starts_with("/api/app/") {
             with_app(|app| app.native_authorize(identity, true))?;
@@ -432,6 +435,12 @@ pub(super) fn dispatch(
                 command["key"] = json!(key);
             }
             "/api/player/next" => {
+                if app.native().cast.owns_playback {
+                    let mut command = body.clone();
+                    command["action"] = json!("next");
+                    cast_session::enqueue(app, &command)?;
+                    return app.native_snapshot(host);
+                }
                 command["command"] = json!("advance_to_next");
                 command["expected_playback_generation"] =
                     json!(positive(&body, "playback_generation")?);

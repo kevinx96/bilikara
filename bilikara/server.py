@@ -1492,6 +1492,9 @@ class BilikaraHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         route = parsed.path
+        if route.startswith("/api/cast/"):
+            self._write_json({"ok": False, "error": "cast_unavailable", "code": "cast_unavailable"}, status=HTTPStatus.NOT_IMPLEMENTED)
+            return
         query = parse_qs(parsed.query)
         client_id = self.headers.get("X-Bilikara-Client", "") or query.get("client_id", [""])[0]
         referer = self.headers.get("Referer", "")
@@ -1776,6 +1779,9 @@ class BilikaraHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         route = parsed.path
+        if route.startswith("/api/cast/"):
+            self._write_json({"ok": False, "error": "cast_unavailable", "code": "cast_unavailable"}, status=HTTPStatus.NOT_IMPLEMENTED)
+            return
         query = parse_qs(parsed.query)
         client_id = self.headers.get("X-Bilikara-Client", "") or query.get("client_id", [""])[0]
         referer = self.headers.get("Referer", "")
