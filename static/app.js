@@ -23000,6 +23000,15 @@ function initializeCastHost() {
   }
   const controller = window.BilikaraCast.create({
     snapshot: () => state.data, translate: t, post: apiPost, refresh: fetchState,
+    getReport: async () => {
+      const response = await fetch("/api/cast/self-test/report", { headers: clientHeaders() });
+      const result = await response.json();
+      if (!response.ok || !result.ok) throw Object.assign(new Error(t("cast.error.cast_report_unavailable")), { code: "cast_report_unavailable" });
+      return result.data;
+    },
+    saveReport: () => saveTauriBackendDownload("/api/cast/self-test/download"),
+    copyReport: text => window.BilikaraDiagnosticsCopy.copyText(text, { fallbackMessage: t("service.diagnosticsFailed") }),
+    selfTestAvailable: () => !isAndroidNativePlaybackRuntime(),
     accept: snapshot => { acceptHostStateSnapshot(snapshot); render(); },
     physicalBusy: () => state.presentationControlBusy || ["activating", "recovering"].includes(state.presentationSession.phase),
     closePhysical, networkPresentation,

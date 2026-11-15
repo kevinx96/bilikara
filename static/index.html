@@ -337,7 +337,7 @@
                 <input type="text" inputmode="url" maxlength="32768" id="cast-purek-url" autocomplete="off" spellcheck="false" data-i18n-placeholder="cast.purekPlaceholder" />
                 <label class="cast-address-confirmation"><input type="checkbox" id="cast-address-confirmed" /><span data-i18n="cast.addressConfirmation">确认二维码来自当前门店的房台</span></label>
                 <button type="button" class="next-button" id="cast-purek-connect" data-cast-action data-label="cast.purekConnect">已完成微信授权，连接</button>
-                <div id="cast-compatibility-mount" data-cast-compatibility-mount><button type="button" id="cast-compatibility-test" data-cast-compatibility-test hidden data-i18n="cast.compatibility">兼容性测试</button></div>
+                <div id="cast-compatibility-mount" data-cast-compatibility-mount><button type="button" id="cast-compatibility-test" class="toolbar-button" data-cast-compatibility-test hidden data-i18n="cast.compatibility">兼容性测试</button></div>
               </section>
             </div>
           </div>
@@ -1978,6 +1978,7 @@
   <script src="/android-platform.js" defer></script>
   <script src="/host-updates.js" defer></script>
   <script src="/cast.js" defer></script>
+  <script src="/cast-self-test.js" defer></script>
   <script src="/app.js" defer></script>
   <script src="/android-export.js" defer></script>
   <script src="/android-playback.js" defer></script>

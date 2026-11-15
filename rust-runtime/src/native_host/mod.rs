@@ -101,6 +101,7 @@ pub(crate) struct HostContext {
     directory: PathBuf,
     cache_root: PathBuf,
     assets: AssetSource,
+    sample_root: Option<PathBuf>,
     stop: Arc<AtomicBool>,
     api_slots: Arc<Semaphore>,
     export_slots: Arc<Semaphore>,
@@ -287,6 +288,16 @@ fn start(
     desktop: bool,
     shutdown_token: Option<String>,
 ) -> Result<NativeHost, ApiError> {
+    start_with_resources(directory, assets, desktop, shutdown_token, None)
+}
+
+fn start_with_resources(
+    directory: &Path,
+    assets: AssetSource,
+    desktop: bool,
+    shutdown_token: Option<String>,
+    sample_root: Option<PathBuf>,
+) -> Result<NativeHost, ApiError> {
     let directory = directory
         .canonicalize()
         .map_err(|_| ApiError::new(503, "storage", "Host 私有目录不可用"))?;
@@ -417,6 +428,7 @@ fn start(
         directory,
         cache_root,
         assets,
+        sample_root,
         stop: Arc::new(AtomicBool::new(false)),
         api_slots: Arc::new(Semaphore::new(32)),
         export_slots: Arc::new(Semaphore::new(1)),
@@ -810,6 +822,9 @@ async fn handle_inner(
     };
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
+        if method == Method::GET && path == "/api/cast/self-test/download" {
+            return cast_session::self_test::download(&identity);
+        }
         if context.desktop && method == Method::POST && path == "/api/diagnostics/package" {
             return diagnostics::package(&context, &identity, &body);
         }

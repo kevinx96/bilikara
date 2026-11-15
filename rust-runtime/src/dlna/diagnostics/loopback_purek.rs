@@ -2,6 +2,16 @@
 use super::*;
 
 pub(crate) async fn connect(qr: &str) -> PureKOperation<Session> {
+    client()
+        .connect(
+            qr,
+            AddressApproval::LanLiteralOnly,
+            &CancellationToken::new(),
+        )
+        .await
+}
+
+pub(crate) fn client() -> PureKClient {
     PureKClient {
         policy: NetworkPolicy::LoopbackFixture,
         interfaces: Some(vec![Ipv4Addr::LOCALHOST]),
@@ -10,10 +20,8 @@ pub(crate) async fn connect(qr: &str) -> PureKOperation<Session> {
         route_lookup: |_| Ok(Ipv4Addr::LOCALHOST),
         notify_destination: (Ipv4Addr::LOCALHOST, 9).into(),
     }
-    .connect(
-        qr,
-        AddressApproval::LanLiteralOnly,
-        &CancellationToken::new(),
-    )
-    .await
+}
+
+pub(crate) fn parse(qr: &str) -> Result<Room, PureKError> {
+    Room::parse_on(qr, NetworkPolicy::LoopbackFixture)
 }

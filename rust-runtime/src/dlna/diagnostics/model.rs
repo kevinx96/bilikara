@@ -1,9 +1,9 @@
 use super::privacy::AddressClass;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 macro_rules! choices {
     ($name:ident { $($v:ident),+ $(,)? }) => {
-        #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
         #[serde(rename_all = "snake_case")]
         pub enum $name { $($v),+ }
     }
@@ -32,6 +32,7 @@ choices!(NetworkProfile {
     Private,
     Public,
     Domain,
+    NotApplicable,
     Unavailable
 });
 choices!(SelfTestStage {
@@ -116,6 +117,16 @@ choices!(Failure {
     PipelineFailed,
     Interrupted
 });
+choices!(SkipReason {
+    NoCachedSong,
+    SamplePreparationFailed,
+    SampleUnavailable,
+    SampleIntegrityFailed,
+    NoReceiver,
+    Cancelled,
+    NotNeeded,
+    PlatformUnavailable
+});
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct Environment {
@@ -123,12 +134,21 @@ pub struct Environment {
     pub exit_address_class: Option<AddressClass>,
     pub same_subnet_24: Option<bool>,
     pub windows_network_type: Option<NetworkProfile>,
+    pub windows_network_reason: Option<NetworkProfileReason>,
     pub vpn_or_tun: Option<bool>,
     pub companion_mpegts: Option<bool>,
     pub companion_aac: Option<bool>,
     pub companion_annexb: Option<bool>,
     pub sample_b_verified: Option<bool>,
 }
+choices!(NetworkProfileReason {
+    NoReceiverRoute,
+    AdapterUnavailable,
+    ComUnavailable,
+    QueryFailed,
+    NoConnectedNetwork,
+    ConflictingCategories
+});
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct MediaPreflight {
@@ -145,7 +165,8 @@ pub struct MediaPreflight {
     pub file_size: Option<u64>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UserAnswers {
     pub video: VideoAnswer,
     pub audio: Answer,

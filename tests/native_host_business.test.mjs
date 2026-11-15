@@ -17,6 +17,35 @@ const png = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 function home(t) { const result = mkdtempSync(path.join(tmpdir(), 'native business 中文 $() & ')); t.after(() => rmSync(result, { recursive: true, force: true })); return result; }
 const start = (directory, env = isolatedEnvironment(directory), assets = path.join(root, 'static')) => RunningHost.start(executable, directory, ['--headless', '--port', '0', '--data-dir', path.join(directory, 'data'), '--static-dir', assets], env);
 
+test('real Host self-test admission, cancellation, report and download are generation-safe and Host-only', { timeout: 30000 }, async t => {
+  const directory = home(t), host = await start(directory);
+  try {
+    const initial = await host.api('/api/state');
+    if (initial.session_flags.startup_choice_pending) await host.api('/api/session/startup-choice', { choice: 'new' });
+    const remote = new HttpClient(host.base);
+    await remote.request((await host.api('/api/state')).remote_access.local_url);
+    assert.equal((await remote.request('/api/cast/self-test/start', {})).status, 403);
+    const accepted = await host.api('/api/cast/self-test/start', {});
+    assert.ok(accepted.accepted && accepted.generation > 0);
+    await assert.rejects(host.api('/api/cast/self-test/start', {}), { status: 409 });
+    await assert.rejects(host.api('/api/cast/self-test/cancel', { generation: accepted.generation + 1 }), { status: 409 });
+    const started = performance.now();
+    await host.api('/api/cast/self-test/cancel', { generation: accepted.generation });
+    const done = await waitFor(async () => { const state = await host.api('/api/state'); return !state.cast.self_test.running && state.cast.phase === 'idle' && state; }, 'self-test cancellation exceeded its budget', 3000);
+    assert.ok(performance.now() - started < 3000);
+    assert.equal(done.cast.owns_playback, false);
+    const report = await host.api('/api/cast/self-test/report');
+    assert.equal(report.diagnostics.cast_self_test.metadata.cancelled, true);
+    assert.equal(report.diagnostics.cast_self_test.steps.length, 8);
+    assert.equal(report.diagnostics.cast_self_test.cells.length, 5);
+    assert.ok(report.diagnostics.cast_self_test.cells.every(c => c.terminal));
+    const download = await host.request('/api/cast/self-test/download');
+    assert.equal(download.status, 200); assert.equal(download.headers['content-type'], 'application/json');
+    assert.deepEqual(JSON.parse(download.body).diagnostics, report.diagnostics);
+    for (const route of ['/api/cast/self-test/report', '/api/cast/self-test/download']) assert.equal((await remote.request(route)).status, 403);
+  } finally { await host.close(); }
+});
+
 test('real roster and fixed queue markers survive previous-session restart with fresh incarnations', { skip: process.platform !== 'linux' && 'local TLS fixture requires Linux native trust', timeout: 60000 }, async t => {
   const directory = home(t), data = path.join(directory, 'data'); mkdirSync(data);
   writeFileSync(path.join(data, '.bilikara-desktop-rust-preview'), 'desktop-rust-preview-v1\n');

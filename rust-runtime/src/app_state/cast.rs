@@ -24,6 +24,7 @@ pub enum LearnedMode {
 pub enum Variant {
     Original,
     Uniform,
+    FileMp4,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -197,6 +198,21 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn self_test_mp4_variant_round_trips_without_changing_mode_selection() {
+        let device = Device {
+            learned_mode: Some(LearnedMode::File),
+            learned_variant: Some(Variant::FileMp4),
+            ..Default::default()
+        };
+        let value = serde_json::to_value(&device).unwrap();
+        assert_eq!(value["learned_variant"], "file_mp4");
+        let restored: Device = serde_json::from_value(value).unwrap();
+        assert_eq!(restored, device);
+        #[cfg(feature = "native-host")]
+        assert_eq!(restored.effective_mode(), Mode::File);
+    }
 
     fn seed() -> AppStateSeed {
         serde_json::from_value(

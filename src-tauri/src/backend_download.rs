@@ -37,6 +37,7 @@ enum BackendDownloadKind {
     PlaylistCsv,
     PlaylistImage,
     Diagnostics,
+    CastSelfTest,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -144,6 +145,22 @@ fn validate_backend_download_request(
             format: export_format,
             source: export_source,
             page_size: export_page_size,
+        });
+    }
+    if request_url.path() == "/api/cast/self-test/download" && request_url.query().is_none() {
+        if request.body.as_deref().is_some_and(|body| !body.is_empty()) {
+            return Err("自检报告不接受请求体".to_string());
+        }
+        return Ok(ValidatedBackendDownloadRequest {
+            method: "GET",
+            path: request.path.clone(),
+            body: String::new(),
+            client_id: client_id.map(str::to_string),
+            default_filename: "bilikara-cast-self-test.json",
+            kind: BackendDownloadKind::CastSelfTest,
+            format: "json".to_string(),
+            source: Some("cast_self_test".to_string()),
+            page_size: None,
         });
     }
     if request_url.path() == "/api/diagnostics/package" && request_url.query().is_none() {
@@ -373,6 +390,11 @@ fn validate_backend_download_response(
     let media_type = content_type.split(';').next().unwrap_or_default().trim();
     let required_extension = match request.kind {
         BackendDownloadKind::PlaylistCsv if media_type.eq_ignore_ascii_case("text/csv") => "csv",
+        BackendDownloadKind::CastSelfTest
+            if media_type.eq_ignore_ascii_case("application/json") =>
+        {
+            "json"
+        }
         BackendDownloadKind::PlaylistImage if media_type.eq_ignore_ascii_case("image/png") => "png",
         BackendDownloadKind::PlaylistImage
             if media_type.eq_ignore_ascii_case("application/zip") =>
@@ -1394,6 +1416,53 @@ mod tests {
             validate_backend_download_response(&mismatched, &request),
             Err("后端文件名与 Content-Type 不一致".to_string())
         );
+    }
+
+    #[test]
+    fn native_cast_self_test_download_has_a_narrow_json_contract() {
+        let payload = download_request("/api/cast/self-test/download", None, Some("client-1"));
+        let request = validate_backend_download_request(&payload).unwrap();
+        assert_eq!(request.kind, BackendDownloadKind::CastSelfTest);
+        assert_eq!(request.method, "GET");
+        let response = parse_backend_download_response(valid_download_response(
+            "HTTP/1.1",
+            "application/json",
+            "bilikara-cast-self-test.json",
+            b"{\"diagnostics\":{}}",
+        ))
+        .unwrap();
+        assert_eq!(
+            validate_backend_download_response(&response, &request)
+                .unwrap()
+                .required_extension,
+            "json"
+        );
+        for path in [
+            "/api/cast/self-test/report",
+            "/api/cast/self-test/download?x=1",
+            "/api/cast/self-test/download/extra",
+        ] {
+            assert!(
+                validate_backend_download_request(&download_request(path, None, Some("client-1")))
+                    .is_err()
+            );
+        }
+        assert!(
+            validate_backend_download_request(&download_request(
+                "/api/cast/self-test/download",
+                Some("{}"),
+                Some("client-1")
+            ))
+            .is_err()
+        );
+        let response = parse_backend_download_response(valid_download_response(
+            "HTTP/1.1",
+            "text/html",
+            "report.json",
+            b"{}",
+        ))
+        .unwrap();
+        assert!(validate_backend_download_response(&response, &request).is_err());
     }
 
     #[test]

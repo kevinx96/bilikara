@@ -142,7 +142,13 @@ fn artifact(
             app.native()
                 .cache_policy
                 .snapshot_with(context.desktop && context.bbdown.is_some(), aria2_available),
-            app.native().cast.trace.as_ref().map(|trace| trace.report()),
+            app.native()
+                .cast
+                .self_test
+                .trace
+                .clone()
+                .or_else(|| app.native().cast.trace.clone())
+                .map(|trace| trace.report()),
         ))
     })?;
     // Never include the login checkpoint, access URLs, tokens, or raw HTTP headers.

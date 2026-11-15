@@ -502,12 +502,27 @@ execution and native fixtures do not replace target-platform bundle acceptance.
 
 The Windows archive keeps the `bilikara/` directory. Its only top-level executable
 is `bilikara-desktop.exe`; `_internal/` contains `bilikara-desktop-host.exe`, `static/`,
-`vendor/`, `APP_VERSION` and `native-desktop.json`. Licenses, notices, rebuild
+`vendor/`, `cast-samples/`, `APP_VERSION` and `native-desktop.json`. Licenses, notices, rebuild
 sources and guides are together in `license/`. macOS installs `bilikara-desktop.app`;
 its `Contents/Frameworks/bilikara-backend.app` contains the backend under
 `Contents/MacOS/`, static/version resources under `Contents/Resources/`, and
 native libraries/tools under `Contents/Frameworks/` with relative resource
 links. Its documentation lives in the embedded backend's `Contents/Resources/license/`.
+The desktop compatibility sample and its source/license record live in
+`_internal/cast-samples/` on Windows and the backend's `Contents/Resources/cast-samples/`
+on macOS. Source development reads `resources/cast-samples/`. The Host checks the
+pinned SHA-256 before use; these files are outside `frontendDist`, are not HTTP
+assets, and are excluded from the Android shell. Android reports sample B as
+unavailable on that platform.
+Compatibility tests record A's TS once for the file/live cells and stop recording
+at 20 seconds. The optional MP4 cell needs one additional merge because T3 accepts
+only separate single-track inputs; each preparation has a 20-second deadline.
+Learned `file_mp4` is persisted as a distinct `learned_variant`; ordinary T5
+startup keeps its existing file-mode behavior until R2 adds that variant.
+HTTP reports count unique `Replaced` disconnects and the last positive-byte event
+time. They leave Range counts and nonmatching peers' `/24` relation unknown,
+because T4 does not expose request headers or peer IPs. The reported last-byte
+event time can follow the final socket write and is not a packet-level timestamp.
 The archive exposes that directory through a relative `license/` link and keeps
 `README-macOS.txt` outside the app; it has no separate backend app shortcut.
 The Linux local development layout follows the Windows directory shape,

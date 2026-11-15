@@ -9,6 +9,13 @@ use std::{
 };
 
 struct ReceiverState {
+    fault_on: Option<&'static str>,
+    no_pull: bool,
+    clients: usize,
+    different_peer: bool,
+    synchronize_pulls: bool,
+    reject_files: bool,
+    file_uri: bool,
     state: &'static str,
     position: u64,
     duration: u64,
@@ -27,6 +34,8 @@ struct Receiver {
     address: std::net::SocketAddr,
     state: Arc<Mutex<ReceiverState>>,
     stop: Arc<AtomicBool>,
+    release_ready: Arc<AtomicBool>,
+    release_hold: Arc<AtomicBool>,
     worker: Option<thread::JoinHandle<()>>,
 }
 fn field<'a>(s: &'a str, name: &str) -> Option<&'a str> {
@@ -44,6 +53,13 @@ impl Receiver {
         listener.set_nonblocking(true).unwrap();
         let address = listener.local_addr().unwrap();
         let state = Arc::new(Mutex::new(ReceiverState {
+            fault_on: None,
+            no_pull: false,
+            clients: 1,
+            different_peer: false,
+            synchronize_pulls: false,
+            reject_files: false,
+            file_uri: false,
             state: "PLAYING",
             position: 12,
             duration: 120,
@@ -59,6 +75,10 @@ impl Receiver {
             bytes: 0,
         }));
         let stop = Arc::new(AtomicBool::new(false));
+        let release_ready = Arc::new(AtomicBool::new(false));
+        let release_hold = Arc::new(AtomicBool::new(false));
+        let releasing = release_ready.clone();
+        let holding_release = release_hold.clone();
         let stopping = stop.clone();
         let shared = state.clone();
         let worker = thread::spawn(move || {
@@ -114,6 +134,26 @@ impl Receiver {
                 let completed_action = action.clone();
                 let (status, body) = if let Some(action) = action {
                     state.actions.push(action.clone());
+                    if action == "SetAVTransportURI" {
+                        let uri = field(&raw, "CurrentURI").map(str::to_owned);
+                        if uri != state.uri {
+                            state.file_uri = raw.contains("size=");
+                            state.uri = uri;
+                        }
+                    }
+                    if state.fault_on == Some(action.as_str())
+                        && !(action == "SetDeviceAuthorization"
+                            && field(&raw, "Enable") == Some("0"))
+                        || (action == "SetAVTransportURI" && state.reject_files && state.file_uri)
+                    {
+                        let body = "<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\"><s:Body><s:Fault><detail><UPnPError><errorCode>714</errorCode></UPnPError></detail></s:Fault></s:Body></s:Envelope>";
+                        let _ = write!(
+                            stream,
+                            "HTTP/1.1 500 Error\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        continue;
+                    }
                     if state.hang {
                         hung.push(stream);
                         continue;
@@ -132,26 +172,65 @@ impl Receiver {
                         }
                         "Play" => {
                             state.state = "PLAYING";
-                            if let Some(uri) = state.uri.clone() {
-                                let shared = shared.clone();
-                                pulls.push(thread::spawn(move || {
-                                    let client = reqwest::blocking::Client::builder()
-                                        .timeout(Duration::from_secs(2))
-                                        .build()
-                                        .unwrap();
-                                    if let Ok(mut response) = client.get(uri).send() {
-                                        if !response.status().is_success() {
-                                            return;
-                                        } // superseded URI
-                                        let mut data = [0u8; 8192];
-                                        while let Ok(n) = response.read(&mut data) {
-                                            if n == 0 {
-                                                break;
+                            if let Some(uri) = state.uri.clone().filter(|_| !state.no_pull) {
+                                let client = reqwest::blocking::Client::builder()
+                                    .no_proxy()
+                                    .local_address(state.different_peer.then_some(
+                                        std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 2)),
+                                    ))
+                                    .timeout(Duration::from_secs(30))
+                                    .build()
+                                    .unwrap();
+                                let mut release_reads = Vec::new();
+                                for _ in 0..state.clients {
+                                    let uri = uri.clone();
+                                    let client = client.clone();
+                                    let shared = shared.clone();
+                                    let synchronize = state.synchronize_pulls;
+                                    let (ready, received) = std::sync::mpsc::channel();
+                                    let (release, read) = std::sync::mpsc::channel();
+                                    pulls.push(thread::spawn(move || {
+                                        let response = client.get(uri).send();
+                                        if synchronize {
+                                            // A successful response header is the endpoint's
+                                            // acknowledgement of this GET, not merely an attempt.
+                                            let _ = ready.send(
+                                                response
+                                                    .as_ref()
+                                                    .map(|r| r.status())
+                                                    .map_err(ToString::to_string),
+                                            );
+                                            if read.recv_timeout(Duration::from_secs(30)).is_err() {
+                                                return;
                                             }
-                                            shared.lock().unwrap().bytes += n as u64;
                                         }
+                                        if let Ok(mut response) = response {
+                                            if !response.status().is_success() {
+                                                return;
+                                            } // superseded URI
+                                            let mut data = [0u8; 8192];
+                                            while let Ok(n) = response.read(&mut data) {
+                                                if n == 0 {
+                                                    break;
+                                                }
+                                                shared.lock().unwrap().bytes += n as u64;
+                                            }
+                                        }
+                                    }));
+                                    if synchronize {
+                                        let status = received
+                                            .recv_timeout(Duration::from_secs(30))
+                                            .expect("endpoint must acknowledge each GET")
+                                            .expect("loopback GET must reach the endpoint");
+                                        assert!(status.is_success(), "loopback GET: {status}");
+                                        // Keep earlier readers open until the Nth GET is admitted.
+                                        // In particular the fifth GET must evict an active reader.
+                                        release_reads.push(release);
                                     }
-                                }));
+                                }
+                                for release in release_reads {
+                                    let _ = release.send(());
+                                }
                             }
                             String::new()
                         }
@@ -191,6 +270,12 @@ impl Receiver {
                         "SetDeviceAuthorization" => {
                             if field(&raw, "Enable") == Some("0") {
                                 state.releases += 1;
+                                releasing.store(true, Ordering::Release);
+                                while holding_release.load(Ordering::Acquire)
+                                    && !stopping.load(Ordering::Acquire)
+                                {
+                                    thread::sleep(Duration::from_millis(1));
+                                }
                                 thread::sleep(Duration::from_millis(200));
                             }
                             String::new()
@@ -242,6 +327,8 @@ impl Receiver {
             address,
             state,
             stop,
+            release_ready,
+            release_hold,
             worker: Some(worker),
         }
     }
@@ -268,6 +355,9 @@ impl Receiver {
         outer.into()
     }
 }
+
+#[path = "self_test/scenarios.rs"]
+mod self_test_scenarios;
 impl Drop for Receiver {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
@@ -315,6 +405,9 @@ impl Host {
         };
         assert!(initialized.error().is_none());
         let context = Arc::new(HostContext {
+            sample_root: Some(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../resources/cast-samples"),
+            ),
             directory: directory.clone(),
             cache_root: directory.join("media"),
             assets: Arc::new(|_| None),

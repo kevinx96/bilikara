@@ -6,6 +6,7 @@ use crate::dlna::{CancellationToken, Renderer, diagnostics::SessionTrace};
 use std::sync::Arc;
 
 mod media;
+pub(super) mod self_test;
 mod worker;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
@@ -40,6 +41,7 @@ pub(crate) enum Control {
 
 #[derive(Default)]
 pub(crate) struct State {
+    pub self_test: self_test::State,
     pub phase: Phase,
     pub owns_playback: bool,
     pub operation: u64,
@@ -62,11 +64,12 @@ pub(crate) struct State {
     pub mux_stop: Arc<AtomicBool>,
     pub trace: Option<Arc<SessionTrace>>,
     pub worker_started: bool,
+    pub self_test_handoff_active: bool,
     pub worker_mutation: bool,
 }
 impl State {
     pub fn visible(&self) -> bool {
-        self.operation != 0 || !self.session_devices.is_empty()
+        self.operation != 0 || !self.session_devices.is_empty() || self.self_test.generation != 0
     }
     pub fn snapshot(&self, preferences: &crate::app_state::cast::Preferences) -> Value {
         let preference = self
@@ -80,7 +83,7 @@ impl State {
             })
             .cloned()
             .unwrap_or_default();
-        json!({"phase":self.phase,"owns_playback":self.owns_playback,
+        json!({"phase":self.phase,"owns_playback":self.owns_playback,"self_test":self.self_test.snapshot(),
             "operation_id":self.operation,"generation":self.generation,
             "renderers":self.renderers.iter().map(|r| json!({"device_key":renderer_key(r),"preferences_persisted":preference_key(r).is_some(),"label":r.description.name.chars().take(100).collect::<String>()})).collect::<Vec<_>>(),
             "devices":preferences.devices.iter().chain(self.session_devices.iter()).map(|(key,d)|(key.clone(),json!({"mode":d.mode,"learned_mode":d.learned_mode}))).collect::<serde_json::Map<_,_>>(),
@@ -132,6 +135,9 @@ pub(super) fn route(
     path: &str,
     body: &Value,
 ) -> Result<Value, ApiError> {
+    if path.starts_with("/api/cast/self-test/") {
+        return self_test::route(context, identity, method, path, body);
+    }
     with_app(|app| {
         app.native_authorize(identity, path != "/api/cast/command")?;
         if path == "/api/cast/report" && method == Method::GET {
@@ -150,6 +156,13 @@ pub(super) fn route(
         }
         if method != Method::POST || !body.is_object() {
             return Err(ApiError::invalid("Cast requires POST JSON"));
+        }
+        if app.native().cast.self_test.running {
+            return Err(ApiError::new(
+                409,
+                "cast_busy",
+                "Wait for compatibility testing to finish",
+            ));
         }
         if app.native_session_choice_pending() {
             return Err(ApiError::new(

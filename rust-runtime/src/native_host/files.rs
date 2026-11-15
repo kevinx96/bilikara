@@ -237,6 +237,9 @@ mod tests {
         );
         let directory = std::env::temp_dir().join(format!("bilikara-body-{}", token().unwrap()));
         let context = HostContext {
+            sample_root: Some(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../resources/cast-samples"),
+            ),
             cache_root: directory.join("media"),
             directory: directory.clone(),
             assets: Arc::new(|_| None),

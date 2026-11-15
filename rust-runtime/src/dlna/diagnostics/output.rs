@@ -23,6 +23,7 @@ pub(super) struct Output {
     pub id: u64,
     pub device: String,
     pub cell: Option<Cell>,
+    pub skip_reason: Option<SkipReason>,
     pub mode: Mode,
     pub mime: Mime,
     pub preflight: MediaPreflight,
@@ -70,6 +71,7 @@ impl Output {
             id,
             device,
             cell: config.cell,
+            skip_reason: None,
             mode: config.mode,
             mime: config.mime,
             preflight: config.preflight,
@@ -216,6 +218,9 @@ impl Output {
     }
 
     pub fn classification(&self, now: u64) -> (&'static str, Option<&'static str>) {
+        if self.skip_reason.is_some() {
+            return ("skipped", None);
+        }
         let now = self.ended_ms.unwrap_or(now);
         if self.failure == Some(Failure::PipelineFailed) && self.first_ts_packet_ms.is_none() {
             return ("media_preparation", Some("cast_media_prepare_failed"));
@@ -276,6 +281,11 @@ impl Output {
         value["stage"] = json!(stage);
         value["code"] = json!(code);
         value["media_time_basis"] = json!("dts_watermark_not_pts");
+        value["observation_limits"] = json!({
+            "range_requests":"unavailable: T4 events do not expose Range headers",
+            "source_same_subnet_24":"true only for exact description-peer match; otherwise unknown because T4 does not expose peer IP",
+            "last_byte_ms":"session elapsed time of last observed positive-byte event; disconnect events may follow the final socket write"
+        });
         value["elapsed_ms"] = json!(self.ended_ms.unwrap_or(now).saturating_sub(self.started_ms));
         let mut actions = self.actions.clone();
         actions.sort_by_key(|e| (e.at_ms, e.sequence));

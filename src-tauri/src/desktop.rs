@@ -11,6 +11,28 @@ fn context() -> tauri::Context<tauri::Wry> {
     tauri::generate_context!()
 }
 
+#[test]
+#[cfg(feature = "custom-protocol")]
+fn desktop_shell_embedded_assets_exclude_native_cast_samples() {
+    // Exercise the actual context compiled into the shell, including compressed
+    // assets; searching raw executable bytes would miss compressed payloads.
+    let context = context();
+    assert!(context.assets().get(&"index.html".into()).is_some());
+    assert!(context.assets().get(&"cast-self-test.js".into()).is_some());
+    assert!(
+        context
+            .assets()
+            .get(&"cast-samples/sample-b.ts".into())
+            .is_none()
+    );
+    assert!(
+        context
+            .assets()
+            .get(&"cast-samples/SOURCE.md".into())
+            .is_none()
+    );
+}
+
 pub(crate) fn run() {
     if std::env::args().skip(1).any(|arg| arg == "--import-legacy") {
         crate::desktop_import::run(context());

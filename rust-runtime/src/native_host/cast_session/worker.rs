@@ -48,7 +48,7 @@ fn update<T>(operation: u64, action: impl FnOnce(&mut State) -> T) -> Option<T> 
     .ok()
     .flatten()
 }
-fn platform() -> diagnostics::Platform {
+pub(super) fn platform() -> diagnostics::Platform {
     if cfg!(windows) {
         diagnostics::Platform::Windows
     } else if cfg!(target_os = "macos") {
@@ -94,6 +94,11 @@ pub(super) fn run(context: Arc<HostContext>) {
         while !context.stop.load(Ordering::Acquire) {
             let pending = with_app(|app| {
                 let s = &mut app.native().cast;
+                // The self-test runtime temporarily owns the ordinary playback
+                // loop. Superseding requests wait for its awaited cleanup.
+                if s.self_test_handoff_active {
+                    return Ok(None);
+                }
                 Ok(s.pending.take().map(|r| {
                     s.cancel = CancellationToken::new();
                     s.mux_stop = Arc::new(AtomicBool::new(false));
@@ -183,7 +188,7 @@ pub(super) fn run(context: Arc<HostContext>) {
     });
 }
 
-fn restore(id: u64, failure: Option<String>) {
+pub(super) fn restore(id: u64, failure: Option<String>) {
     let _ = with_app(|app| {
         let snap = app.native_cast_input()?;
         let state = &mut app.native().cast;
@@ -288,6 +293,86 @@ struct Output {
     position_usable: bool,
     clock_running: bool,
     intentional_stop: bool,
+}
+
+/// Transfer the already admitted receiver/registration from the self-test into
+/// the ordinary T5 playback loop. The room never returns to a QR/string form.
+pub(super) async fn handoff(
+    context: &Arc<HostContext>,
+    previous: u64,
+    renderer: Renderer,
+    mut room: Option<purek::Session>,
+    cancel: &CancellationToken,
+) {
+    let id = with_app(|app| {
+        let state = &mut app.native().cast;
+        if state.operation != previous
+            || cancel.is_cancelled()
+            || context.stop.load(Ordering::Acquire)
+        {
+            return Err(error("cancelled"));
+        }
+        state.operation += 1;
+        state.phase = Phase::Connecting;
+        state.cancel = cancel.clone();
+        state.mux_stop = Arc::new(AtomicBool::new(false));
+        state.owns_playback = true;
+        state.self_test_handoff_active = true;
+        state.self_test.running = false;
+        let admitted = (state.operation, state.mux_stop.clone());
+        app.native().revision += 1;
+        Ok(admitted)
+    });
+    let Ok((id, stop)) = id else {
+        if let Some(room) = &mut room {
+            let _ = room.release().await;
+        }
+        restore(previous, None);
+        return;
+    };
+    let trace = SessionTrace::new(
+        platform(),
+        if room.is_some() {
+            diagnostics::TargetKind::Purek
+        } else {
+            diagnostics::TargetKind::Generic
+        },
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS,
+    )
+    .map(Arc::new);
+    let result = if let Ok(trace) = &trace {
+        let connection = trace.begin_connection();
+        update(id, |state| state.trace = Some(trace.clone()));
+        if cancel.is_cancelled() {
+            Err(error("cancelled"))
+        } else {
+            play_session(
+                context,
+                id,
+                renderer,
+                (trace, connection),
+                cancel,
+                &stop,
+                &mut room,
+            )
+            .await
+        }
+    } else {
+        Err(error("cast_diagnostics_unavailable"))
+    };
+    stop.store(true, Ordering::Release);
+    if let Some(room) = &mut room {
+        let _ = room.release().await;
+    }
+    if let Ok(trace) = trace {
+        trace.finish(cancel.is_cancelled());
+    }
+    restore(id, result.err().map(|error| error.code));
+    let _ = with_app(|app| {
+        app.native().cast.self_test_handoff_active = false;
+        Ok(())
+    });
 }
 type Prefetch = (
     String,
