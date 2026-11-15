@@ -212,7 +212,7 @@ fn hung_poll_is_interrupted_by_command_and_recovers_within_deadline() {
     let _serial = GLOBAL_APP_TEST_LOCK
         .lock()
         .unwrap_or_else(|p| p.into_inner());
-    for delay in [1500, 2500] {
+    for delay in [1500, 2500, 3500] {
         slow_receiver_keeps_session_and_changes_program(delay);
     }
     let host = Host::new();
@@ -241,10 +241,13 @@ fn hung_poll_is_interrupted_by_command_and_recovers_within_deadline() {
             > polls
     });
     let command = Instant::now();
-    host.command("pause");
-    assert!(command.elapsed() < Duration::from_millis(2600));
+    let timed_out = host.command("pause");
+    assert_eq!(timed_out["cast"]["error_code"], "timeout");
+    // The approved 4s command timeout replaces the old 2s timeout.
+    assert!(command.elapsed() < Duration::from_millis(4600));
     host.wait(|s| s["cast"]["phase"] == "recovering");
-    assert!(began.elapsed() < Duration::from_secs(10));
+    // The in-flight command can now consume 4s before the next monitor reply.
+    assert!(began.elapsed() < Duration::from_secs(12));
     host.wait(|s| s["cast"]["phase"] == "idle");
     assert!(began.elapsed() < Duration::from_secs(15));
     assert_eq!(
@@ -277,6 +280,13 @@ fn hung_poll_is_interrupted_by_command_and_recovers_within_deadline() {
             .count()
             > polls
     });
+    // A real command timeout must release busy and the worker's queue, even
+    // though the receiver keeps the abandoned TCP connection open.
+    let timeout_started = Instant::now();
+    let timed_out = host.command("pause");
+    assert_eq!(timed_out["cast"]["error_code"], "timeout");
+    assert_eq!(timed_out["cast"]["busy"], false);
+    assert!(timeout_started.elapsed() < Duration::from_millis(4600));
     let began = Instant::now();
     host.post(
         "/api/cast/command",
@@ -301,9 +311,16 @@ fn slow_receiver_keeps_session_and_changes_program(delay_ms: u64) {
     host.connect(receiver.renderer());
     // Three complete real SOAP poll pairs, not a sleep followed by one lucky
     // snapshot. Every observed snapshot must retain the session and ownership.
-    host.wait(|s| {
+    let assert_active = |s: &Value| {
         assert_eq!(s["cast"]["phase"], "active", "{delay_ms}ms: {}", s["cast"]);
         assert_eq!(s["cast"]["owns_playback"], true);
+        assert!(
+            s["cast"]["error_code"].is_null(),
+            "{delay_ms}ms: {}",
+            s["cast"]
+        );
+    };
+    let completed_polls = || {
         receiver
             .state
             .lock()
@@ -312,14 +329,51 @@ fn slow_receiver_keeps_session_and_changes_program(delay_ms: u64) {
             .iter()
             .filter(|a| *a == "GetPositionInfo")
             .count()
-            >= 3
-    });
-    assert_eq!(host.command("next")["current_item"]["id"], "song-two");
+    };
+    // Only the new 3.5s case needs per-pair waits (>20s for three pairs).
+    // Existing cases keep the combined 20s deadline for all three pairs.
+    let first_count = if delay_ms == 3500 { 1 } else { 3 };
+    for count in first_count..=3 {
+        host.wait(|s| {
+            assert_active(s);
+            completed_polls() >= count
+        });
+    }
+    let paused = host.command("pause");
+    assert_active(&paused);
+    assert_eq!(paused["cast"]["is_paused"], true);
+    assert_eq!(paused["cast"]["receiver_state"], "paused");
+    let resumed = host.command("play");
+    assert_active(&resumed);
+    assert_eq!(resumed["cast"]["is_paused"], false);
+    let baseline = completed_polls();
+    // Verify monitoring still progresses after controls, not only that busy
+    // cleared before an abandoned slow request could back up the receiver.
+    for count in 1..=3 {
+        host.wait(|s| {
+            assert_active(s);
+            completed_polls() >= baseline + count
+        });
+    }
+    let next = host.command("next");
+    assert_active(&next);
+    assert_eq!(next["current_item"]["id"], "song-two");
     host.wait(|s| s["cast"]["duration"] == 120.0);
     {
         let mut state = receiver.state.lock().unwrap();
         state.position = 119;
         state.state = "STOPPED";
+    }
+    if delay_ms == 3500 {
+        // This new case needs two monitor replies plus the next start's SOAP
+        // sequence (>20s total). Bound observation and startup separately;
+        // retain the original combined deadline for the existing cases.
+        host.wait(|s| {
+            assert_ne!(s["cast"]["phase"], "recovering");
+            assert_ne!(s["cast"]["phase"], "idle");
+            assert!(s["cast"]["error_code"].is_null());
+            s["current_item"]["id"] == "song-three"
+        });
     }
     let next = host.wait(|s| {
         assert_ne!(s["cast"]["phase"], "recovering");

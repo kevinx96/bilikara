@@ -597,7 +597,7 @@ async fn play_session(
             if Instant::now() >= next_poll {
                 next_poll = Instant::now() + Duration::from_secs(2);
                 // T2 retains its 5s per-request bound. The session gives a
-                // monitor RPC 4s and a command 2s. Check pending commands every
+                // monitor RPC and a command 4s. Check pending commands every
                 // 20ms; dropping a poll future aborts its HTTP request.
                 let sample = tokio::select! {
                     biased;
@@ -1145,7 +1145,9 @@ async fn command_pending(id: u64) {
     }
 }
 async fn soap<T>(future: impl std::future::Future<Output = Operation<T>>) -> Operation<T> {
-    tokio::time::timeout(Duration::from_secs(2), future)
+    // Controls must tolerate the same slow replies as monitoring. A timeout
+    // drops this request future before the worker accepts the next command.
+    tokio::time::timeout(MONITOR_TIMEOUT, future)
         .await
         .unwrap_or_else(|_| Operation {
             result: Err(crate::dlna::DlnaError {
