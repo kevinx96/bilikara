@@ -86,7 +86,8 @@
     }
     function close() { if (!current().running && !buttons.size) {
       dialog.close(); countdown();
-      const target = opener?.getClientRects().length && !opener.disabled ? opener : document.getElementById('cast-open');
+      const target = [opener, document.getElementById('cast-open'), document.getElementById('presentation-settings-toggle')]
+        .find(node => node?.getClientRects().length && !node.disabled);
       target?.focus();
     } }
     trigger.hidden = false;

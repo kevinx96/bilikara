@@ -49,6 +49,29 @@ async function open(t, width = 700, language = 'zh', hasTouch = true) {
   return page;
 }
 
+test('closing compatibility dialog restores the top-level entry focus when its menu is closed', async t => {
+  const page = await open(t);
+  const markup = read('index.html');
+  for (const id of ['presentation-settings-toggle', 'cast-open']) {
+    const button = markup.match(new RegExp(`<button[^>]+id="${id}"[^>]*>[\\s\\S]*?<\\/button>`))[0];
+    await page.evaluate(({ id, button }) => {
+      const parent = id === 'cast-open' ? document.querySelector('.cast-entry') : document.body;
+      parent.insertAdjacentHTML('afterbegin', button);
+    }, { id, button });
+  }
+  for (const method of ['button', 'escape']) {
+    await page.locator('.cast-entry').evaluate(node => { node.hidden = true; });
+    if (method === 'button') await page.locator('[data-test-close]').click();
+    else await page.keyboard.press('Escape');
+    assert.equal(await page.locator('#cast-self-test').evaluate(node => node.open), false);
+    assert.equal(await page.evaluate(() => document.activeElement === document.getElementById('presentation-settings-toggle')), true, method);
+    if (method === 'button') {
+      await page.locator('.cast-entry').evaluate(node => { node.hidden = false; });
+      await page.locator('[data-cast-compatibility-test]').click();
+    }
+  }
+});
+
 test('compatibility dialog guards async actions, preserves drafts, copies and saves', async t => {
   const page = await open(t);
   await page.clock.install();
