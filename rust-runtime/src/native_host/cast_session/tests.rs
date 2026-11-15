@@ -13,6 +13,8 @@ struct ReceiverState {
     position: u64,
     duration: u64,
     offline: bool,
+    hang: bool,
+    no_position: bool,
     unsupported: bool,
     actions: Vec<String>,
     uri: Option<String>,
@@ -44,6 +46,8 @@ impl Receiver {
             position: 12,
             duration: 120,
             offline: false,
+            hang: false,
+            no_position: false,
             unsupported: false,
             actions: Vec::new(),
             uri: None,
@@ -55,6 +59,7 @@ impl Receiver {
         let shared = state.clone();
         let worker = thread::spawn(move || {
             let mut pulls = Vec::new();
+            let mut hung = Vec::new();
             while !stopping.load(Ordering::Acquire) {
                 let Ok((mut stream, _)) = listener.accept() else {
                     thread::sleep(Duration::from_millis(5));
@@ -99,6 +104,10 @@ impl Receiver {
                 let mut state = shared.lock().unwrap();
                 let (status, body) = if let Some(action) = action {
                     state.actions.push(action.clone());
+                    if state.hang {
+                        hung.push(stream);
+                        continue;
+                    }
                     if state.offline {
                         continue;
                     }
@@ -148,7 +157,8 @@ impl Receiver {
                             let target = field(&raw, "Target").unwrap();
                             state.position = target
                                 .split(':')
-                                .fold(0, |v, p| v * 60 + p.parse::<u64>().unwrap());
+                                .fold(0.0, |v, p| v * 60.0 + p.parse::<f64>().unwrap())
+                                as u64;
                             String::new()
                         }
                         "GetTransportInfo" => format!(
@@ -157,8 +167,16 @@ impl Receiver {
                         ),
                         "GetPositionInfo" => format!(
                             "<Track>1</Track><TrackDuration>{}</TrackDuration><RelTime>{}</RelTime>",
-                            time(state.duration),
-                            time(state.position)
+                            if state.no_position {
+                                "NOT_IMPLEMENTED".into()
+                            } else {
+                                time(state.duration)
+                            },
+                            if state.no_position {
+                                "NOT_IMPLEMENTED".into()
+                            } else {
+                                time(state.position)
+                            }
                         ),
                         "SetDeviceAuthorization" => {
                             if field(&raw, "Enable") == Some("0") {
@@ -242,6 +260,15 @@ struct Host {
 }
 impl Host {
     fn new() -> Self {
+        Self::with_duration(120)
+    }
+    fn with_duration(duration: u64) -> Self {
+        Self::with_initial_storage(duration, None)
+    }
+    fn with_storage(duration: u64, corrupt: bool) -> Self {
+        Self::with_initial_storage(duration, Some(corrupt))
+    }
+    fn with_initial_storage(duration: u64, storage: Option<bool>) -> Self {
         crate::execute_app_state(AppStateRequest::Shutdown { schema_version: 1 });
         let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -250,14 +277,18 @@ impl Host {
             .join(format!("cast-session-{}", token().unwrap()));
         std::fs::create_dir_all(&directory).unwrap();
         let seed=serde_json::from_value(json!({"session_users":["Alice"],"session_started_at":1,"session_played_file":"session.json","updated_at":1})).unwrap();
-        assert!(
+        let initialized = if let Some(corrupt) = storage {
+            if corrupt {
+                std::fs::write(directory.join("cast-devices.json"), b"{broken").unwrap();
+            }
+            crate::app_state::initialize_native_host(&directory, seed)
+        } else {
             crate::execute_app_state(AppStateRequest::Initialize {
                 schema_version: 1,
-                state: Box::new(seed)
+                state: Box::new(seed),
             })
-            .error()
-            .is_none()
-        );
+        };
+        assert!(initialized.error().is_none());
         let context = Arc::new(HostContext {
             directory: directory.clone(),
             cache_root: directory.join("media"),
@@ -296,12 +327,12 @@ impl Host {
             },
         };
         for id in ["song-one", "song-two", "song-three"] {
-            host.song(id);
+            host.song(id, duration);
         }
         host
     }
-    fn song(&self, id: &str) {
-        let item=serde_json::from_value(json!({"id":id,"original_url":"https://example.test/video","resolved_url":"https://example.test/video","bvid":id,"aid":1,"cid":2,"page":1,"title":id,"part_title":"P1","display_title":id,"cover_url":"","embed_url":"","selected_pages":[1],"selected_cids":[2],"selected_durations":[120],"selected_parts":["P1"],"available_pages":[1],"available_cids":[2],"available_durations":[120],"available_parts":["P1"]})).unwrap();
+    fn song(&self, id: &str, duration: u64) {
+        let item=serde_json::from_value(json!({"id":id,"original_url":"https://example.test/video","resolved_url":"https://example.test/video","bvid":id,"aid":1,"cid":2,"page":1,"title":id,"part_title":"P1","display_title":id,"cover_url":"","embed_url":"","selected_pages":[1],"selected_cids":[2],"selected_durations":[duration],"selected_parts":["P1"],"available_pages":[1],"available_cids":[2],"available_durations":[duration],"available_parts":["P1"]})).unwrap();
         assert!(
             crate::execute_app_state(AppStateRequest::AddItem {
                 schema_version: 1,
@@ -388,7 +419,7 @@ impl Host {
         }
     }
     fn connect(&self, renderer: Renderer) {
-        let key = renderer.context.device_key.clone();
+        let key = renderer_key(&renderer);
         with_app(|app| {
             app.native().cast.renderers = vec![renderer];
             Ok(())
@@ -425,8 +456,11 @@ fn cancelling_discovery_does_not_issue_a_local_resume() {
         .lock()
         .unwrap_or_else(|p| p.into_inner());
     let host = Host::new();
-    host.post("/api/cast/discover", json!({"description_url":"invalid"}))
-        .unwrap();
+    host.post(
+        "/api/cast/discover",
+        json!({"description_url":"http://192.168.254.254/description"}),
+    )
+    .unwrap();
     host.post("/api/cast/disconnect", json!({})).unwrap();
     let snap = host.wait(|s| s["cast"]["phase"] == "idle" && s["cast"]["busy"] == false);
     assert_eq!(snap["cast"]["owns_playback"], false);
@@ -583,7 +617,14 @@ fn api_device_revision_permissions_busy_and_live_seek_rejection() {
         .lock()
         .unwrap_or_else(|p| p.into_inner());
     let host = Host::new();
-    let key = "0123456789abcdef0123456789abcdef";
+    let receiver = Receiver::new();
+    let renderer = receiver.renderer();
+    let key = renderer_key(&renderer);
+    with_app(|app| {
+        app.native().cast.renderers.push(renderer);
+        Ok(())
+    })
+    .unwrap();
     let revision = host.snapshot()["revision"].clone();
     let request = json!({"command":"cast.set_device_mode","device_key":key,"revision":revision,"mode":"live"});
     let remote = Identity {
@@ -606,7 +647,7 @@ fn api_device_revision_permissions_busy_and_live_seek_rejection() {
         "forbidden"
     );
     let result = host.post("/api/cast/command", request.clone()).unwrap();
-    assert_eq!(result["cast"]["devices"][key]["mode"], "live");
+    assert_eq!(result["cast"]["devices"][&key]["mode"], "live");
     assert_eq!(
         host.post("/api/cast/command", request).unwrap_err().code,
         "cast_revision_conflict"
@@ -670,7 +711,12 @@ fn learned_live_mode_pause_resume_mode_switch_and_connect_cancellation() {
     let receiver = Receiver::new();
     let host = Host::new();
     let renderer = receiver.renderer();
-    let key = renderer.context.device_key.clone();
+    let key = renderer_key(&renderer);
+    with_app(|app| {
+        app.native().cast.renderers.push(renderer.clone());
+        Ok(())
+    })
+    .unwrap();
     host.post("/api/cast/command",json!({"command":"cast.set_device_learning","device_key":key,"revision":host.snapshot()["revision"],"learned_mode":"live","learned_variant":"original"})).unwrap();
     host.connect(renderer.clone());
     assert_eq!(host.snapshot()["cast"]["effective_mode"], "live");
@@ -702,3 +748,6 @@ fn learned_live_mode_pause_resume_mode_switch_and_connect_cancellation() {
     thread::sleep(Duration::from_millis(2200));
     assert_eq!(receiver.state.lock().unwrap().actions.len(), count);
 }
+
+#[path = "tests_round1.rs"]
+mod round1;

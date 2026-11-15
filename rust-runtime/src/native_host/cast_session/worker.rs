@@ -3,7 +3,10 @@ use crate::app_state::{AppStateRequest, PlaylistItem};
 use crate::dlna::{
     Operation,
     cast_http::{CastEndpoint, HttpStageResult, ServerIdentity, TsMime},
-    control::{CapabilityQuery, ControlClient, MonitorDecision, StartRequest, TransportMonitor},
+    control::{
+        CapabilityQuery, ControlClient, MonitorDecision, MonitorSample, StartRequest,
+        TransportMonitor,
+    },
     diagnostics::{self, OutputConfig},
     discovery,
     dlna_policy::{FileMetadata, TransportState},
@@ -258,6 +261,11 @@ struct Output {
     duration: f64,
     paused: bool,
     seen_playing: bool,
+    seek_settles: Instant,
+    last_position: Option<f64>,
+    position_advanced: Instant,
+    position_usable: bool,
+    intentional_stop: bool,
 }
 type Prefetch = (
     String,
@@ -280,21 +288,19 @@ async fn play_session(
         if app.native().cast.operation != id {
             return Err(error("cancelled"));
         }
-        let key = &renderer.context.device_key;
-        let mut device = app
-            .cast_preferences()?
-            .devices
-            .get(key)
+        let key = preference_key(&renderer);
+        let mut device = key
+            .as_ref()
+            .and_then(|key| app.cast_preferences().ok()?.devices.get(key))
             .cloned()
+            .or_else(|| {
+                app.native()
+                    .cast
+                    .session_devices
+                    .get(&renderer_key(&renderer))
+                    .cloned()
+            })
             .unwrap_or_default();
-        let before = device.clone();
-        device.label = renderer
-            .description
-            .name
-            .chars()
-            .filter(|c| !c.is_control())
-            .take(100)
-            .collect();
         device.vendor_class = match renderer.description.vendor_class {
             crate::dlna::dlna_policy::VendorClass::Generic => {
                 crate::app_state::cast::Vendor::Generic
@@ -304,22 +310,32 @@ async fn play_session(
                 crate::app_state::cast::Vendor::Dolphinstar
             }
         };
-        if before != device || !app.cast_preferences()?.devices.contains_key(key) {
+        let mode = device.effective_mode();
+        if let Some(key) = &key {
+            device.last_used = chrono::Utc::now().timestamp_millis().max(0) as u64;
             let revision = app.native_core_snapshot()?.revision;
-            app.cast_set_device(key, revision, device)?;
+            if app.cast_set_device(key, revision, device).is_err() {
+                // Preference I/O is not a transport failure. Safe diagnostic log
+                // is included by the Host diagnostic package, without raw keys.
+                eprintln!("[cast] cast_preferences_write_failed; continuing connection");
+                app.native_diagnostic(
+                    &json!({"event":"cast_preferences_write_failed", "reason":"persistence_error"}),
+                    now(),
+                );
+            }
         }
-        let mode = app
-            .cast_preferences()?
-            .devices
-            .get(&renderer.context.device_key)
-            .cloned()
-            .unwrap_or_default()
-            .effective_mode();
         let state = &mut app.native().cast;
         if state.operation != id {
             return Err(error("cancelled"));
         }
-        state.selected = Some(renderer.context.device_key.clone());
+        state.selected = Some(renderer_key(&renderer));
+        if !state
+            .renderers
+            .iter()
+            .any(|r| renderer_key(r) == renderer_key(&renderer))
+        {
+            state.renderers.push(renderer.clone());
+        }
         state.mode = mode;
         state.resume = None;
         Ok(mode)
@@ -357,6 +373,7 @@ async fn play_session(
     };
     let mut events = endpoint.subscribe();
     let mut output: Option<Output> = None;
+    let mut output_ids = std::collections::BTreeMap::new();
     let mut prefetched: Option<Prefetch> = None;
     let result = async {
         let position = with_app(|app| Ok(app.native().cast.position))?;
@@ -381,7 +398,8 @@ async fn play_session(
         );
         let mut monitor = TransportMonitor::default();
         let mut position_enabled = true;
-        let mut position_failures = 0u8;
+        let mut poll_failures = 0u8;
+        let mut failure_since: Option<Instant> = None;
         let mut next_poll = Instant::now();
         let mut recovery: Option<Instant> = None;
         let mut stopped = 0u8;
@@ -390,19 +408,18 @@ async fn play_session(
             if cancel.is_cancelled() {
                 break;
             }
+            if failure_since.is_some_and(|since| since.elapsed() >= Duration::from_secs(6)) {
+                let since = recovery.get_or_insert_with(Instant::now);
+                update(id, |s| { s.phase = Phase::Recovering; s.error_code = Some("cast_receiver_unreachable".into()); });
+                if since.elapsed() >= Duration::from_secs(4) { return Err(error("cast_receiver_unreachable")); }
+            }
             let out = output.as_mut().unwrap();
             if let Some(live) = &mut out.live {
                 live.check().await?;
             }
-            while let Ok(event) = events.try_recv() {
-                if event.generation == Some(out.generation) {
-                    trace.http_at(out.id, trace.elapsed(), &event);
-                    if !position_enabled {
-                        live_progress(id, out, &event);
-                    }
-                }
-            }
-            let (snap, control, mode) = with_app(|app| {
+            output_ids.insert(out.generation, out.id);
+            drain_http(trace, &mut events, &output_ids, Some((id, out)));
+            let (snap, mut control, mode) = with_app(|app| {
                 Ok((
                     app.native_cast_input()?,
                     app.native().cast.control.take(),
@@ -414,17 +431,24 @@ async fn play_session(
                     || i.selected_audio_variant_id != out.item.selected_audio_variant_id
             }) || snap.playback_generation != out.playback_generation
             {
-                return Err(error("cast_program_changed"));
+                if snap.current_item.is_none() {
+                    return Err(error(if snap.next_item.is_some() { "cast_no_current_item" } else { "cast_queue_finished" }));
+                }
+                control = Some(Control::ProgramChanged);
+                update(id, |s| s.control_busy = true);
             }
             if let Some(control) = control {
                 match control {
+                    Control::Pause if out.paused => {}
+                    Control::Play if !out.paused => {}
                     Control::Pause if out.live.is_some() => {
-                        let _ = record(trace, connection, Some(out.id), client.stop(cancel).await);
+                        let _ = record(trace, connection, Some(out.id), soap(client.stop(cancel)).await);
                         if let Some(live) = out.live.take() {
                             live.stop().await;
                         }
                         endpoint.clear_generation();
                         out.paused = true;
+                        out.intentional_stop = true;
                         update(id, |s| {
                             s.paused = true;
                             s.receiver_state = Some("paused");
@@ -433,9 +457,9 @@ async fn play_session(
                     Control::Pause | Control::Play if mode == Mode::File => {
                         let pause = matches!(control, Control::Pause);
                         let action = if pause {
-                            client.pause(cancel).await
+                            soap(client.pause(cancel)).await
                         } else {
-                            client.play(cancel).await
+                            soap(client.play(cancel)).await
                         };
                         match record(trace, connection, Some(out.id), action) {
                             Ok(()) => {
@@ -458,9 +482,12 @@ async fn play_session(
                             trace,
                             connection,
                             Some(out.id),
-                            client.seek(Duration::from_secs_f64(position), cancel).await,
+                            soap(client.seek(Duration::from_secs_f64(position), cancel)).await,
                         ) {
                             Ok(()) => {
+                                out.seek_settles = Instant::now() + Duration::from_secs(4);
+                                out.last_position = None;
+                                out.position_advanced = Instant::now();
                                 out.start = position;
                                 out.began = Instant::now();
                                 update(id, |s| s.position = position);
@@ -470,11 +497,11 @@ async fn play_session(
                             }
                         }
                     }
-                    Control::Next | Control::Restart | Control::Play | Control::Pause => {
-                        let next = matches!(control, Control::Next);
+                    Control::Next | Control::ProgramChanged | Control::Restart | Control::Play | Control::Pause => {
+                        let next = matches!(control, Control::Next | Control::ProgramChanged);
                         let retain_pause = matches!(control, Control::Restart) && out.paused;
                         let position = if next {
-                            advance(id, out.playback_generation)?;
+                            if matches!(control, Control::Next) { advance(id, out.playback_generation)?; }
                             0.0
                         } else {
                             with_app(|app| Ok(app.native().cast.position))?
@@ -484,7 +511,8 @@ async fn play_session(
                         }
                         trace.complete_output(out.id, Default::default());
                         endpoint.clear_generation();
-                        if !next && let Some((_, stopping, _)) = &prefetched {
+                        if let Some((key, stopping, _)) = &prefetched
+                            && (!next || (matches!(control, Control::ProgramChanged) && snap.current_item.as_ref().is_none_or(|item| media_key(item) != *key))) {
                             stopping.store(true, Ordering::Release);
                         }
                         let cached = take_prefetch(&mut prefetched, cancel).await;
@@ -515,7 +543,8 @@ async fn play_session(
                         }
                         monitor = TransportMonitor::default();
                         position_enabled = true;
-                        position_failures = 0;
+                        poll_failures = 0;
+                        failure_since = None;
                         stopped = 0;
                         recovery = None;
                     }
@@ -539,54 +568,74 @@ async fn play_session(
             }
             if Instant::now() >= next_poll {
                 next_poll = Instant::now() + Duration::from_secs(2);
-                let sample = monitor.poll(&client, cancel).await;
-                if let Some(op) = sample.operation {
-                    trace.record_operation(Some(connection), Some(out.id), &op);
+                // T2 retains its 5s per-request bound. The session gives a
+                // monitor RPC 1s and a command 2s. Commands interrupt polling
+                // within 20ms; dropping a poll future aborts its HTTP request.
+                let sample = tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => break,
+                    _ = command_pending(id) => { next_poll = Instant::now(); continue; },
+                    result = tokio::time::timeout(Duration::from_secs(1), monitor.poll(&client, cancel)) =>
+                        result.unwrap_or(MonitorSample { decision: MonitorDecision::TransientFailure, state: None, operation: None }),
+                };
+                if let Some(op) = &sample.operation {
+                    trace.record_operation(Some(connection), Some(out.id), op);
                 }
+                let transport_failed = matches!(sample.decision, MonitorDecision::TransientFailure | MonitorDecision::Disconnected);
                 let old_position = with_app(|app| Ok(app.native().cast.position))?;
-                if position_enabled {
-                    let op = client.get_position_info(cancel).await;
-                    trace.record_operation(Some(connection), Some(out.id), &op);
-                    match op.result {
-                        Ok(info) => {
-                            position_failures = 0;
-                            update(id, |s| {
-                                if let Some(d) = info.duration.filter(|d| !d.is_zero()) {
-                                    s.duration = d.as_secs_f64();
+                let mut position_failed = false;
+                if position_enabled && !transport_failed && !out.intentional_stop {
+                    let result = tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => break,
+                        _ = command_pending(id) => { next_poll = Instant::now(); continue; },
+                        result = tokio::time::timeout(Duration::from_secs(1), client.get_position_info(cancel)) => result,
+                    };
+                    match result {
+                        Ok(op) => {
+                            trace.record_operation(Some(connection), Some(out.id), &op);
+                            match op.result {
+                                Ok(info) => {
+                                    if let Some(d) = info.duration.filter(|d| !d.is_zero()) {
+                                        let duration = d.as_secs_f64() + if mode == Mode::Live { out.receiver_origin } else { 0.0 };
+                                        update(id, |s| s.duration = duration);
+                                    }
+                                    let position = info.position.map(|p| p.as_secs_f64());
+                                    let advances = position.zip(out.last_position).is_none_or(|(p, old)| p > old);
+                                    if advances { out.position_advanced = Instant::now(); }
+                                    let usable = position.is_some_and(|p| p > 0.0 || info.duration.is_some_and(|d| !d.is_zero()))
+                                        && (out.paused || out.position_advanced.elapsed() < Duration::from_secs(4));
+                                    out.last_position = position;
+                                    out.position_usable = usable;
+                                    if usable {
+                                        let p = position.unwrap() + if mode == Mode::Live { out.receiver_origin } else { 0.0 };
+                                        // STOPPED often resets RelTime to zero: retain the
+                                        // last credible position for recovery, never fake EOF.
+                                        if p > 0.0 || !matches!(sample.state, Some(TransportState::Stopped | TransportState::NoMedia)) {
+                                            update(id, |s| s.position = bounded_position(p, s.duration));
+                                            if advances { out.start = p; out.began = Instant::now(); }
+                                        }
+                                    }
                                 }
-                                if let Some(p) = info.position.filter(|p| {
-                                    !p.is_zero()
-                                        || !matches!(
-                                            sample.state,
-                                            Some(TransportState::Stopped | TransportState::NoMedia)
-                                        )
-                                }) {
-                                    s.position = p.as_secs_f64()
-                                        + if mode == Mode::Live {
-                                            out.receiver_origin
-                                        } else {
-                                            0.0
-                                        };
-                                }
-                            });
+                                Err(e) if e.is_network() => position_failed = true,
+                                Err(e) if !e.is_cancelled() => { position_enabled = false; out.position_usable = false; },
+                                _ => {},
+                            }
                         }
-                        Err(e) if e.is_network() => {
-                            position_failures = position_failures.saturating_add(1)
-                        }
-                        Err(e) if !e.is_cancelled() => {
-                            position_enabled = false;
-                            position_failures = 0;
-                        }
-                        _ => {}
+                        Err(_) => position_failed = true,
                     }
                 }
-                if !position_enabled && !out.paused {
-                    update(id, |s| {
-                        s.position = bounded_position(
-                            out.start + out.began.elapsed().as_secs_f64(),
-                            s.duration,
-                        );
-                    });
+                // A healthy transport with missing/constant position is not an
+                // unreachable receiver. Use the actual keyframe clock for live.
+                if !transport_failed && !out.paused && (!position_enabled || !out.position_usable) {
+                    update(id, |s| s.position = bounded_position(out.start + out.began.elapsed().as_secs_f64(), s.duration));
+                }
+                if transport_failed || (sample.decision == MonitorDecision::Disabled && position_failed) {
+                    poll_failures = poll_failures.saturating_add(1);
+                    failure_since.get_or_insert_with(Instant::now);
+                } else {
+                    poll_failures = 0;
+                    failure_since = None;
                 }
                 if let Some(state) = sample.state {
                     // Hardware controls are observations too: the receiver, not
@@ -618,13 +667,14 @@ async fn play_session(
                         out.seen_playing = true;
                         stopped = 0;
                     }
-                    if !out.paused
+                    if !out.intentional_stop
                         && matches!(state, TransportState::Stopped | TransportState::NoMedia)
                     {
                         let (position, duration) = with_app(|app| {
                             Ok((app.native().cast.position, app.native().cast.duration))
                         })?;
-                        if out.seen_playing
+                        if !out.paused && out.seen_playing
+                            && Instant::now() >= out.seek_settles
                             && duration > 0.0
                             && position.max(old_position) >= duration - 3.0
                         {
@@ -637,9 +687,8 @@ async fn play_session(
                         stopped = stopped.saturating_add(1);
                     }
                 }
-                let failed = sample.decision == MonitorDecision::Disconnected
-                    || stopped >= 3
-                    || position_failures >= 3;
+                let failed = poll_failures >= 3 || stopped >= 3
+                    || failure_since.is_some_and(|since| since.elapsed() >= Duration::from_secs(6));
                 if failed {
                     let since = recovery.get_or_insert_with(Instant::now);
                     update(id, |s| {
@@ -649,9 +698,7 @@ async fn play_session(
                     if since.elapsed() >= Duration::from_secs(4) {
                         return Err(error("cast_receiver_unreachable"));
                     }
-                } else if sample.decision != MonitorDecision::Disconnected
-                    && stopped == 0
-                    && position_failures == 0
+                } else if poll_failures == 0 && stopped == 0
                 {
                     recovery = None;
                     update(id, |s| {
@@ -659,7 +706,10 @@ async fn play_session(
                         s.error_code = None;
                     });
                 }
-                with_app(|app| app.native_cast_observation(id, out.playback_generation))?;
+                if let Err(error) = with_app(|app| app.native_cast_observation(id, out.playback_generation))
+                    && error.code != "stale_player" {
+                    return Err(error);
+                }
                 if endpoint.diagnostics().bytes_written == 0
                     && out.began.elapsed() > Duration::from_secs(10)
                 {
@@ -732,6 +782,10 @@ async fn play_session(
         }
     };
     tokio::join!(cleanup_resources, release_room);
+    if let Some(out) = &output {
+        output_ids.insert(out.generation, out.id);
+    }
+    drain_http(trace, &mut events, &output_ids, None);
     result
 }
 
@@ -767,6 +821,7 @@ fn advance(id: u64, generation: u64) -> Result<(), ApiError> {
     })
 }
 
+#[derive(Clone)]
 struct OutputContext<'a> {
     context: &'a Arc<HostContext>,
     id: u64,
@@ -779,6 +834,34 @@ struct OutputContext<'a> {
     stop: &'a Arc<AtomicBool>,
 }
 async fn start_output(
+    resources: OutputContext<'_>,
+    mode: Mode,
+    mut position: f64,
+    mut cached: Option<(String, CastFile)>,
+) -> Result<Output, ApiError> {
+    loop {
+        let before = with_app(|app| app.native_cast_input())?;
+        let result = start_output_once(resources.clone(), mode, position, cached.take()).await;
+        let after = with_app(|app| app.native_cast_input())?;
+        if resources.cancel.is_cancelled()
+            || before.playback_generation == after.playback_generation
+        {
+            return result;
+        }
+        // A playlist edit can win while mux/Set/Play is in flight. Retire that
+        // output and prepare the latest AppState program, retaining ownership.
+        if let Ok(mut out) = result {
+            if let Some(live) = out.live.take() {
+                live.stop().await;
+            }
+            resources.trace.complete_output(out.id, Default::default());
+        }
+        resources.endpoint.clear_generation();
+        position = 0.0;
+    }
+}
+
+async fn start_output_once(
     resources: OutputContext<'_>,
     mode: Mode,
     position: f64,
@@ -802,6 +885,9 @@ async fn start_output(
     let item = snap
         .current_item
         .ok_or_else(|| error("cast_queue_finished"))?;
+    if item.cache_status != "ready" {
+        return Err(error("cast_media_unavailable"));
+    }
     let generation = update(id, |s| {
         s.generation += 1;
         s.playback_generation = snap.playback_generation;
@@ -833,8 +919,10 @@ async fn start_output(
     }
     let mut live = None;
     let duration;
+    let mut origin = position;
     let published = if mode == Mode::Live {
-        let producer = media::live(context.clone(), item.clone(), position).await?;
+        let producer = media::live(context.clone(), item.clone(), position, cancel).await?;
+        origin = producer.stream.snapshot().start.unwrap().source_start_us as f64 / 1_000_000.0;
         let publication = endpoint.publish_live(generation, producer.stream.clone(), TsMime::Mp2t);
         match publication {
             Ok(p) => {
@@ -886,7 +974,7 @@ async fn start_output(
             trace,
             connection,
             Some(output_id),
-            client.seek(Duration::from_secs_f64(position), cancel).await,
+            soap(client.seek(Duration::from_secs_f64(position), cancel)).await,
         )
     {
         started = Err(e);
@@ -931,6 +1019,7 @@ async fn start_output(
         s.owns_playback = true;
         s.paused = false;
         s.duration = duration;
+        s.position = origin;
         s.receiver_state = Some("playing");
         s.error_code = None;
     });
@@ -941,25 +1030,17 @@ async fn start_output(
         playback_generation: snap.playback_generation,
         live,
         began: Instant::now(),
-        start: position,
-        receiver_origin: position,
+        start: origin,
+        receiver_origin: origin,
         duration,
         paused: false,
         seen_playing: false,
+        seek_settles: Instant::now(),
+        last_position: None,
+        position_advanced: Instant::now(),
+        position_usable: false,
+        intentional_stop: false,
     })
-}
-
-fn live_progress(id: u64, out: &Output, event: &HttpStageResult) {
-    if out.live.is_none() || out.paused {
-        return;
-    }
-    if let (Some(start), Some(dts)) = (event.live_start, event.media_time_us) {
-        let position =
-            out.start + presentation_elapsed(start, dts).min(out.began.elapsed().as_secs_f64());
-        update(id, |s| {
-            s.position = bounded_position(position, out.duration)
-        });
-    }
 }
 
 fn bounded_position(position: f64, duration: f64) -> f64 {
@@ -968,18 +1049,6 @@ fn bounded_position(position: f64, duration: f64) -> f64 {
     } else {
         position.max(0.0)
     }
-}
-
-fn presentation_elapsed(start: crate::experimental_libav::cast_mux::CastStart, dts: i64) -> f64 {
-    // T4 media_time_us is a DTS watermark relative to timestamp_origin_us.
-    // With B frames its PTS is about 66.7ms later (two 30fps frames). Convert
-    // back to source PTS, then subtract the actual keyframe source start;
-    // the caller also caps against wall-clock playback, excluding the 5s burst.
-    let pts = start
-        .timestamp_origin_us
-        .saturating_add(dts)
-        .saturating_add(if start.has_b_frames { 66_667 } else { 0 });
-    pts.saturating_sub(start.source_start_us).max(0) as f64 / 1_000_000.0
 }
 
 fn make_control(renderer: Renderer) -> Result<ControlClient, crate::dlna::DlnaError> {
@@ -1019,25 +1088,178 @@ fn media_key(item: &PlaylistItem) -> String {
     )
 }
 
+async fn command_pending(id: u64) {
+    loop {
+        if with_app(|app| {
+            Ok(app.native().cast.operation != id || app.native().cast.control.is_some())
+        })
+        .unwrap_or(true)
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+async fn soap<T>(future: impl std::future::Future<Output = Operation<T>>) -> Operation<T> {
+    tokio::time::timeout(Duration::from_secs(2), future)
+        .await
+        .unwrap_or_else(|_| Operation {
+            result: Err(crate::dlna::DlnaError {
+                code: crate::dlna::ErrorCode::Timeout,
+                http_status: None,
+                upnp_code: None,
+            }),
+            stages: Vec::new(),
+            dropped_stages: 0,
+        })
+}
+fn drain_http(
+    trace: &SessionTrace,
+    events: &mut tokio::sync::broadcast::Receiver<HttpStageResult>,
+    outputs: &std::collections::BTreeMap<u64, u64>,
+    current: Option<(u64, &Output)>,
+) {
+    loop {
+        match events.try_recv() {
+            Ok(event) => {
+                if let Some(output) = event.generation.and_then(|g| outputs.get(&g)) {
+                    trace.http_at(*output, trace.elapsed(), &event);
+                    if let Some((id, out)) = current
+                        && out.generation == event.generation.unwrap_or(0)
+                        && !out.position_usable
+                        && !out.paused
+                        && out.live.is_some()
+                        && let (Some(start), Some(dts)) = (event.live_start, event.media_time_us)
+                    {
+                        let position = out.receiver_origin
+                            + presentation_elapsed(start, dts)
+                                .min(out.began.elapsed().as_secs_f64());
+                        update(id, |s| {
+                            s.position = bounded_position(position, out.duration)
+                        });
+                    }
+                }
+            }
+            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(n)) => trace.lagged(n),
+            Err(_) => break,
+        }
+    }
+}
+
+fn presentation_elapsed(start: crate::experimental_libav::cast_mux::CastStart, dts: i64) -> f64 {
+    // T4 reports DTS, relative to timestamp_origin_us. Use T3's actual initial
+    // PTS/DTS separation rather than assuming two B frames at 30 fps (66.7ms).
+    // This is a delivery watermark, NOT the receiver clock; cap it by wall
+    // time and use actual source_start_us for receiver RelTime and resume.
+    let reorder = if start.has_b_frames {
+        start
+            .source_start_us
+            .saturating_sub(start.timestamp_origin_us)
+            .max(0)
+    } else {
+        0
+    };
+    start
+        .timestamp_origin_us
+        .saturating_add(dts)
+        .saturating_add(reorder)
+        .saturating_sub(start.source_start_us)
+        .max(0) as f64
+        / 1_000_000.0
+}
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn dts_watermark_uses_source_origin_b_frame_offset_and_duration_bound() {
-        let mut start = crate::experimental_libav::cast_mux::CastStart {
-            source_start_us: 10_000_000,
-            timestamp_origin_us: 9_000_000,
-            profile: 100,
-            level: 40,
-            width: 1920,
-            height: 1080,
-            has_b_frames: true,
-            audio_transcoded: false,
+    fn lagged_and_terminal_http_events_reach_cast_diagnostic_package() {
+        use crate::dlna::cast_http::{HttpStage, Reason};
+        use base64::Engine;
+        use std::io::Read;
+        let renderer = crate::dlna::session_fixture::renderer(
+            "http://127.0.0.1:12345/description",
+            "<root><device><deviceType>urn:schemas-upnp-org:device:MediaRenderer:1</deviceType><UDN>uuid:cast-fixture</UDN><serviceList><service><serviceType>urn:schemas-upnp-org:service:AVTransport:1</serviceType><controlURL>/av</controlURL></service></serviceList></device></root>",
+        );
+        let trace = SessionTrace::new(platform(), diagnostics::TargetKind::Generic, "test", "test")
+            .unwrap();
+        let output = trace.begin_output(
+            &renderer.context,
+            OutputConfig {
+                cell: None,
+                mode: diagnostics::Mode::File,
+                mime: diagnostics::Mime::Ts,
+                preflight: Default::default(),
+            },
+        );
+        let (tx, mut rx) = tokio::sync::broadcast::channel(2);
+        let mut event = HttpStageResult {
+            stage: HttpStage::Get,
+            context: renderer.context,
+            generation: Some(1),
+            connection_id: 1,
+            elapsed: Duration::ZERO,
+            http_status: Some(200),
+            result: Ok(()),
+            bytes_written: 188,
+            disconnect_reason: None,
+            media_time_us: None,
+            live_start: None,
         };
-        assert!((presentation_elapsed(start, 1_933_333) - 1.0).abs() < 0.000_001);
-        start.has_b_frames = false;
-        assert!((presentation_elapsed(start, 1_933_333) - 0.933_333).abs() < 0.000_001);
-        assert_eq!(presentation_elapsed(start, 0), 0.0);
+        for _ in 0..3 {
+            tx.send(event.clone()).unwrap();
+        }
+        event.stage = HttpStage::Disconnect;
+        event.disconnect_reason = Some(Reason::Completed);
+        tx.send(event).unwrap();
+        drop(tx);
+        drain_http(&trace, &mut rx, &[(1, output)].into(), None);
+        trace.finish(false);
+        let report = trace.report();
+        assert_eq!(report.diagnostics()["cast"]["delivery_lagged_stages"], 2);
+        assert!(report.json().contains("http.disconnect"));
+        assert!(report.json().contains("completed"));
+        let request: crate::DiagnosticRequest = serde_json::from_value(json!({"app_home":".tmp/no-data", "log_dir":".tmp/no-logs", "system":{}, "tools_and_tasks":{}, "cache_policy":{}, "runtime_state":{}, "connectivity_override":{}})).unwrap();
+        let artifact = crate::native_host::diagnostics::assemble(&request, Some(&report)).unwrap();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(artifact.zip_base64)
+            .unwrap();
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let mut content = String::new();
+        zip.by_name("diagnostics.cast.json")
+            .unwrap()
+            .read_to_string(&mut content)
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&content).unwrap()["diagnostics"]["cast"]["delivery_lagged_stages"],
+            2
+        );
+        assert!(!content.contains("127.0.0.1"));
+        assert!(zip.by_name("diagnostics.cast.txt").is_ok());
+        let plain = crate::native_host::diagnostics::assemble(&request, None).unwrap();
+        assert!(!plain.files.contains_key("diagnostics.cast.json"));
+    }
+    #[test]
+    fn actual_keyframe_origin_and_variable_dts_offset_preserve_resume_position() {
+        for offset in [33_333, 66_667, 80_000] {
+            let mut start = crate::experimental_libav::cast_mux::CastStart {
+                source_start_us: 20_000_000,
+                timestamp_origin_us: 20_000_000 - offset,
+                profile: 100,
+                level: 40,
+                width: 1920,
+                height: 1080,
+                has_b_frames: true,
+                audio_transcoded: false,
+            };
+            let actual_origin = start.source_start_us as f64 / 1_000_000.0;
+            assert_eq!(actual_origin + presentation_elapsed(start, 5_000_000), 25.0);
+            assert_eq!(actual_origin + 5.0, 25.0); // receiver RelTime; requested seek was 21s
+            start.has_b_frames = false;
+            assert!(
+                (presentation_elapsed(start, 5_000_000) - (5.0 - offset as f64 / 1_000_000.0))
+                    .abs()
+                    < 0.000_001
+            );
+        }
         assert_eq!(bounded_position(125.0, 120.0), 120.0);
         assert_eq!(bounded_position(125.0, 0.0), 125.0);
     }

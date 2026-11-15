@@ -59,7 +59,6 @@ pub(crate) fn prepare_import(mut seed: AppStateSeed) -> Result<AppStateSeed, Str
 impl AppStateData {
     pub(super) fn native_checkpoint(&self) -> AppStateSeed {
         let mut seed = AppStateSeed {
-            cast: self.cast.clone(),
             automatic_volume: self.automatic_volume.clone(),
             playback_mode: self.playback_mode.clone(),
             player_settings: self.player_settings.clone(),
@@ -137,6 +136,9 @@ impl AppState {
             // prompt. Reloading a WebView/re-entering initialization is not a
             // new launch; reopening the checkpoint in a new process is.
             data.native_session_choice_pending = needs_session_choice;
+            let (storage, preferences) = cast::storage::Storage::load(directory);
+            data.cast = preferences;
+            self.cast_storage = Some(storage);
         }
         response
     }

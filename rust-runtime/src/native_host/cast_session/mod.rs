@@ -35,6 +35,7 @@ pub(crate) enum Control {
     Next,
     Seek(f64),
     Restart,
+    ProgramChanged,
 }
 
 #[derive(Default)]
@@ -46,6 +47,7 @@ pub(crate) struct State {
     pub playback_generation: u64,
     pub renderers: Vec<Renderer>,
     pub selected: Option<String>,
+    pub session_devices: std::collections::BTreeMap<String, crate::app_state::cast::Device>,
     pub receiver_state: Option<&'static str>,
     pub position: f64,
     pub duration: f64,
@@ -64,19 +66,24 @@ pub(crate) struct State {
 }
 impl State {
     pub fn visible(&self) -> bool {
-        self.operation != 0
+        self.operation != 0 || !self.session_devices.is_empty()
     }
     pub fn snapshot(&self, preferences: &crate::app_state::cast::Preferences) -> Value {
         let preference = self
             .selected
             .as_ref()
-            .and_then(|k| preferences.devices.get(k))
+            .and_then(|k| {
+                preferences
+                    .devices
+                    .get(k)
+                    .or_else(|| self.session_devices.get(k))
+            })
             .cloned()
             .unwrap_or_default();
         json!({"phase":self.phase,"owns_playback":self.owns_playback,
             "operation_id":self.operation,"generation":self.generation,
-            "renderers":self.renderers.iter().map(|r| json!({"device_key":r.context.device_key,"label":r.description.name.chars().take(100).collect::<String>()})).collect::<Vec<_>>(),
-            "devices":preferences.devices.iter().map(|(key,d)|(key.clone(),json!({"mode":d.mode,"learned_mode":d.learned_mode}))).collect::<serde_json::Map<_,_>>(),
+            "renderers":self.renderers.iter().map(|r| json!({"device_key":renderer_key(r),"preferences_persisted":preference_key(r).is_some(),"label":r.description.name.chars().take(100).collect::<String>()})).collect::<Vec<_>>(),
+            "devices":preferences.devices.iter().chain(self.session_devices.iter()).map(|(key,d)|(key.clone(),json!({"mode":d.mode,"learned_mode":d.learned_mode}))).collect::<serde_json::Map<_,_>>(),
             "selected":self.selected,"receiver_state":self.receiver_state,"position":self.position,
             "duration":self.duration,"is_paused":self.paused,"error_code":self.error_code,"resume":self.resume,
             "mode":preference.mode,"learned_mode":preference.learned_mode,"effective_mode":self.mode,
@@ -93,6 +100,29 @@ impl State {
         self.error_code = None;
         self.resume = None;
     }
+}
+
+/// Persistence identity is independent of T2 URL fallbacks and T9 trace salts.
+fn preference_key(renderer: &Renderer) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let udn = crate::dlna::dlna_policy::canonical_usn(&renderer.description.id);
+    if !udn.starts_with("uuid:")
+        || udn.len() <= 5
+        || udn == renderer.description.location.to_ascii_lowercase()
+        || udn.starts_with("http:")
+        || udn.starts_with("https:")
+    {
+        return None;
+    }
+    Some(
+        Sha256::digest(udn.as_bytes())[..16]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect(),
+    )
+}
+fn renderer_key(renderer: &Renderer) -> String {
+    preference_key(renderer).unwrap_or_else(|| renderer.context.device_key.clone())
 }
 
 pub(super) fn route(
@@ -139,6 +169,30 @@ pub(super) fn route(
         {
             app.native_authorize(identity, true)?;
             let key = text(body, "device_key")?;
+            if !crate::app_state::cast::valid_key(&key) {
+                return Err(ApiError::invalid("Invalid device key"));
+            }
+            let persistent = app.cast_preferences()?.devices.contains_key(&key)
+                || app
+                    .native()
+                    .cast
+                    .renderers
+                    .iter()
+                    .any(|r| preference_key(r).as_deref() == Some(&key));
+            if !persistent
+                && !app
+                    .native()
+                    .cast
+                    .renderers
+                    .iter()
+                    .any(|r| renderer_key(r) == key)
+            {
+                return Err(ApiError::new(
+                    409,
+                    "cast_device_preferences_unavailable",
+                    "Discover the receiver first",
+                ));
+            }
             let revision = body["revision"]
                 .as_u64()
                 .ok_or_else(|| ApiError::invalid("Missing revision"))?;
@@ -147,6 +201,7 @@ pub(super) fn route(
                 .devices
                 .get(&key)
                 .cloned()
+                .or_else(|| app.native().cast.session_devices.get(&key).cloned())
                 .unwrap_or_default();
             if body["command"] == "cast.set_device_mode" {
                 device.mode = serde_json::from_value(body["mode"].clone())
@@ -158,9 +213,11 @@ pub(super) fn route(
                 device.learned_variant =
                     serde_json::from_value::<Option<Variant>>(body["learned_variant"].clone())
                         .map_err(|_| ApiError::invalid("Invalid learned variant"))?;
-                device.learned_at = Some(chrono::Utc::now().to_rfc3339());
-                device.self_test_report_version = Some(1);
+                let learned = device.learned_mode.is_some() || device.learned_variant.is_some();
+                device.learned_at = learned.then(|| chrono::Utc::now().to_rfc3339());
+                device.self_test_report_version = learned.then_some(1);
             }
+            device.last_used = chrono::Utc::now().timestamp_millis().max(0) as u64;
             let effective = device.effective_mode();
             if app.native().cast.owns_playback
                 && app.native().cast.selected.as_deref() == Some(&key)
@@ -172,7 +229,11 @@ pub(super) fn route(
                     "Wait for the current cast operation",
                 ));
             }
-            app.cast_set_device(&key, revision, device)?;
+            if persistent {
+                app.cast_set_device(&key, revision, device)?;
+            } else {
+                app.cast_set_session_device(&key, revision, device)?;
+            }
             let state = &mut app.native().cast;
             if state.owns_playback
                 && state.selected.as_deref() == Some(&key)
@@ -197,6 +258,13 @@ pub(super) fn route(
                     .get("description_url")
                     .map(|_| text(body, "description_url"))
                     .transpose()?;
+                if let Some(location) = &location {
+                    crate::dlna::dlna_policy::lan_url(
+                        location,
+                        crate::dlna::dlna_policy::NetworkPolicy::Lan,
+                    )
+                    .map_err(|_| ApiError::invalid("Discovery requires a LAN IPv4 URL"))?;
+                }
                 app.native()
                     .cast
                     .replace(Request::Discover(location), Phase::Discovering);
@@ -215,7 +283,7 @@ pub(super) fn route(
                             .cast
                             .renderers
                             .iter()
-                            .find(|r| r.context.device_key == key)
+                            .find(|r| renderer_key(r) == key)
                             .cloned()
                             .ok_or_else(|| {
                                 ApiError::new(

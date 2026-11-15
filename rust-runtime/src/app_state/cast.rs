@@ -1,5 +1,6 @@
 //! Persisted device choices. Addresses, credentials and active sessions never belong here.
 use super::*;
+pub(super) mod storage;
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -37,7 +38,7 @@ pub enum Vendor {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Device {
-    pub label: String,
+    pub last_used: u64,
     pub vendor_class: Vendor,
     pub mode: Mode,
     pub learned_mode: Option<LearnedMode>,
@@ -45,6 +46,7 @@ pub struct Device {
     pub learned_at: Option<String>,
     pub self_test_report_version: Option<u32>,
 }
+#[cfg(feature = "native-host")]
 impl Device {
     pub fn effective_mode(&self) -> Mode {
         match self.mode {
@@ -72,6 +74,7 @@ impl Default for Preferences {
     }
 }
 impl Preferences {
+    #[cfg(feature = "native-host")]
     pub fn is_empty(&self) -> bool {
         self.devices.is_empty()
     }
@@ -79,9 +82,7 @@ impl Preferences {
         if self.schema_version != 1
             || self.devices.len() > 256
             || self.devices.iter().any(|(key, d)| {
-                d.label.chars().count() > 100
-                    || d.label.chars().any(char::is_control)
-                    || !valid_key(key)
+                !valid_key(key)
                     || d.self_test_report_version.is_some_and(|v| v != 1)
                     || d.learned_at
                         .as_ref()
@@ -111,6 +112,37 @@ impl AppState {
         })
     }
 
+    pub(crate) fn cast_set_session_device(
+        &mut self,
+        key: &str,
+        revision: u64,
+        device: Device,
+    ) -> Result<(), crate::native_host::ApiError> {
+        let data = self.data.as_mut().ok_or_else(|| {
+            crate::native_host::ApiError::new(503, "state_unavailable", "Host not initialized")
+        })?;
+        if data.revision != revision {
+            return Err(crate::native_host::ApiError::new(
+                409,
+                "cast_revision_conflict",
+                "Refresh device preferences",
+            ));
+        }
+        let devices = &mut self.native_session.cast.session_devices;
+        if !devices.contains_key(key) && devices.len() >= 256 {
+            let oldest = devices
+                .iter()
+                .min_by_key(|(_, d)| d.last_used)
+                .map(|(key, _)| key.clone())
+                .unwrap();
+            devices.remove(&oldest);
+        }
+        devices.insert(key.to_owned(), device);
+        data.revision += 1;
+        self.native_session.revision += 1;
+        Ok(())
+    }
+
     pub(crate) fn cast_set_device(
         &mut self,
         key: &str,
@@ -129,14 +161,33 @@ impl AppState {
                 "Device preferences changed; refresh and retry",
             ));
         }
+        if !next.cast.devices.contains_key(key) && next.cast.devices.len() >= 256 {
+            let oldest = next
+                .cast
+                .devices
+                .iter()
+                .min_by_key(|(_, d)| {
+                    (
+                        d.mode != Mode::Auto
+                            || d.learned_mode.is_some()
+                            || d.learned_variant.is_some(),
+                        d.last_used,
+                    )
+                })
+                .map(|(key, _)| key.clone())
+                .unwrap();
+            next.cast.devices.remove(&oldest);
+        }
         next.cast.devices.insert(key.to_owned(), device);
         next.cast
             .validate()
             .map_err(|_| ApiError::invalid("Invalid cast device preferences"))?;
         next.revision += 1;
-        self.persist_native(&next).map_err(|_| {
-            ApiError::new(503, "persistence_error", "Cannot persist cast preferences")
-        })?;
+        if let Some(storage) = &self.cast_storage {
+            storage.save(&next.cast).map_err(|_| {
+                ApiError::new(503, "persistence_error", "Cannot persist cast preferences")
+            })?;
+        }
         self.data = Some(next);
         self.native_session.revision += 1;
         Ok(())
@@ -157,7 +208,6 @@ mod tests {
     #[test]
     fn old_seed_without_cast_loads_and_round_trips_without_new_fields() {
         let seed = seed();
-        assert_eq!(seed.cast, Preferences::default());
         let value = serde_json::to_value(&seed).unwrap();
         assert!(value.get("cast").is_none());
         let mut app = AppState::default();
@@ -202,7 +252,7 @@ mod tests {
         assert!(!app.native_session.cast.visible());
         let revision = app.data.as_ref().unwrap().revision;
         let device = Device {
-            label: String::new(),
+            last_used: 1,
             vendor_class: Vendor::Generic,
             mode: Mode::Auto,
             learned_mode: Some(LearnedMode::Live),
@@ -234,6 +284,105 @@ mod tests {
         assert_eq!(bytes, std::fs::read(root.join("host-state.json")).unwrap());
         drop(app);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(feature = "native-host")]
+    #[test]
+    fn separate_preferences_preserve_legacy_checkpoint_and_corruption_never_blocks_host() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join(".tmp")
+            .join(format!(
+                "cast-storage-{}",
+                crate::native_host::token().unwrap()
+            ));
+        std::fs::create_dir_all(&root).unwrap();
+        let key = "0123456789abcdef0123456789abcdef";
+        let mut app = AppState::default();
+        assert!(app.initialize_native(&root, seed()).error().is_none());
+        let checkpoint = std::fs::read(root.join("host-state.json")).unwrap();
+        let original = Device {
+            mode: Mode::Live,
+            ..Default::default()
+        };
+        app.cast_set_device(key, app.data.as_ref().unwrap().revision, original.clone())
+            .unwrap();
+        let preferences = std::fs::read(root.join("cast-devices.json")).unwrap();
+        app.cast_set_device(key, app.data.as_ref().unwrap().revision, Device::default())
+            .unwrap();
+        assert_eq!(
+            preferences,
+            std::fs::read(root.join("cast-devices.v1.backup.json")).unwrap()
+        );
+        // AppStateSeed is exactly the old strict seed (deny_unknown_fields),
+        // not a permissive JSON value that could hide downgrade incompatibility.
+        let saved: Value = serde_json::from_slice(&checkpoint).unwrap();
+        let _: AppStateSeed = serde_json::from_value(saved["state"].clone()).unwrap();
+        assert!(!String::from_utf8_lossy(&checkpoint).contains("cast"));
+        assert_eq!(
+            checkpoint,
+            std::fs::read(root.join("host-state.json")).unwrap()
+        );
+        assert!(
+            !serde_json::to_string(&app.data.as_ref().unwrap().persistence_snapshot())
+                .unwrap()
+                .contains("cast")
+        );
+        drop(app);
+        std::fs::write(root.join("cast-devices.json"), b"{broken").unwrap();
+        let mut app = AppState::default();
+        assert!(app.initialize_native(&root, seed()).error().is_none());
+        assert_eq!(app.cast_preferences().unwrap(), &Preferences::default());
+        let before = app.data.as_ref().unwrap().revision;
+        assert_eq!(
+            app.cast_set_device(key, before, original).unwrap_err().code,
+            "persistence_error"
+        );
+        assert_eq!(app.data.as_ref().unwrap().revision, before);
+        assert_eq!(
+            std::fs::read(root.join("cast-devices.json")).unwrap(),
+            b"{broken"
+        );
+        assert_eq!(
+            checkpoint,
+            std::fs::read(root.join("host-state.json")).unwrap()
+        );
+        drop(app);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(feature = "native-host")]
+    #[test]
+    fn full_preferences_evict_oldest_automatic_before_manual_or_learned() {
+        let mut app = AppState::default();
+        app.execute(AppStateRequest::Initialize {
+            schema_version: 1,
+            state: Box::new(seed()),
+        });
+        for index in 0..256 {
+            app.cast_set_device(
+                &format!("{index:032x}"),
+                app.data.as_ref().unwrap().revision,
+                Device {
+                    mode: if index == 0 { Mode::Live } else { Mode::Auto },
+                    last_used: index,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+        app.cast_set_device(
+            &format!("{:032x}", 256),
+            app.data.as_ref().unwrap().revision,
+            Device::default(),
+        )
+        .unwrap();
+        let prefs = app.cast_preferences().unwrap();
+        assert_eq!(prefs.devices.len(), 256);
+        assert!(prefs.devices.contains_key(&format!("{:032x}", 0)));
+        assert!(!prefs.devices.contains_key(&format!("{:032x}", 1)));
+        assert!(prefs.devices.contains_key(&format!("{:032x}", 256)));
     }
 
     #[cfg(feature = "native-host")]
