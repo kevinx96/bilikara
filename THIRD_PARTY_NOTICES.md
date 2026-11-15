@@ -45,6 +45,20 @@ and bounded retention from bilikara-next `7750dca`, `native_host/purek/trace.rs`
 including `0870f2b` (MIT, Copyright (c) 2026 bilikara contributors).
 See that directory's `NOTICE.md` and the repository's `LICENSE`.
 
+## DLNA self-test sample B
+
+The bundled `cast-samples/sample-b.ts` is a synthetic test pattern and generated
+tones, with no third-party footage, music or artwork. Its adjacent `SOURCE.md`
+records the inputs, generation command, tool versions and pinned checksum.
+These files reside in `_internal/cast-samples/` on Windows/Linux and in the
+backend app's `Contents/Resources/cast-samples/` on macOS.
+
+FFmpeg 7.1.1 with libx264 (GPL-2.0-or-later) was used only for offline asset
+generation; those encoder binaries are not bundled or invoked by the product.
+Source Code Pro Bold (SIL OFL 1.1) supplied the rendered text; only glyph pixels,
+not the font software, are included in the clip. The shipped libav libraries
+retain their separately documented LGPL build and compliance materials below.
+
 ## Experimental automatic volume
 
 The shared Rust runtime uses [ebur128 0.1.10](https://github.com/sdroege/ebur128)
