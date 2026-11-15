@@ -167,6 +167,12 @@ pub struct Fixture {
 
 impl Fixture {
     pub fn start(replies: Vec<Reply>) -> Self {
+        Self::start_with_request_hook(replies, |_, _| {})
+    }
+    pub fn start_with_request_hook(
+        replies: Vec<Reply>,
+        on_request: impl Fn(usize, &Request) + Send + 'static,
+    ) -> Self {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         listener.set_nonblocking(true).unwrap();
         let address = listener.local_addr().unwrap();
@@ -196,6 +202,7 @@ impl Fixture {
                             .ends_with(&format!("#{}\"", action.as_str()))
                     );
                 }
+                on_request(requests.len(), &request);
                 requests.push(request);
                 if reply.delay.is_some() {
                     delayed.push(thread::spawn(move || write_reply(stream, reply)));
