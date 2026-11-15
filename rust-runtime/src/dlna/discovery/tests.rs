@@ -334,11 +334,25 @@ fn manual_description_url_accepts_relaxed_descriptions_and_marks_lebo() {
 
 #[test]
 fn cancelling_discovery_with_a_pending_description_returns_within_100ms() {
-    let fixture = Fixture::start(vec![
-        Reply::raw(None, 200, description("Delayed", "")).delayed(Duration::from_millis(350)),
-    ]);
-    let location = format!("http://{}/device.xml", fixture.address);
     run(async {
+        use tokio::io::AsyncReadExt;
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let location = format!("http://{}/device.xml", listener.local_addr().unwrap());
+        let (requested, ready) = tokio::sync::oneshot::channel();
+        let server_stop = CancellationToken::new();
+        let stopping = server_stop.clone();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut header = Vec::new();
+            while !header.ends_with(b"\r\n\r\n") {
+                header.push(stream.read_u8().await.unwrap());
+            }
+            requested.send(()).unwrap();
+            // Hold the response until the test has observed cancellation.
+            stopping.cancelled().await;
+        });
         let notify = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let address = notify.local_addr().unwrap();
         let sender = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
@@ -369,19 +383,25 @@ fn cancelling_discovery_with_a_pending_description_returns_within_100ms() {
             )
             .await
             .unwrap();
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::timeout(HTTP_TIMEOUT, ready)
+            .await
+            .unwrap()
+            .unwrap();
+        let cancelled_at = Instant::now();
         cancel.cancel();
         let (result, stages) = tokio::time::timeout(Duration::from_millis(100), worker)
             .await
             .unwrap()
             .unwrap();
+        assert!(cancelled_at.elapsed() < Duration::from_millis(100));
         assert!(result.unwrap_err().is_cancelled());
         assert!(stages.iter().any(|stage| stage.stage == Stage::Description
             && stage.result.as_ref().is_err_and(DlnaError::is_cancelled)));
         // The listener is released along with cancellation, not after HTTP timeout.
         StdUdpSocket::bind(address).unwrap();
+        server_stop.cancel();
+        server.await.unwrap();
     });
-    fixture.join();
 }
 
 #[test]
@@ -612,12 +632,6 @@ fn location_flood_does_not_hide_a_later_real_renderer() {
 
 #[test]
 fn full_candidate_pool_preempts_stalled_http_for_a_later_renderer() {
-    let fixture = Fixture::start(vec![Reply::raw(
-        None,
-        200,
-        description("Responsive TV", ""),
-    )]);
-    let location = format!("http://{}/device.xml", fixture.address);
     run(async {
         let stalled = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
@@ -641,13 +655,33 @@ fn full_candidate_pool_preempts_stalled_http_for_a_later_renderer() {
         let notify = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let address = notify.local_addr().unwrap();
         let sender = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let (routed, mut routes) = tokio::sync::mpsc::unbounded_channel();
+        let (discovered, discovery) = tokio::sync::oneshot::channel();
+        let mut discovered = Some(discovered);
+        let scan_stop = CancellationToken::new();
         let announcer = tokio::spawn(async move {
             for index in 0..130 {
                 sender.send_to(format!("NOTIFY * HTTP/1.1\r\nNTS: ssdp:alive\r\nLOCATION: http://{stalled_address}/fake{index}.xml\r\n\r\n").as_bytes(), address).await.unwrap();
-                if index % 32 == 31 {
-                    tokio::time::sleep(Duration::from_millis(40)).await;
+                if index % 32 == 31 || index == 129 {
+                    let batch = if index == 129 { 2 } else { 32 };
+                    for _ in 0..batch {
+                        tokio::time::timeout(SEARCH_WINDOW, routes.recv())
+                            .await
+                            .unwrap()
+                            .unwrap();
+                    }
                 }
             }
+            // Start the HTTP fixture after setup so its accept deadline does
+            // not include time spent preparing the full candidate pool.
+            let fixture = Fixture::start(vec![Reply::raw(
+                None,
+                200,
+                description("Responsive TV", ""),
+            )]);
+            let location = format!("http://{}/device.xml", fixture.address);
+            // All 130 candidates are admitted before timing the real renderer.
+            let advertised_at = Instant::now();
             sender
                 .send_to(
                     format!("NOTIFY * HTTP/1.1\r\nNTS: ssdp:alive\r\nLOCATION: {location}\r\n\r\n")
@@ -656,28 +690,44 @@ fn full_candidate_pool_preempts_stalled_http_for_a_later_renderer() {
                 )
                 .await
                 .unwrap();
+            (advertised_at, fixture)
         });
         let result = collect_renderers(
             &[Ipv4Addr::LOCALHOST],
             NetworkPolicy::LoopbackFixture,
-            options(address, Duration::from_millis(1000)),
+            options(address, SEARCH_WINDOW),
             Sockets {
                 search: Vec::new(),
                 notify: Some(notify),
             },
-            &CancellationToken::new(),
-            &mut |_| {},
+            &scan_stop,
+            &mut |update| match update {
+                DiscoveryUpdate::Stage(stage) if stage.stage == Stage::Route => {
+                    let _ = routed.send(());
+                }
+                DiscoveryUpdate::Renderers(renderers) if !renderers.is_empty() => {
+                    discovered
+                        .take()
+                        .unwrap()
+                        .send((renderers, Instant::now()))
+                        .unwrap();
+                    scan_stop.cancel();
+                }
+                _ => {}
+            },
             &mut StageLog::default(),
         )
-        .await
-        .unwrap();
-        announcer.await.unwrap();
+        .await;
+        let (advertised_at, fixture) = announcer.await.unwrap();
+        let (renderers, discovered_at) = discovery.await.unwrap();
+        assert!(discovered_at.duration_since(advertised_at) <= Duration::from_millis(1000));
+        assert!(result.unwrap_err().is_cancelled());
         stop.cancel();
         server.await.unwrap();
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].description.name, "Responsive TV");
+        assert_eq!(renderers.len(), 1);
+        assert_eq!(renderers[0].description.name, "Responsive TV");
+        fixture.join();
     });
-    fixture.join();
 }
 
 #[test]
