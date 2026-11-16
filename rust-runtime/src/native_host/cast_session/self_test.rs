@@ -21,7 +21,7 @@ pub(crate) struct State {
     registered: bool,
     registration_attempted: bool,
     preferences_persisted: bool,
-    cancel: CancellationToken,
+    pub(super) cancel: CancellationToken,
     answers: Option<mpsc::Sender<AnswerEnvelope>>,
     handoff: Option<tokio::sync::oneshot::Sender<bool>>,
     #[cfg(test)]
@@ -191,6 +191,10 @@ pub(super) fn route(
                 })?,
             );
             let (sender, receiver) = mpsc::channel(1);
+            let output = crate::cast_platform::OutputLease::acquire()
+                .map_err(|error| ApiError::new(409, error.code(), error.code()))?;
+            cast.platform_output_id = Some(output.id());
+            cast.platform_stop_error = None;
             let generation = cast.self_test.generation + 1;
             let cancel = CancellationToken::new();
             cast.self_test = State {
@@ -223,6 +227,8 @@ pub(super) fn route(
             };
             if context
                 .spawn("dlna-self-test", move || {
+                    // Keep the same foreground lease through the T5 handoff.
+                    let _output = output;
                     run(ctx, generation, operation, request, trace, cancel, receiver)
                 })
                 .is_err()
@@ -230,6 +236,7 @@ pub(super) fn route(
                 cast.self_test.running = false;
                 cast.self_test.answers = None;
                 cast.owns_playback = false;
+                cast.platform_output_id = None;
                 cast.phase = Phase::Idle;
                 return Err(ApiError::new(
                     503,

@@ -55,6 +55,7 @@ pub async fn discover(
     cancel: &CancellationToken,
     publish: impl FnMut(DiscoveryUpdate),
 ) -> Operation<Vec<Renderer>> {
+    let _multicast = crate::cast_platform::DiscoveryLease::acquire();
     discover_on(
         local_ipv4(NetworkPolicy::Lan),
         NetworkPolicy::Lan,

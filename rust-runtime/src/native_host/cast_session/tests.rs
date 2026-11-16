@@ -606,6 +606,52 @@ fn cancelling_discovery_does_not_issue_a_local_resume() {
 }
 
 #[test]
+fn platform_callback_fences_old_output_and_cancels_self_test() {
+    let _serial = GLOBAL_APP_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let host = Host::new();
+    with_app(|app| {
+        let cast = &mut app.native().cast;
+        cast.operation = 1;
+        cast.platform_output_id = Some(12);
+        cast.owns_playback = true;
+        cast.phase = Phase::Active;
+        Ok(())
+    })
+    .unwrap();
+    platform_stopped(11, 1);
+    platform_stopped(12, 99);
+    assert_eq!(host.snapshot()["cast"]["phase"], "active");
+    platform_stopped(12, 1);
+    with_app(|app| {
+        let cast = &mut app.native().cast;
+        assert!(cast.cancel.is_cancelled());
+        assert!(matches!(cast.pending, Some(Request::Disconnect)));
+        cast.pending = None;
+        Ok(())
+    })
+    .unwrap();
+    worker::restore(2, None);
+    assert_eq!(host.snapshot()["cast"]["owns_playback"], false);
+    assert_eq!(host.snapshot()["cast"]["local_media"], "host");
+    with_app(|app| {
+        let cast = &mut app.native().cast;
+        cast.platform_output_id = Some(13);
+        cast.self_test.running = true;
+        Ok(())
+    })
+    .unwrap();
+    platform_stopped(13, 2);
+    with_app(|app| {
+        assert!(app.native().cast.self_test.cancel.is_cancelled());
+        assert!(app.native().cast.pending.is_none());
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
 #[ignore = "requires trusted BILIKARA_TEST_CAST_COMPANION; real T3 mux + loopback receiver"]
 fn receiver_lifecycle_pause_seek_next_natural_end_disconnect_and_cancellation() {
     let _serial = GLOBAL_APP_TEST_LOCK

@@ -59,6 +59,26 @@ fn step(
         elapsed_ms: since.elapsed().as_millis() as u64,
     });
 }
+fn refresh_android_network(
+    generation: u64,
+    trace: &SessionTrace,
+    environment: &mut diag::Environment,
+) {
+    if !cfg!(target_os = "android") {
+        return;
+    }
+    let facts = crate::cast_platform::network_facts();
+    environment.network_hint = facts.network_hint();
+    environment.android_network = Some(facts.clone());
+    trace.environment(environment.clone());
+    let _ = with_app(|app| {
+        if app.native().cast.self_test.generation == generation {
+            app.native().cast.network_facts = facts;
+            app.native().revision += 1;
+        }
+        Ok(())
+    });
+}
 async fn scan(
     trace: &SessionTrace,
     connection: u64,
@@ -115,6 +135,22 @@ pub(super) async fn run(
 ) -> Option<Handoff> {
     let connection = trace.begin_connection();
     let since = begin(generation, Stage::S0);
+    // S0 only observes. S1/S3 fill in this run's actual multicast result;
+    // acquiring a diagnostic-only lock here would extend the lease boundary.
+    let android_network = if cfg!(target_os = "android") {
+        let mut facts = crate::cast_platform::network_facts();
+        facts.multicast_acquired = None;
+        let _ = with_app(|app| {
+            if app.native().cast.self_test.generation == generation {
+                app.native().cast.network_facts = facts.clone();
+                app.native().revision += 1;
+            }
+            Ok(())
+        });
+        Some(facts)
+    } else {
+        None
+    };
     let sample_b = samples::read_uniform(&context);
     let companion =
         tokio::task::spawn_blocking(|| media::probe().is_ok_and(|p| p.cast_mux_available()))
@@ -129,6 +165,10 @@ pub(super) async fn run(
                 Some(diag::NetworkProfileReason::QueryFailed),
             ));
     let mut environment = diag::Environment {
+        network_hint: android_network
+            .as_ref()
+            .and_then(|facts| facts.network_hint()),
+        android_network,
         sample_b_verified: Some(sample_b.is_ok()),
         companion_mpegts: Some(companion),
         companion_annexb: Some(companion),
@@ -148,12 +188,17 @@ pub(super) async fn run(
             _ => diag::InterfaceKind::Other,
         })
         .collect();
-    environment.vpn_or_tun = Some(interfaces.iter().any(|i| i.interface_type == "tunnel"));
+    environment.vpn_or_tun = environment
+        .android_network
+        .as_ref()
+        .and_then(|f| f.vpn_active)
+        .or_else(|| Some(interfaces.iter().any(|i| i.interface_type == "tunnel")));
     trace.environment(environment.clone());
     step(&trace, Stage::S0, since, Outcome::Complete, &cancel);
 
     let since = begin(generation, Stage::S1);
     let before = scan(&trace, connection, timing.scan_before, &cancel).await;
+    refresh_android_network(generation, &trace, &mut environment);
     let scan_duration = since.elapsed();
     step(&trace, Stage::S1, since, Outcome::Complete, &cancel);
     let mut target = request.renderer;
@@ -213,6 +258,7 @@ pub(super) async fn run(
             s.registration_attempted = true;
         });
         after = scan(&trace, connection, timing.scan_after, &cancel).await;
+        refresh_android_network(generation, &trace, &mut environment);
         step(
             &trace,
             Stage::S3,

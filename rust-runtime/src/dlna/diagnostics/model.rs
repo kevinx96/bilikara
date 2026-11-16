@@ -130,6 +130,8 @@ choices!(SkipReason {
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct Environment {
+    pub android_network: Option<crate::cast_platform::NetworkFacts>,
+    pub network_hint: Option<crate::cast_platform::NetworkHint>,
     pub interface_kinds: Vec<InterfaceKind>,
     pub exit_address_class: Option<AddressClass>,
     pub same_subnet_24: Option<bool>,

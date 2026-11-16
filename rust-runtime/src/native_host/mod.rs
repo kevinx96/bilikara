@@ -5,6 +5,7 @@ mod api;
 mod automatic_volume;
 mod cache;
 pub(crate) mod cast_session;
+pub use cast_session::platform_stopped as cast_platform_stopped;
 mod catalog;
 mod catalog_append;
 pub mod desktop;
