@@ -126,3 +126,82 @@ with the selected NDK's `llvm-readelf -W -h -l -d`, and verify the APK's license
 and absence of a source-kit ZIP in assets. The Rust application `.so` is an
 additional APK library outside the five-library media output. Fixture tests
 do not qualify an APK, Android loading, or physical DLNA operation.
+
+## Android runtime capability
+
+Before starting the Host, the shell reads `ApplicationInfo.nativeLibraryDir`
+through JNI and selects `libbilikara_media_libav.so` in that directory.
+`useLegacyPackaging=true` makes this an installed regular file. No JavaScript,
+HTTP request, application-data directory or PATH lookup selects executable code.
+The startup negotiation checks the same ABI/build contract used on desktop.
+
+Android cache normalization, media inspection, automatic volume and casting
+share this companion configuration. Missing libraries, loader errors and ABI
+failures do not block Host startup. Normalization/inspection retain their existing
+Rust compatibility route and record the fallback reason. Automatic volume has
+no separate Rust decoder: when the companion PCM capability is unavailable,
+the scanner remains unavailable, with an `automatic-volume-unavailable` event.
+`android-media-capability` records startup capabilities and a bounded reason
+code without loader paths. S0 independently checks the shared cast probe;
+unavailable casting returns `cast_backend_unavailable`.
+
+Existing cache keys, filenames, reuse checks and immutable media serving do not
+change. Switching to libav does not by itself re-download or re-normalize cache.
+
+### Runtime regression checks
+
+Build a same-source native **test** companion, keeping shared library prefixes
+read-only. On Windows, enter the x64 MSVC environment with `VSLANG=1033`, put
+the prepared prefix's `bin` on PATH for construction only, and run:
+
+```text
+cargo run --manifest-path xtask/Cargo.toml --locked --target x86_64-pc-windows-msvc -- libav-companion --prefix <absolute-prefix> --test --out <absolute-owned-directory>
+```
+
+Copy that prefix's `avcodec-63.dll`, `avformat-63.dll`, `avutil-61.dll` and
+`swresample-7.dll` beside `bilikara_media_libav_test.dll`. Remove the prefix from
+PATH for the tests, and set `BILIKARA_TEST_CAST_COMPANION` to the test DLL.
+Build the negative ABI fixture with MSVC (outputs in the owned directory):
+
+```text
+cl /nologo /LD /W4 /WX tests/fixtures/libav_incompatible.c /Fo<owned>/abi.obj /link /OUT:<owned>/incompatible.dll /IMPLIB:<owned>/abi.lib
+```
+
+On POSIX, build the same fixture with `cc -shared -fPIC` (`-dynamiclib` on macOS).
+Set `BILIKARA_TEST_INCOMPATIBLE_COMPANION` to its absolute path. Then run:
+
+```text
+cargo test --manifest-path rust-runtime/Cargo.toml --lib --features native-host --locked media_routing::android_tests:: -- --include-ignored --nocapture
+cargo test --manifest-path rust-runtime/Cargo.toml --lib --features native-host --locked android_media_startup_cache_and_failure_matrix -- --ignored --nocapture
+cargo test --manifest-path rust-runtime/Cargo.toml --lib --features native-host --locked sync_keeps_complete_reported_cache_out_of_the_worker_queue
+cargo test --manifest-path rust-runtime/Cargo.toml --lib --features native-host --locked experimental_libav::cast_mux:: -- --include-ignored --test-threads=1
+cargo test --manifest-path rust-runtime/Cargo.toml --lib --features native-host --locked cast_session:: -- --include-ignored --test-threads=1
+```
+
+Keep the native cast tests serial: the test companion's I/O fault injection
+uses process-global counters. Concurrent fault and cancellation tests can affect
+each other; this is a test-only facility, absent from the production companion.
+
+The comparison consumes checked-in AAC, FLAC-in-MP4 and H.264 fixtures, including
+the 30-second cast samples. Ordinary duration differences are bounded to 50 ms
+(one AAC access unit/video frame plus timescale rounding); loudness is bounded
+to 0.1 LU (priming/edit boundaries and histogram quantization). Codec, dimensions,
+rate, channels, packet counts and payload sizes must match. A historical short
+H.264 fixture has inconsistent sample/edit timing; the test pins its exact
+out-of-tolerance values separately instead of relaxing ordinary tolerances.
+These checks demonstrate demux/PCM and cache-serving compatibility, not actual
+Android WebView or television playback. Test processes use the same production
+configuration entry point, with independent processes for available, missing,
+invalid-library, incompatible-ABI and JNI-failure cases.
+
+Compile-check both Runtime feature sets and the Android shell:
+
+```text
+cargo clippy --manifest-path rust-runtime/Cargo.toml --all-targets --target aarch64-linux-android --locked -- -D warnings
+cargo clippy --manifest-path rust-runtime/Cargo.toml --all-targets --features native-host --target aarch64-linux-android --locked -- -D warnings
+cargo clippy --manifest-path src-tauri/Cargo.toml --target aarch64-linux-android --locked -- -D warnings
+```
+
+Use the selected NDK compiler and process-local `LIBCLANG_PATH` for bindgen.
+Actual bionic loading/namespace resolution, JNI directory lookup on a device,
+and S0/casting still require the packaged Android acceptance run.

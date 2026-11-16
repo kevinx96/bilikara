@@ -1,8 +1,12 @@
 //! Opt-in native Host transport. Desktop's Python adapter does not start this
 //! listener. HTTP is a projection/command adapter to the process-wide AppState.
+#[cfg(any(target_os = "android", test))]
+mod android_media;
 mod announcements;
 mod api;
 mod automatic_volume;
+#[cfg(any(target_os = "android", test))]
+pub use android_media::{android_media_unavailable, configure_android_media};
 mod cache;
 pub(crate) mod cast_session;
 pub use cast_session::platform_stopped as cast_platform_stopped;
