@@ -159,7 +159,10 @@ impl Receiver {
                         continue;
                     }
                     if state.http_error_on == Some(action.as_str()) {
-                        let _ = write!(stream, "HTTP/1.1 500 Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                        let _ = write!(
+                            stream,
+                            "HTTP/1.1 500 Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        );
                         continue;
                     }
                     if state.hang || state.hang_on == Some(action.as_str()) {
