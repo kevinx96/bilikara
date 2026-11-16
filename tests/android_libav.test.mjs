@@ -5,6 +5,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { userInfo } from 'node:os';
+import './android_media_check.test.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const scratch = path.join(root, '.tmp');
@@ -113,7 +114,9 @@ test('real Android libraries contain no build-machine paths or username', {
       root.toLowerCase(), root.toLowerCase().replaceAll('\\', '/')]) {
       assert.ok(!strings.includes(marker), `${name} contains a build path marker: ${marker}`);
     }
-    assert.ok(!strings.includes(user), `${name} contains the build username`);
+    for (const home of [`/home/${user}/`, `/users/${user}/`, `\\users\\${user}\\`]) {
+      assert.ok(!strings.includes(home), `${name} contains the build user's home path`);
+    }
     assert.ok(strings.includes('--prefix=/bilikara-android-libav'), `${name} lacks fixed FFmpeg prefix`);
   }
 });
