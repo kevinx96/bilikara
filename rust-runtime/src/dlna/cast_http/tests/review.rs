@@ -238,19 +238,25 @@ fn single_large_write_progress_resets_stall_deadline() {
             .media
             .clone()
             .unwrap();
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        // Size the paused reader before listen(): the handshake must advertise a
+        // window that its buffer can hold. Shrinking SO_RCVBUF after accept, and
+        // below the loopback MSS (65483 on Linux), makes Linux drop full-size
+        // segments and wait on backed-off retransmission and zero-window probes,
+        // so resumed reading cannot produce prompt progress. The 8 MiB body still
+        // far exceeds both kernel buffers, keeping the single send() backpressured.
+        let listener = TcpSocket::new_v4().unwrap();
+        listener.set_recv_buffer_size(256 * 1024).unwrap();
+        listener.bind((Ipv4Addr::LOCALHOST, 0).into()).unwrap();
+        let listener = listener.listen(1).unwrap();
         let sender = TcpSocket::new_v4().unwrap();
         sender.set_send_buffer_size(8192).unwrap();
         let mut sender = sender
             .connect(listener.local_addr().unwrap())
             .await
             .unwrap();
-        let (reader, _) = listener.accept().await.unwrap();
-        let reader = reader.into_std().unwrap();
-        socket2::SockRef::from(&reader)
-            .set_recv_buffer_size(8192)
-            .unwrap();
-        let mut reader = TcpStream::from_std(reader).unwrap();
+        // Same socket option as the endpoint's accepted connections.
+        sender.set_nodelay(true).unwrap();
+        let (mut reader, _) = listener.accept().await.unwrap();
         let shared = endpoint.shared.clone();
         const SIZE: usize = 8 * 1024 * 1024;
         let task = tokio::spawn(async move {

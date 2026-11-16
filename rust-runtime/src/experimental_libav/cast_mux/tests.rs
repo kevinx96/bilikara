@@ -707,20 +707,23 @@ fn malformed_cast_inputs_have_media_error_categories() {
     // SAFETY: explicitly selected test companion and private test-only signature.
     let audio_io: AudioIo =
         unsafe { transmute(probe._library.symbol(c"bm_test_cast_audio_io_v1").unwrap()) };
-    let input = open_input(&flac).unwrap();
-    let fd = probe._library.descriptor(&input).unwrap();
-    extern "C" fn never(_: *mut c_void) -> i32 {
-        0
+    {
+        let input = open_input(&flac).unwrap();
+        let fd = probe._library.descriptor(&input).unwrap();
+        extern "C" fn never(_: *mut c_void) -> i32 {
+            0
+        }
+        let request = wire::Request {
+            fd: fd.fd,
+            cancelled: never,
+            opaque: std::ptr::null_mut(),
+        };
+        // SAFETY: synchronous test call keeps all descriptor borrows alive.
+        assert_eq!(unsafe { audio_io(&request) }, 8); // BM_IO, not BM_INVALID_MEDIA
+        // Scope end releases the descriptor (Windows closes its duplicated CRT
+        // fd; POSIX only ends the borrow) before `input`, and both before the
+        // sample is rewritten below.
     }
-    let request = wire::Request {
-        fd: fd.fd,
-        cancelled: never,
-        opaque: std::ptr::null_mut(),
-    };
-    // SAFETY: synchronous test call keeps all descriptor borrows alive.
-    assert_eq!(unsafe { audio_io(&request) }, 8); // BM_IO, not BM_INVALID_MEDIA
-    drop(fd);
-    drop(input);
     let mut bytes = std::fs::read(&flac).unwrap();
     bytes.truncate(bytes.len() - 31);
     std::fs::write(&flac, bytes).unwrap();
