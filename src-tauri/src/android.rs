@@ -1,5 +1,7 @@
 //! Android's in-process Rust Host. The shell resolves private storage and serves
 //! the existing bundled Host/Remote assets; it owns no playlist business rules.
+#[path = "android_capture.rs"]
+mod android_capture;
 use bilikara_runtime::native_host::{Asset, NativeHost, RemoteExportRenderer};
 use bilikara_runtime::{
     AppStateRequest, AppStateSeed, PlayerSettingsSeed, execute_app_state, initialize_native_host,

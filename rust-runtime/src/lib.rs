@@ -86,3 +86,6 @@ pub use status_service::{
 pub use update_installer::{
     LaunchUpdateHelperRequest, PrepareUpdateRequest, PrepareUpdateResult, UpdateInstallerError,
 };
+
+mod qr_capture;
+pub use qr_capture::decode_qr_luma;

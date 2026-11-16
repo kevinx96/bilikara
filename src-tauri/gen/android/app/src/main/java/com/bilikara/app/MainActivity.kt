@@ -65,6 +65,7 @@ class MainActivity : TauriActivity() {
   }
 
   override fun onDestroy() {
+    hostPlatform.destroy()
     webViewDiagnostics.destroy()
     hostPresentation.destroy()
     super.onDestroy()

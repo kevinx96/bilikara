@@ -5,7 +5,7 @@ use tokio::sync::mpsc;
 
 mod network_profile;
 pub(super) mod runner;
-mod samples;
+pub(super) mod samples;
 
 #[derive(Default)]
 pub(crate) struct State {
@@ -135,6 +135,8 @@ pub(super) fn route(
             }
             let cast = &mut app.native().cast;
             if cast.self_test.running
+                || cast.pipeline_running
+                || cast.connected
                 || cast.owns_playback
                 || cast.pending.is_some()
                 || cast.phase != Phase::Idle

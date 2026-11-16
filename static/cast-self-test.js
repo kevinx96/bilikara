@@ -138,6 +138,7 @@
       const test = current(), running = Boolean(test.running);
       trigger.textContent = labelText("title"); trigger.disabled = Boolean(adapter.castBusy?.() || adapter.physicalBusy());
       for (const node of dialog.querySelectorAll("[data-test-text]")) node.textContent = labelText(node.dataset.testText);
+      if (adapter.shareReport?.()) el("[data-test-save]").textContent = adapter.translate("cast.android.share");
       el("[data-test-close]").setAttribute("aria-label", labelText("close"));
       el("[data-test-close]").disabled = running || buttons.size > 0;
       const select = el("[data-test-device]");
@@ -182,8 +183,14 @@
       const row = report?.diagnostics?.cast_self_test?.conclusion?.decision_row;
       el("[data-test-result]").textContent = report ? labelText(row ? `result.${row}` : "inconclusive") : "";
       const unavailable = report?.diagnostics?.cast_self_test?.cells?.filter(cell => cell.skip_reason === 'platform_unavailable') || [];
-      el('[data-test-platform]').hidden = !unavailable.length;
-      el('[data-test-platform]').textContent = unavailable.map(cell => `${labelText(`cell.${cell.cell}`)}: ${labelText('platformUnavailable')}`).join(' · ');
+      const platformMessages = unavailable.map(cell => `${labelText(`cell.${cell.cell}`)}: ${labelText('platformUnavailable')}`);
+      const cast = snapshot();
+      if (cast.error_code) platformMessages.push(errorText({code: cast.error_code}));
+      if (['cellular_default', 'wifi_unvalidated', 'vpn_active', 'multicast_unavailable', 'battery_restricted'].includes(cast.network_hint)) {
+        platformMessages.push(adapter.translate(`cast.network.${cast.network_hint}`));
+      }
+      el('[data-test-platform]').hidden = !platformMessages.length;
+      el('[data-test-platform]').textContent = platformMessages.join(' · ');
       el("[data-test-summary]").hidden = !report;
       el("[data-test-summary]").textContent = report?.text || "";
       if (running && !lastRunning && dialog.open) el('[data-test-status]').focus();

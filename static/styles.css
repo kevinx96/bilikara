@@ -12412,3 +12412,24 @@ dialog.cast-self-test:not([open]) { display: none; }
   font-weight: 400;
   line-height: normal;
 }
+
+/* Android My reuses the Host cast panel and shared floating surface. */
+.cast-output-group > p { margin: 0; font-size: 13px; overflow-wrap: anywhere; }
+.cast-output-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.cast-output-row > button:first-child { min-width: 0; flex: 1; }
+/* Keep the shared switch's appearance; expand only its transparent hit target. */
+.cast-output-switch::after { content: ""; position: absolute; inset: -8px 0; }
+.cast-capture { display: grid; gap: 8px; padding: 20px; border: 1px solid var(--line); border-radius: 14px; min-width: 0; }
+.cast-capture .cast-actions { display: grid; gap: 8px; }
+.cast-capture button { min-height: 44px; width: 100%; min-width: 0; }
+.cast-advanced { min-width: 0; }
+.cast-advanced summary { cursor: pointer; min-height: 44px; align-content: center; }
+.cast-advanced input { width: 100%; min-width: 0; box-sizing: border-box; }
+.cast-advanced label { display: block; margin-top: 8px; }
+.cast-advanced input { margin-top: 4px; }
+.cast-advanced button { margin-top: 8px; }
+.cast-management #cast-panel { margin-top: 12px; }
+html[data-native-host="true"]:not([data-host-platform="desktop"]) .cast-self-test::backdrop { background: rgba(29, 26, 24, .24); }
+html[data-native-host="true"]:not([data-host-platform="desktop"]) dialog.cast-self-test { inset: 0 0 var(--android-ime-height, 0px); max-height: calc(100dvh - var(--android-ime-height, 0px) - 24px); }
+html[data-native-host="true"]:is([data-theme="dark"], [data-theme="blue"]):not([data-host-platform="desktop"]) .cast-self-test::backdrop { background: rgba(2, 6, 23, .38); }
+html[data-native-host="true"]:not([data-host-platform="desktop"]):has(.cast-self-test[open]) { overflow: hidden; }

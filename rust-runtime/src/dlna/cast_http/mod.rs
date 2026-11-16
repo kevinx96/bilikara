@@ -334,6 +334,25 @@ fn session_budget() -> Arc<Semaphore> {
 }
 
 impl CastEndpoint {
+    /// Local pipeline diagnostic only: no caller-selected listener or receiver.
+    pub(crate) async fn bind_pipeline() -> Result<Self, EndpointError> {
+        Self::bind_on(
+            Ipv4Addr::LOCALHOST,
+            Ipv4Addr::LOCALHOST,
+            DeviceContext {
+                device_key: "pipeline".into(),
+                udn_hash: None,
+                source: super::DiscoverySource::Manual,
+                server: String::new(),
+                route: None,
+            },
+            ServerIdentity::default(),
+            session_budget(),
+            DEFAULT_STAGES,
+        )
+        .await
+    }
+
     /// Always consult T2's verified system route. The public API cannot select
     /// an unspecified listener or substitute a renderer-supplied bind address.
     pub async fn bind(

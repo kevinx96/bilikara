@@ -6,6 +6,7 @@ use crate::dlna::{CancellationToken, Renderer, diagnostics::SessionTrace};
 use std::sync::Arc;
 
 mod media;
+mod pipeline;
 pub(super) mod self_test;
 mod worker;
 
@@ -29,6 +30,7 @@ pub(crate) enum Request {
         confirmed: bool,
     },
     Disconnect,
+    Pipeline,
 }
 #[derive(Clone, Debug)]
 pub(crate) enum Control {
@@ -48,6 +50,13 @@ pub(crate) struct State {
     pub self_test: self_test::State,
     pub phase: Phase,
     pub owns_playback: bool,
+    // A suspended output retains its worker, renderer and Pure K registration.
+    // Existing clients continue to use owns_playback/local_media for playback.
+    pub connected: bool,
+    // Desired output; owns_playback changes only after awaited output cleanup.
+    pub output_enabled: bool,
+    pub pipeline_running: bool,
+    pub pipeline_result: Option<Value>,
     pub operation: u64,
     pub generation: u64,
     pub playback_generation: u64,
@@ -89,13 +98,15 @@ impl State {
             .unwrap_or_default();
         json!({"phase":self.phase,"owns_playback":self.owns_playback,"self_test":self.self_test.snapshot(),
             "network_hint":self.network_facts.network_hint(),"network_facts":self.network_facts,
+            "connected":self.connected,"output_enabled":self.output_enabled,
+            "pipeline_running":self.pipeline_running,"pipeline_result":self.pipeline_result,
             "operation_id":self.operation,"generation":self.generation,
             "renderers":self.renderers.iter().map(|r| json!({"device_key":renderer_key(r),"preferences_persisted":preference_key(r).is_some(),"label":r.description.name.chars().take(100).collect::<String>()})).collect::<Vec<_>>(),
             "devices":preferences.devices.iter().chain(self.session_devices.iter()).map(|(key,d)|(key.clone(),json!({"mode":d.mode,"learned_mode":d.learned_mode}))).collect::<serde_json::Map<_,_>>(),
             "selected":self.selected,"receiver_state":self.receiver_state,"position":self.position,
             "duration":self.duration,"is_paused":self.paused,"error_code":self.error_code,"resume":self.resume,
             "mode":preference.mode,"learned_mode":preference.learned_mode,"effective_mode":self.mode,
-            "busy":self.control_busy || self.pending.is_some(),"local_media":if self.owns_playback {"retain_paused_muted"} else {"host"}})
+            "busy":self.control_busy || self.pending.is_some() || self.pipeline_running,"local_media":if self.owns_playback {"retain_paused_muted"} else {"host"}})
     }
     fn replace(&mut self, request: Request, phase: Phase) {
         self.cancel.cancel();
@@ -142,6 +153,12 @@ pub(super) fn route(
 ) -> Result<Value, ApiError> {
     if path.starts_with("/api/cast/self-test/") {
         return self_test::route(context, identity, method, path, body);
+    }
+    if path == "/api/cast/capabilities" && method == Method::GET {
+        with_app(|app| app.native_authorize(identity, true))?;
+        return Ok(
+            json!({"pipeline_available":media::probe().is_ok_and(|probe| probe.cast_mux_available())}),
+        );
     }
     with_app(|app| {
         app.native_authorize(identity, path != "/api/cast/command")?;
@@ -253,19 +270,53 @@ pub(super) fn route(
                 app.cast_set_session_device(&key, revision, device)?;
             }
             let state = &mut app.native().cast;
-            if state.owns_playback
+            if (state.connected || state.owns_playback)
                 && state.selected.as_deref() == Some(&key)
                 && state.mode != effective
             {
                 state.mode = effective;
-                state.control = Some(Control::Restart);
-                state.control_busy = true;
+                if state.owns_playback {
+                    state.control = Some(Control::Restart);
+                    state.control_busy = true;
+                }
             }
             return app.native_snapshot(true);
         }
+        if app.native().cast.pipeline_running && path != "/api/cast/disconnect" {
+            return Err(ApiError::new(409, "cast_busy", "Pipeline test is running"));
+        }
         match path {
+            "/api/cast/pipeline-test" => {
+                if app.native().cast.connected || app.native().cast.phase != Phase::Idle {
+                    return Err(ApiError::new(
+                        409,
+                        "cast_busy",
+                        "Disconnect before pipeline testing",
+                    ));
+                }
+                app.native().cast.replace(Request::Pipeline, Phase::Idle);
+                app.native().cast.pipeline_running = true;
+                app.native().cast.pipeline_result = None;
+            }
+            "/api/cast/output" => {
+                let enabled = body["enabled"]
+                    .as_bool()
+                    .ok_or_else(|| ApiError::invalid("Missing output selection"))?;
+                let s = &mut app.native().cast;
+                if !s.connected || s.phase != Phase::Active || s.control_busy {
+                    return Err(ApiError::new(
+                        409,
+                        "cast_renderer_unavailable",
+                        "No connected receiver",
+                    ));
+                }
+                if s.output_enabled != enabled {
+                    s.output_enabled = enabled;
+                    s.control_busy = true;
+                }
+            }
             "/api/cast/discover" => {
-                if app.native().cast.owns_playback {
+                if app.native().cast.connected || app.native().cast.owns_playback {
                     return Err(ApiError::new(
                         409,
                         "cast_busy",
@@ -346,6 +397,7 @@ pub(super) fn route(
                     Phase::Connecting,
                 );
                 app.native().cast.owns_playback = true;
+                app.native().cast.output_enabled = true;
             }
             "/api/cast/disconnect" => {
                 app.native()
@@ -370,6 +422,9 @@ pub(super) fn route(
                 state.phase = Phase::Idle;
                 state.owns_playback = false;
                 state.platform_output_id = None;
+                state.connected = false;
+                state.output_enabled = false;
+                state.pipeline_running = false;
                 state.error_code = Some("cast_worker_unavailable".into());
                 state.resume = Some(
                     json!({"item_id":input.current_item.as_ref().map(|i|&i.id),"playback_generation":input.playback_generation,"position":state.position,"is_paused":state.paused,"operation_id":state.operation}),

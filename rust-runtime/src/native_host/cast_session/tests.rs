@@ -10,6 +10,8 @@ use std::{
 
 struct ReceiverState {
     fault_on: Option<&'static str>,
+    http_error_on: Option<&'static str>,
+    hang_on: Option<&'static str>,
     no_pull: bool,
     clients: usize,
     different_peer: bool,
@@ -54,6 +56,8 @@ impl Receiver {
         let address = listener.local_addr().unwrap();
         let state = Arc::new(Mutex::new(ReceiverState {
             fault_on: None,
+            http_error_on: None,
+            hang_on: None,
             no_pull: false,
             clients: 1,
             different_peer: false,
@@ -154,7 +158,11 @@ impl Receiver {
                         );
                         continue;
                     }
-                    if state.hang {
+                    if state.http_error_on == Some(action.as_str()) {
+                        let _ = write!(stream, "HTTP/1.1 500 Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                        continue;
+                    }
+                    if state.hang || state.hang_on == Some(action.as_str()) {
                         hung.push(stream);
                         continue;
                     }
@@ -356,6 +364,8 @@ impl Receiver {
     }
 }
 
+#[path = "tests/android_output.rs"]
+mod android_output;
 #[path = "self_test/scenarios.rs"]
 mod self_test_scenarios;
 impl Drop for Receiver {
