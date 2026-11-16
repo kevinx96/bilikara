@@ -15,6 +15,8 @@ internal class HostPlatform(private val activity: AppCompatActivity,
   private val updatePreferenceName: String = "bilikara-update-preferences-v1",
   private val diagnostics: HostWebViewDiagnostics = HostWebViewDiagnostics(activity)) {
   private var installed = false
+  private val capture = HostCapture(activity)
+  private val authorization = HostRoomAuthorization(activity)
   private val updater = HostUpdate(activity)
 
   fun install(webView: WebView, origin: String): Boolean {
@@ -29,11 +31,21 @@ internal class HostPlatform(private val activity: AppCompatActivity,
       if (page.scheme != expected.scheme || page.authority != expected.authority ||
         page.path !in listOf("/", "/index.html")) return@addWebMessageListener
       val raw = message.data ?: return@addWebMessageListener
-      if (raw.length > 8192) return@addWebMessageListener
+      if (raw.length > 40000) return@addWebMessageListener
       val input = try { JSONObject(raw) } catch (_: Exception) { return@addWebMessageListener }
       val id = input.optString("id")
       if (!id.matches(Regex("[A-Za-z0-9_-]{1,64}"))) return@addWebMessageListener
       val result = JSONObject().put("id", id)
+      if (input.optString("action") in listOf("cast-photo", "cast-gallery", "cast-share-report")) {
+        val complete: (JSONObject?, String?) -> Unit = { data, error ->
+          if (error == null) result.put("ok", true).put("data", data)
+          else result.put("ok", false).put("error", error)
+          try { reply.postMessage(result.toString()) } catch (_: Exception) { }
+        }
+        if (input.optString("action") == "cast-share-report") HostExports.shareCastReport(activity, origin, complete)
+        else capture.start(input.optString("action") == "cast-photo", complete)
+        return@addWebMessageListener
+      }
       if (input.optString("action") == "install-update") {
         updater.install(input.optJSONObject("package") ?: JSONObject()) { data, error ->
           if (error == null) result.put("ok", true).put("data", data)
@@ -49,6 +61,7 @@ internal class HostPlatform(private val activity: AppCompatActivity,
             activity.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).addCategory(Intent.CATEGORY_BROWSABLE))
             JSONObject().put("opened", true)
           }
+          "cast-open-authorization" -> authorization.open(input.optString("url"))
           "environment" -> environment()
           "webview-diagnostics" -> { diagnostics.show(webView); JSONObject().put("shown", true) }
           "get-update-preferences" -> updatePreferences()
@@ -56,6 +69,8 @@ internal class HostPlatform(private val activity: AppCompatActivity,
           else -> error("Unsupported platform action")
         }
         result.put("ok", true).put("data", data)
+      } catch (_: HostRoomAuthorization.WeChatUnavailable) {
+        result.put("ok", false).put("error", "cast_wechat_unavailable")
       } catch (_: Exception) {
         result.put("ok", false).put("error", "Android 系统操作失败，请确认有可用的浏览器或系统组件")
       }
@@ -64,6 +79,8 @@ internal class HostPlatform(private val activity: AppCompatActivity,
     installed = true
     return true
   }
+
+  fun destroy() = capture.destroy()
 
   private fun environment(): JSONObject {
     val webView = WebViewCompat.getCurrentWebViewPackage(activity)

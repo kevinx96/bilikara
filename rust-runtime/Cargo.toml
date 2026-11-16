@@ -26,6 +26,7 @@ name = "bilikara-updater"
 native-host = ["dep:axum", "dep:tokio-util", "qrcode/svg", "dep:time", "dep:roxmltree", "dep:socket2"]
 
 [dependencies]
+quircs = "=0.10.3"
 base64 = "0.22"
 axum = { version = "0.8", optional = true, default-features = false, features = ["http1", "json", "tokio"] }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "fs", "io-util"] }
@@ -66,4 +67,3 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Network
 
 [dev-dependencies]
 claxon = "0.4"
-quircs = "=0.10.3"

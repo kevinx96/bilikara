@@ -22954,6 +22954,7 @@ function initializeCastHost() {
     const cast = state.data?.cast;
     const owned = Boolean(cast?.owns_playback);
     if (owned && !wasOwned) {
+      lastResume = null;
       state.localPlaybackStartGeneration = Number(state.localPlaybackStartGeneration || 0) + 1;
       clearSplitPlaybackStartupWatchdog();
       clearLocalPlayerSeekState();
@@ -23006,9 +23007,17 @@ function initializeCastHost() {
       if (!response.ok || !result.ok) throw Object.assign(new Error(t("cast.error.cast_report_unavailable")), { code: "cast_report_unavailable" });
       return result.data;
     },
-    saveReport: () => saveTauriBackendDownload("/api/cast/self-test/download"),
+    getCapabilities: async () => {
+      const response = await fetch("/api/cast/capabilities", {headers: clientHeaders()});
+      const result = await response.json();
+      if (!response.ok || !result.ok) throw new Error("cast_backend_unavailable");
+      return result.data;
+    },
+    saveReport: () => window.BilikaraAndroidPlatform?.shareCastReport
+      ? window.BilikaraAndroidPlatform.shareCastReport() : saveTauriBackendDownload("/api/cast/self-test/download"),
+    shareReport: () => Boolean(window.BilikaraAndroidPlatform?.shareCastReport),
     copyReport: text => window.BilikaraDiagnosticsCopy.copyText(text, { fallbackMessage: t("service.diagnosticsFailed") }),
-    selfTestAvailable: () => !isAndroidNativePlaybackRuntime(),
+    selfTestAvailable: () => true,
     accept: snapshot => { acceptHostStateSnapshot(snapshot); render(); },
     physicalBusy: () => state.presentationControlBusy || ["activating", "recovering"].includes(state.presentationSession.phase),
     closePhysical, networkPresentation,

@@ -12,6 +12,30 @@ import { contains, hasContent, splitOnce, sourceIndex, lastSourceIndex, firstMat
 async function checked(program, args, cwd) { const result = await runNative(program, args, process.env, 120000, cwd); assert.equal(result.status, 0, result.stdout + result.stderr); return result; }
 const TAURI = path.join(ROOT, "src-tauri");
 
+test('Android cast capture uses private system photos and a bounded local JNI decoder', () => {
+  const base = path.join(TAURI, 'gen/android/app/src/main');
+  const capture = readFileSync(path.join(base, 'java/com/bilikara/app/HostCapture.kt'), 'utf8');
+  const platform = readFileSync(path.join(base, 'java/com/bilikara/app/HostPlatform.kt'), 'utf8');
+  const manifest = readFileSync(path.join(base, 'AndroidManifest.xml'), 'utf8');
+  const exports = readFileSync(path.join(base, 'java/com/bilikara/app/HostExports.kt'), 'utf8');
+  assert.match(capture, /MediaStore\.ACTION_IMAGE_CAPTURE/);
+  assert.match(capture, /MediaStore\.EXTRA_OUTPUT/);
+  assert.match(capture, /FileProvider\.getUriForFile/);
+  assert.match(capture, /activity\.cacheDir, "cast-capture"/);
+  assert.match(capture, /Intent\.ACTION_OPEN_DOCUMENT/);
+  assert.match(capture, /decodeLuma\(luma, bitmap\.width, bitmap\.height\)/);
+  assert.match(capture, /bitmap\.recycle\(\)/);
+  assert.match(capture, /photo\?\.delete\(\)/);
+  assert.doesNotMatch(manifest, /android\.permission\.CAMERA/);
+  assert.match(manifest, /androidx\.core\.content\.FileProvider/);
+  assert.match(platform, /!isMainFrame \|\| sourceOrigin != expected/);
+  assert.match(platform, /page\.path !in listOf\("\/", "\/index.html"\)/);
+  assert.match(exports, /\$origin\/api\/cast\/self-test\/download/);
+  assert.match(exports, /Intent\.ACTION_SEND/);
+  assert.match(exports, /connection\.instanceFollowRedirects = false/);
+  assert.match(exports, /4 \* 1024 \* 1024/);
+});
+
 import { cargoDependencies } from './cargo_manifest_support.mjs';
 
 const AndroidAlphaBootstrapTest = {

@@ -1,0 +1,141 @@
+use super::*;
+
+#[test]
+fn android_output_requires_a_live_connection_and_pipeline_is_host_only() {
+    let _serial = GLOBAL_APP_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let host = Host::new();
+    assert_eq!(
+        host.post("/api/cast/output", json!({"enabled":true}))
+            .unwrap_err()
+            .code,
+        "cast_renderer_unavailable"
+    );
+    let remote = Identity {
+        token: String::new(),
+        loopback: false,
+        client: "remote".into(),
+    };
+    assert!(
+        api::dispatch(
+            &host.context,
+            &remote,
+            false,
+            &Method::POST,
+            "/api/cast/pipeline-test",
+            "",
+            json!({})
+        )
+        .is_err()
+    );
+    host.post("/api/cast/pipeline-test", json!({})).unwrap();
+    let state = host.wait(|s| s["cast"]["pipeline_running"] == false);
+    assert_eq!(
+        state["cast"]["pipeline_result"]["code"],
+        "cast_backend_unavailable"
+    );
+    assert_eq!(state["cast"]["owns_playback"], false);
+}
+
+#[test]
+#[ignore = "requires trusted BILIKARA_TEST_CAST_COMPANION"]
+fn android_pipeline_reads_real_mux_over_loopback_without_receiver() {
+    let _serial = GLOBAL_APP_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let host = Host::new();
+    host.post("/api/cast/pipeline-test", json!({})).unwrap();
+    let state = host.wait(|s| s["cast"]["pipeline_running"] == false);
+    assert_eq!(
+        state["cast"]["pipeline_result"],
+        json!({"ok":true,"first_byte":true,"sample_b":"verified"})
+    );
+    assert_eq!(state["cast"]["owns_playback"], false);
+    assert_eq!(state["cast"]["connected"], false);
+    assert_eq!(state["cast"]["selected"], Value::Null);
+}
+
+#[test]
+#[ignore = "requires trusted BILIKARA_TEST_CAST_COMPANION; simulated receiver"]
+fn android_output_roundtrips_keep_connection_until_explicit_disconnect() {
+    assert_roundtrips(false);
+}
+
+#[test]
+#[ignore = "requires trusted BILIKARA_TEST_CAST_COMPANION; simulated Pure K room"]
+fn android_purek_output_retains_registration_and_disconnect_awaits_release() {
+    assert_roundtrips(true);
+}
+
+fn assert_roundtrips(purek: bool) {
+    let _serial = GLOBAL_APP_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let receiver = Receiver::new();
+    let host = Host::new();
+    host.use_long_media();
+    if purek {
+        host.post("/api/cast/connect", json!({"purek_qr":receiver.qr()}))
+            .unwrap();
+        host.wait(|s| s["cast"]["phase"] == "active");
+    } else {
+        host.connect(receiver.renderer());
+    }
+    let selected = host.snapshot()["cast"]["selected"].clone();
+    for cycle in 0..2 {
+        host.post("/api/cast/output", json!({"enabled":false}))
+            .unwrap();
+        let local =
+            host.wait(|s| s["cast"]["owns_playback"] == false && s["cast"]["busy"] == false);
+        assert_eq!(receiver.state.lock().unwrap().releases, 0);
+        assert_eq!(local["cast"]["connected"], true);
+        assert_eq!(local["cast"]["selected"], selected);
+        assert!(local["cast"]["resume"].is_object());
+        assert_eq!(receiver.state.lock().unwrap().state, "STOPPED");
+        let mode = if cycle == 0 { "live" } else { "file" };
+        let changed = host
+            .post(
+                "/api/cast/command",
+                json!({
+                    "command":"cast.set_device_mode", "device_key":selected,
+                    "revision":local["revision"], "mode":mode
+                }),
+            )
+            .unwrap();
+        assert_eq!(changed["cast"]["effective_mode"], mode);
+        assert_eq!(changed["cast"]["owns_playback"], false);
+        assert_eq!(
+            host.post("/api/cast/discover", json!({})).unwrap_err().code,
+            "cast_busy"
+        );
+        host.post("/api/cast/output", json!({"enabled":true}))
+            .unwrap();
+        let cast = host.wait(|s| s["cast"]["owns_playback"] == true && s["cast"]["busy"] == false);
+        assert_eq!(cast["cast"]["selected"], selected);
+        assert_eq!(cast["cast"]["resume"], Value::Null);
+        assert_eq!(cast["cast"]["effective_mode"], mode);
+    }
+    host.post("/api/cast/output", json!({"enabled":false}))
+        .unwrap();
+    host.wait(|s| s["cast"]["owns_playback"] == false && s["cast"]["busy"] == false);
+    receiver.release_hold.store(purek, Ordering::Release);
+    host.post("/api/cast/disconnect", json!({})).unwrap();
+    if purek {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !receiver.release_ready.load(Ordering::Acquire) {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_ne!(host.snapshot()["cast"]["phase"], "idle");
+        receiver.release_hold.store(false, Ordering::Release);
+    }
+    let state = host.wait(|s| s["cast"]["phase"] == "idle");
+    assert_eq!(state["cast"]["connected"], false);
+    assert_eq!(
+        state["cast"]["resume"],
+        Value::Null,
+        "disconnecting local output must not seek local playback again"
+    );
+    assert_eq!(receiver.state.lock().unwrap().releases, usize::from(purek));
+}

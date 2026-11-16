@@ -122,6 +122,13 @@ pub(super) fn run(context: Arc<HostContext>) {
                 watch_stop.store(true, Ordering::Release);
             });
             match request {
+                Request::Pipeline => {
+                    let result = pipeline::run(context.clone(), &cancel).await;
+                    update(id, |s| {
+                        s.pipeline_running = false;
+                        s.pipeline_result = Some(result);
+                    });
+                }
                 Request::Disconnect => {
                     restore(id, None);
                 }
@@ -205,6 +212,9 @@ pub(super) fn restore(id: u64, failure: Option<String>) {
         }
         if state.operation == id || matches!(state.pending, Some(Request::Disconnect)) {
             state.owns_playback = false;
+            state.connected = false;
+            state.output_enabled = false;
+            state.pipeline_running = false;
             state.phase = Phase::Idle;
             state.error_code = failure;
             state.control_busy = false;
@@ -317,6 +327,7 @@ pub(super) async fn handoff(
         state.cancel = cancel.clone();
         state.mux_stop = Arc::new(AtomicBool::new(false));
         state.owns_playback = true;
+        state.output_enabled = true;
         state.self_test_handoff_active = true;
         state.self_test.running = false;
         let admitted = (state.operation, state.mux_stop.clone());
@@ -514,6 +525,52 @@ async fn play_session(
         loop {
             if cancel.is_cancelled() {
                 break;
+            }
+            let enabled = with_app(|app| Ok(app.native().cast.output_enabled))?;
+            if !enabled {
+                if let Some(mut previous) = output.take() {
+                    let stopped = record(trace, connection, Some(previous.id), soap(client.stop(cancel)).await);
+                    if let Some(live) = previous.live.take() { live.stop().await; }
+                    endpoint.clear_generation();
+                    trace.complete_output(previous.id, Default::default());
+                    if let Some((_, stopping, _)) = &prefetched { stopping.store(true, Ordering::Release); }
+                    let _ = take_prefetch(&mut prefetched, cancel).await;
+                    stopped?;
+                    with_app(|app| {
+                        let snap = app.native_cast_input()?;
+                        let s = &mut app.native().cast;
+                        s.owns_playback = false;
+                        s.control = None;
+                        s.control_busy = false;
+                        s.resume = Some(json!({"playback_generation":snap.playback_generation,
+                            "item_id":snap.current_item.as_ref().map(|i|&i.id),"position":s.position,
+                            "is_paused":s.paused,"operation_id":id}));
+                        app.native().revision += 1;
+                        Ok(())
+                    })?;
+                }
+                tokio::time::sleep(Duration::from_millis(30)).await;
+                continue;
+            }
+            if output.is_none() {
+                let (position, mode, paused) = with_app(|app| {
+                    let snap = app.native_snapshot(true)?;
+                    let s = &mut app.native().cast;
+                    s.owns_playback = true; s.resume = None;
+                    s.paused = snap["player_status"]["is_paused"].as_bool().unwrap_or(false);
+                    s.position = snap["player_status"]["current_time"].as_f64().unwrap_or(0.0);
+                    app.native().revision += 1;
+                    Ok((app.native().cast.position, app.native().cast.mode, app.native().cast.paused))
+                })?;
+                output = Some(start_output(OutputContext { context, id, client: &client,
+                    endpoint: &endpoint, files: files.clone(), trace, connection, cancel, stop },
+                    mode, position, None).await?);
+                update(id, |s| {
+                    s.control = paused.then_some(Control::Pause);
+                    s.control_busy = paused;
+                });
+                monitor = TransportMonitor::default(); poll_failures = 0;
+                last_response = Instant::now(); stopped = 0; recovery = None;
             }
             if receiver_silent(last_response, poll_failures, Instant::now()) {
                 let since = recovery.get_or_insert(last_response + RECEIVER_SILENCE);
@@ -1145,6 +1202,7 @@ async fn start_output_once(
     update(id, |s| {
         s.phase = Phase::Active;
         s.owns_playback = true;
+        s.connected = true;
         s.paused = false;
         s.duration = duration;
         s.position = origin;
@@ -1220,7 +1278,10 @@ fn media_key(item: &PlaylistItem) -> String {
 async fn command_pending(id: u64) {
     loop {
         if with_app(|app| {
-            Ok(app.native().cast.operation != id || app.native().cast.control.is_some())
+            let cast = &app.native().cast;
+            Ok(cast.operation != id
+                || cast.control.is_some()
+                || cast.output_enabled != cast.owns_playback)
         })
         .unwrap_or(true)
         {

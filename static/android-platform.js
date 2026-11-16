@@ -13,7 +13,7 @@
     pending.delete(result.id);
     clearTimeout(request.timeout);
     if (result.ok) request.resolve(result.data);
-    else request.reject(new Error(result.error || "Android 系统操作失败"));
+    else request.reject(Object.assign(new Error(result.error || "Android 系统操作失败"), {code: result.error}));
   };
   function call(action, data = {}, timeoutMs = 30000) {
     if (pending.size >= 8) return Promise.reject(new Error("Android 系统操作繁忙"));
@@ -29,6 +29,9 @@
     });
   }
   root.BilikaraAndroidPlatform = {
+    captureCastQr: camera => call(camera ? "cast-photo" : "cast-gallery", {}, 300000),
+    openCastAuthorization: url => call("cast-open-authorization", {url}),
+    shareCastReport: () => call("cast-share-report", {}, 60000),
     updatePreferences: {
       load: () => call("get-update-preferences"),
       save: preferences => call("save-update-preferences", {preferences}),

@@ -11,6 +11,7 @@
     let open = false;
     let errorKey = "";
     let selfTest = null;
+    let android = null;
     const busy = () => Boolean(pending || selfTest?.busy() || view().self_test?.running || view().busy || ["connecting", "recovering", "discovering"].includes(view().phase));
     const errorText = error => {
       const key = `cast.error.${error?.code || error || "unknown"}`;
@@ -31,9 +32,9 @@
       }
       // Cancellation remains available while the receiver is discovering/connecting.
       el("cast-disconnect").disabled = Boolean(pending === el("cast-disconnect") || !cast.phase || cast.phase === "idle" || cast.phase === "recovering");
-      el("cast-discover").disabled ||= Boolean(cast.owns_playback);
-      text(el("cast-status"), cast.error_code ? errorText(cast.error_code)
-        : t(`cast.phase.${cast.phase || "idle"}`));
+      el("cast-discover").disabled ||= Boolean(cast.connected || cast.owns_playback);
+      const hint = ['cellular_default', 'wifi_unvalidated', 'vpn_active', 'multicast_unavailable', 'battery_restricted'].includes(cast.network_hint) ? t(`cast.network.${cast.network_hint}`) : '';
+      text(el("cast-status"), [cast.error_code ? errorText(cast.error_code) : t(`cast.phase.${cast.phase || "idle"}`), hint].filter(Boolean).join(' · '));
       const devices = Array.isArray(cast.renderers) ? cast.renderers : [];
       const keys = new Set(devices.map(device => device.device_key));
       for (const [key, row] of rows) {
@@ -67,7 +68,7 @@
         }
         text(row.querySelector("h4"), device.label);
         const connect = row.querySelector("[data-cast-connect]");
-        const selected = cast.owns_playback && cast.selected === device.device_key;
+        const selected = (cast.connected ?? cast.owns_playback) && cast.selected === device.device_key;
         connect.disabled = blocked || selected;
         if (connect !== pending) text(connect, t(selected ? "cast.connected" : "cast.connect"));
         const deliveryLabel = t(device.preferences_persisted === false ? "cast.deliveryThisRun" : "cast.delivery");
@@ -88,6 +89,7 @@
       }
       for (const waiter of waiters) waiter();
       selfTest?.render();
+      android?.render();
       if (pending) {
         pending.disabled = true;
         text(pending.querySelector("[data-presentation-host-play-label]") || (pending.children.length ? null : pending), t("gatcha.adding"));
@@ -111,7 +113,7 @@
         && !view().busy && !["connecting", "recovering", "discovering"].includes(view().phase));
     }
     async function disconnect() {
-      if (view().owns_playback || ["connecting", "recovering", "discovering"].includes(view().phase)) {
+      if (view().connected || view().owns_playback || ["connecting", "recovering", "discovering"].includes(view().phase)) {
         await operation("disconnect");
         await waitUntil(() => !view().owns_playback && view().phase === "idle");
       }
@@ -173,7 +175,7 @@
       }
       adapter.accept(snapshot);
     }
-    el("cast-open").addEventListener("click", () => { open = !open; render(); adapter.reposition(); });
+    el("cast-open").addEventListener("click", () => { if (android) { android.openManagement(el("cast-open")); return; } open = !open; render(); adapter.reposition(); });
     el("cast-discover").addEventListener("click", event => perform(event.currentTarget, () => operation("discover")));
     el("cast-disconnect").addEventListener("click", event => perform(event.currentTarget, disconnect));
     el("cast-purek-connect").addEventListener("click", event => perform(event.currentTarget, () => {
@@ -201,6 +203,7 @@
       });
     });
     selfTest = globalThis.BilikaraCastSelfTest?.create({ ...adapter, disconnect, castBusy: () => Boolean(pending) });
+    android = globalThis.BilikaraCastAndroid?.create({...adapter, busy, waitUntil, operation, setOpen(value) { open = value; render(); }});
     return { render, disconnect, busy, errorText, perform, waitUntil,
       command: payload => operation("command", payload) };
   }

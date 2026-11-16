@@ -131,6 +131,16 @@ test('production Host restores real media and gain across repeated cast sessions
       assert.deepEqual(await page.evaluate(() => [original.video.muted,original.audio.muted,original.gain.bilikaraTarget, state.localPlayerVolume]), [false,false,0.6,0.6]);
       assert.deepEqual(await page.evaluate(() => [state.hostPlaybackSession===original.session,state.hostPlaybackSession.video===original.video,state.hostPlaybackSession.audio===original.audio,original.video.parentNode===original.parents[0],original.audio.parentNode===original.parents[1],original.audio.bilikaraVolumeGain===original.gain,addedMediaListeners]), [true,true,true,true,true,true,0]);
     }
+    // Android output suspension retains the connection and operation ID. Old
+    // snapshots above omit both new fields and keep their desktop behavior.
+    for (let cycle=0; cycle<2; cycle++) {
+      await update({cast:{...snapshot.cast,phase:'active',connected:true,output_enabled:true,owns_playback:true,operation_id:6,resume:null}});
+      assert.equal(await page.evaluate(() => original.video.paused && original.audio.muted),true);
+      const position=10+cycle*3;
+      await update({cast:{...snapshot.cast,output_enabled:false,owns_playback:false,resume:{operation_id:6,item_id:'first',playback_generation:2,position,is_paused:false}}});
+      await wait('same-session resume', position => !original.video.paused && !original.audio.paused && !original.video.seeking && Math.abs(original.video.currentTime-position)<1, position);
+      assert.deepEqual(await page.evaluate(() => [original.video.muted,original.audio.muted,original.gain.bilikaraTarget,state.hostPlaybackSession.video===original.video,addedMediaListeners]),[false,false,0.6,true,0]);
+    }
     await update({cast:{...snapshot.cast,phase:'active',owns_playback:true,operation_id:7}});
     await update({...program('second'),playback_generation:3});
     assert.equal(await page.evaluate(() => state.hostPlaybackSession.video===original.video && original.video.paused && original.audio.muted),true);

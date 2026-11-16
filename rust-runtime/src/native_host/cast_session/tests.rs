@@ -356,6 +356,8 @@ impl Receiver {
     }
 }
 
+#[path = "tests/android_output.rs"]
+mod android_output;
 #[path = "self_test/scenarios.rs"]
 mod self_test_scenarios;
 impl Drop for Receiver {
