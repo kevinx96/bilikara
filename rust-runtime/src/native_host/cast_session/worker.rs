@@ -529,13 +529,13 @@ async fn play_session(
             let enabled = with_app(|app| Ok(app.native().cast.output_enabled))?;
             if !enabled {
                 if let Some(mut previous) = output.take() {
-                    let stopped = record(trace, connection, Some(previous.id), soap(client.stop(cancel)).await);
+                    // Stop is best effort: a receiver fault must not revoke the room.
+                    let _ = record(trace, connection, Some(previous.id), soap(client.stop(cancel)).await);
                     if let Some(live) = previous.live.take() { live.stop().await; }
                     endpoint.clear_generation();
                     trace.complete_output(previous.id, Default::default());
                     if let Some((_, stopping, _)) = &prefetched { stopping.store(true, Ordering::Release); }
                     let _ = take_prefetch(&mut prefetched, cancel).await;
-                    stopped?;
                     with_app(|app| {
                         let snap = app.native_cast_input()?;
                         let s = &mut app.native().cast;
@@ -549,6 +549,8 @@ async fn play_session(
                         Ok(())
                     })?;
                 }
+                // Keep the connection/room lease, but do not monitor the receiver
+                // while output is off. Restart detects a receiver that went away.
                 tokio::time::sleep(Duration::from_millis(30)).await;
                 continue;
             }

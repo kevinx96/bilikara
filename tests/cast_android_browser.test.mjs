@@ -5,6 +5,97 @@ import {chromium} from 'playwright';
 
 const read = file => readFileSync(new URL(`../static/${file}`, import.meta.url), 'utf8');
 const html = read('index.html'), dictionary = JSON.parse(read('i18n.json')).languages;
+
+// Run the production page, scripts and styles: only HTTP/native transport is simulated.
+async function openProduction(t) {
+  const browser = await chromium.launch({headless:true, ...(process.platform === 'win32' ? {channel:'msedge'} : {})});
+  t.after(() => browser.close());
+  const page = await browser.newPage({viewport:{width:360,height:800}, reducedMotion:'reduce'});
+  const errors = []; page.on('pageerror', e => errors.push(e.message));
+  t.after(() => assert.deepEqual(errors, []));
+  const snapshot = {state_revision:1,revision:1,playback_generation:1,playback_mode:'local',
+    playback_program:null,current_item:null,playlist:[],history:[],
+    player_settings:{volume_percent:60,muted:false,key_shift:0,av_offset_ms:0},
+    cast:{phase:'idle',operation_id:0,connected:false,owns_playback:false,renderers:[],devices:{}}};
+  await page.route('**/*', async route => {
+    const url = new URL(route.request().url());
+    if (url.origin !== 'http://localhost') return route.abort();
+    if (url.pathname.startsWith('/api/')) return route.fulfill({json:{ok:true,data:
+      url.pathname === '/api/cast/capabilities' ? {pipeline_available:false} : snapshot}});
+    const name = url.pathname === '/' ? 'index.html' : url.pathname.replace(/^\/(?:static\/)?/, '');
+    try {
+      let body = read(name);
+      if (name === 'index.html') body = body.replace('<html lang="zh-CN">','<html lang="zh-CN" data-native-host="true" data-host-platform="android">');
+      const type = {js:'text/javascript',css:'text/css',json:'application/json',html:'text/html',svg:'image/svg+xml'}[name.split('.').at(-1)];
+      return route.fulfill({body,contentType:type || 'application/octet-stream'});
+    } catch { return route.fulfill({status:404,body:''}); }
+  });
+  await page.goto('http://localhost/');
+  await page.waitForFunction(() => window.BilikaraCastHost && state.hasValidStateResponse);
+  await page.locator('[data-android-page="my"]').click();
+  await page.locator('[data-media-output-add-device]').waitFor({state:'visible'});
+  return page;
+}
+
+test('production Android output switch shares themed track, thumb and interaction styles', {timeout:90000}, async t => {
+  const page = await openProduction(t);
+  await page.evaluate(() => {
+    const reference = document.querySelector('#presentation-output-button').cloneNode(true);
+    reference.id = 'cast-switch-reference'; reference.removeAttribute('data-i18n-aria-label');
+    document.querySelector('.cast-output-row').append(reference);
+  });
+  const target = page.locator('[data-media-output-toggle]'), reference = page.locator('#cast-switch-reference');
+  const styles = node => {
+    for (const animation of node.getAnimations({subtree:true})) animation.finish();
+    const keys = ['width','height','padding','borderWidth','borderStyle','borderColor','borderRadius','backgroundColor','color','opacity','cursor','outlineStyle','outlineWidth','outlineColor','boxShadow','transform'];
+    return [node,node.firstElementChild].map(n => {const s=getComputedStyle(n); return Object.fromEntries(keys.map(key=>[key,s[key]]));});
+  };
+  for (const theme of ['light','dark','blue']) {
+    for (const mode of ['disconnected','off','on','busy']) {
+      await page.evaluate(({theme,mode}) => {
+        document.documentElement.dataset.theme=theme;
+        Object.assign(state.data.cast,{connected:mode!=='disconnected',owns_playback:['on','busy'].includes(mode),busy:mode==='busy',phase:mode==='disconnected'?'idle':'active'});
+        BilikaraCastHost.controller.render();
+        const actual=document.querySelector('[data-media-output-toggle]'), ref=document.querySelector('#cast-switch-reference');
+        actual.toggleAttribute('aria-busy',mode==='busy');
+        ref.disabled=actual.disabled; ref.setAttribute('aria-checked',actual.getAttribute('aria-checked'));
+        ref.toggleAttribute('aria-busy',mode==='busy');
+        if(mode==='busy'){actual.setAttribute('aria-busy','true');ref.setAttribute('aria-busy','true');}
+      },{theme,mode});
+      await page.mouse.move(0,0);
+      const actual = await target.evaluate(styles), expected = await reference.evaluate(styles);
+      assert.deepEqual(actual,expected,`${theme}/${mode}`);
+      assert.equal(actual[0].borderWidth,'0px');
+      assert.equal(actual[0].width,'48px'); assert.equal(actual[0].height,'28px');
+      assert.equal(await target.evaluate(n=>getComputedStyle(n,'::after').height),'44px');
+      if (!await target.isDisabled()) {
+        for (const interaction of ['hover','focus','pressed']) {
+          const observe = async locator => {
+            await page.mouse.move(0,0); await page.evaluate(()=>document.activeElement?.blur());
+            if(interaction==='focus') await locator.focus(); else await locator.hover();
+            if(interaction==='pressed') await page.mouse.down();
+            const result=await locator.evaluate(styles);
+            if(interaction==='pressed') {await page.mouse.move(0,0); await page.mouse.up();}
+            return result;
+          };
+          assert.deepEqual(await observe(target),await observe(reference),`${theme}/${mode}/${interaction}`);
+        }
+      }
+    }
+  }
+});
+
+test('production Android management Escape clears secrets and restores focus', async t => {
+  const page=await openProduction(t);
+  await page.locator('[data-media-output-add-device]').click();
+  await page.locator('[data-capture="paste"]').click();
+  await page.locator('#cast-purek-url').fill('https://wx.chunk.cn/projection/login?private=1');
+  await page.keyboard.press('Escape');
+  assert.equal(await page.locator('.cast-management').evaluate(n=>n.open),false);
+  assert.equal(await page.locator('#cast-purek-url').inputValue(),'');
+  assert.equal(await page.locator('[data-authorization]').isHidden(),true);
+  assert.equal(await page.locator('[data-media-output-add-device]').evaluate(n=>n===document.activeElement),true);
+});
 async function open(t, language = 'zh', available = true) {
   const browser = await chromium.launch({headless:true, ...(process.platform === 'win32' ? {channel:'msedge'} : {})});
   t.after(() => browser.close());
@@ -53,6 +144,24 @@ test('Android output switch cannot open management; add-device survives absent c
   await page.locator('[data-media-output-add-device]').click();
   assert.equal(await page.locator('.cast-management').evaluate(n=>n.open), true);
   assert.deepEqual(await page.evaluate(()=>fixture.calls), []);
+  await page.evaluate(()=>fixture.update({connected:true,owns_playback:false}));
+  assert.equal(await page.locator('[data-output-status]').textContent(),dictionary.en['cast.android.outputLocal']);
+  await page.evaluate(()=>fixture.update({owns_playback:true}));
+  assert.equal(await page.locator('[data-output-status]').textContent(),dictionary.en['cast.android.outputCast']);
+});
+
+test('Android authorization accepts backend path variants and default ports only', async t => {
+  const page=await open(t);
+  await page.locator('[data-media-output-add-device]').click();
+  await page.locator('[data-capture="paste"]').click();
+  for(const url of ['https://wx.chunk.cn:443/projection/login/?x=1','http://wx.chunk.cn:80/PROJECTION/Login///?x=1','HTTPS://WX.CHUNK.CN/Projection/Login?x=1']) {
+    await page.locator('#cast-purek-url').fill(url);
+    assert.equal(await page.locator('[data-authorization]').isVisible(),true,url);
+  }
+  for(const url of ['https://wx.chunk.cn:8443/projection/login?x=1','https://user@wx.chunk.cn/projection/login?x=1','https://wx.chunk.cn.evil.test/projection/login?x=1','https://wx.chunk.cn/projection/login?x=1#fragment','https://wx.chunk.cn/projection/login']) {
+    await page.locator('#cast-purek-url').fill(url);
+    assert.equal(await page.locator('[data-authorization]').isHidden(),true,url);
+  }
 });
 
 test('Android output action is guarded, toggles only output, and clears hidden-context errors', async t => {

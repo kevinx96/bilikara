@@ -139,3 +139,100 @@ fn assert_roundtrips(purek: bool) {
     );
     assert_eq!(receiver.state.lock().unwrap().releases, usize::from(purek));
 }
+
+#[test]
+#[ignore = "requires trusted BILIKARA_TEST_CAST_COMPANION; simulated Pure K room"]
+fn android_output_stop_soap_fault_preserves_room_and_local_resume() {
+    assert_stop_failure("soap_fault");
+}
+
+#[test]
+#[ignore = "requires trusted BILIKARA_TEST_CAST_COMPANION; simulated Pure K room"]
+fn android_output_stop_http_error_preserves_room_and_local_resume() {
+    assert_stop_failure("http_error");
+}
+
+#[test]
+#[ignore = "requires trusted BILIKARA_TEST_CAST_COMPANION; simulated Pure K room"]
+fn android_output_stop_timeout_preserves_room_and_local_resume() {
+    assert_stop_failure("timeout");
+}
+
+fn assert_stop_failure(failure: &str) {
+    let _serial = GLOBAL_APP_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let receiver = Receiver::new();
+    let host = Host::new();
+    host.use_long_media();
+    host.post("/api/cast/connect", json!({"purek_qr":receiver.qr()}))
+        .unwrap();
+    let active = host.wait(|s| s["cast"]["phase"] == "active");
+    {
+        let mut state = receiver.state.lock().unwrap();
+        match failure {
+            "soap_fault" => state.fault_on = Some("Stop"),
+            "http_error" => state.http_error_on = Some("Stop"),
+            "timeout" => state.hang_on = Some("Stop"),
+            _ => panic!("unknown failure"),
+        }
+        state.actions.clear();
+    }
+    host.post("/api/cast/output", json!({"enabled":false}))
+        .unwrap();
+    let local = host.wait(|s| s["cast"]["owns_playback"] == false && s["cast"]["busy"] == false);
+    assert_eq!(
+        local["cast"]["connected"], true,
+        "Stop {failure}: {}",
+        local["cast"]
+    );
+    assert_eq!(local["cast"]["phase"], "active");
+    assert_eq!(local["cast"]["selected"], active["cast"]["selected"]);
+    assert_eq!(local["cast"]["output_enabled"], false);
+    assert_eq!(local["cast"]["local_media"], "host");
+    assert!(local["cast"]["resume"].is_object());
+    {
+        let mut state = receiver.state.lock().unwrap();
+        assert!(state.actions.iter().any(|action| action == "Stop"));
+        assert_eq!(state.releases, 0);
+        state.fault_on = None;
+        state.http_error_on = None;
+        state.hang_on = None;
+    }
+    host.post("/api/cast/output", json!({"enabled":true}))
+        .unwrap();
+    host.wait(|s| s["cast"]["owns_playback"] == true && s["cast"]["busy"] == false);
+    assert_eq!(receiver.state.lock().unwrap().releases, 0);
+    host.post("/api/cast/disconnect", json!({})).unwrap();
+    host.wait(|s| s["cast"]["phase"] == "idle");
+    assert_eq!(receiver.state.lock().unwrap().releases, 1);
+}
+
+#[test]
+#[ignore = "requires trusted BILIKARA_TEST_CAST_COMPANION; simulated Pure K room"]
+fn android_output_restart_set_and_play_faults_release_failed_session() {
+    let _serial = GLOBAL_APP_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    for action in ["SetAVTransportURI", "Play"] {
+        let receiver = Receiver::new();
+        let host = Host::new();
+        host.use_long_media();
+        host.post("/api/cast/connect", json!({"purek_qr":receiver.qr()}))
+            .unwrap();
+        host.wait(|s| s["cast"]["phase"] == "active");
+        host.post("/api/cast/output", json!({"enabled":false}))
+            .unwrap();
+        host.wait(|s| s["cast"]["owns_playback"] == false && s["cast"]["busy"] == false);
+        receiver.state.lock().unwrap().fault_on = Some(action);
+        host.post("/api/cast/output", json!({"enabled":true}))
+            .unwrap();
+        let local = host.wait(|s| s["cast"]["phase"] == "idle");
+        assert_eq!(local["cast"]["connected"], false);
+        assert_eq!(local["cast"]["owns_playback"], false);
+        assert_eq!(local["cast"]["local_media"], "host");
+        assert!(local["cast"]["resume"].is_object());
+        assert!(local["cast"]["error_code"].is_string());
+        assert_eq!(receiver.state.lock().unwrap().releases, 1);
+    }
+}

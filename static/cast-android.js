@@ -64,6 +64,10 @@
     }
     dialog.querySelector('[data-close]').addEventListener('click', close);
     dialog.addEventListener('cancel', event => { event.preventDefault(); close(); });
+    dialog.addEventListener('keydown', event => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault(); event.stopPropagation(); close();
+    });
     add.addEventListener('click', () => openManagement());
     toggle.addEventListener('click', () => {
       if (!view().connected || toggle.disabled) return;
@@ -105,15 +109,19 @@
       toggle.setAttribute('aria-label', `${t('cast.title')}${cast.connected ? '' : ` · ${t('cast.android.notConnected')}`}`);
       pipeline.hidden = !available; pipeline.disabled = blocked || Boolean(cast.connected);
       pipeline.textContent = t('cast.android.pipeline');
-      status.textContent = pipelineResult ? t(`cast.android.pipeline.${pipelineResult}`) : !available && capabilityKnown ? t('cast.android.pipeline.unavailable') : t(cast.connected ? (cast.owns_playback ? 'cast.android.outputCast' : 'cast.android.outputLocal') : 'cast.android.notConnected');
+      status.textContent = cast.connected ? t(cast.owns_playback ? 'cast.android.outputCast' : 'cast.android.outputLocal') : pipelineResult ? t(`cast.android.pipeline.${pipelineResult}`) : !available && capabilityKnown ? t('cast.android.pipeline.unavailable') : t('cast.android.notConnected');
       error.hidden = !errorKey; error.textContent = errorKey ? translated(errorKey) : '';
       dialog.querySelector('h2').textContent = t('cast.title');
       dialog.querySelector('[data-close]').setAttribute('aria-label', t('cast.test.close'));
       dialog.querySelector('[data-close]').disabled = pending.size > 0;
       summary.textContent = t('cast.android.advanced'); addressLabel.textContent = t('cast.android.description'); manual.textContent = t('cast.discover'); manual.disabled = blocked;
       for (const button of capture.querySelectorAll('[data-capture]')) { button.textContent = t(`cast.android.${button.dataset.capture}`); button.disabled = blocked; }
-      let url; try { url = new URL(input.value.trim()); } catch { /* draft */ }
-      auth.hidden = !url || !['http:', 'https:'].includes(url.protocol) || url.hostname !== 'wx.chunk.cn' || url.pathname !== '/projection/login';
+      const raw = input.value.trim();
+      let url; try { url = new URL(raw); } catch { /* draft */ }
+      auth.hidden = raw.length > 4096 || /[\x00-\x1f\x7f]/u.test(raw) || !url
+        || !['http:', 'https:'].includes(url.protocol) || url.hostname !== 'wx.chunk.cn'
+        || url.pathname.replace(/\/+$/u, '').toLowerCase() !== '/projection/login'
+        || Boolean(url.port || url.username || url.password || url.hash) || !url.search;
       auth.textContent = t('cast.android.authorize'); auth.disabled = blocked;
       const captureStatus = capture.querySelector('[data-capture-error]');
       captureStatus.hidden = !captureError; captureStatus.textContent = captureError ? translated(captureError) : '';

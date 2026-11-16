@@ -17,6 +17,10 @@ import java.io.File
 internal class HostCapture(private val activity: AppCompatActivity) {
   companion object {
     @JvmStatic @Keep external fun decodeLuma(pixels: ByteArray, width: Int, height: Int): String
+    internal fun clearAbandonedPhotos(directory: File) {
+      directory.listFiles()?.filter { it.isFile && it.name.startsWith("capture-") && it.name.endsWith(".jpg") }
+        ?.forEach { it.delete() }
+    }
   }
   private var pending: ((JSONObject?, String?) -> Unit)? = null
   private var photo: File? = null
@@ -59,8 +63,9 @@ internal class HostCapture(private val activity: AppCompatActivity) {
     if (pending != null) { callback(null, "cast_busy"); return }
     pending = callback; generation++
     try {
+      val directory = File(activity.cacheDir, "cast-capture").apply { mkdirs() }
+      clearAbandonedPhotos(directory)
       val intent = if (camera) {
-        val directory = File(activity.cacheDir, "cast-capture").apply { mkdirs() }
         val file = File.createTempFile("capture-", ".jpg", directory); photo = file
         val uri = FileProvider.getUriForFile(activity, "${activity.packageName}.fileprovider", file)
         Intent(MediaStore.ACTION_IMAGE_CAPTURE).putExtra(MediaStore.EXTRA_OUTPUT, uri)
