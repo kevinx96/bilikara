@@ -3,10 +3,13 @@ use super::*;
 #[test]
 #[ignore = "requires trusted BILIKARA_TEST_CAST_COMPANION; real T3 mux + Pure K loopback receiver"]
 fn platform_notification_disconnect_revokes_purek_and_restores_local_playback() {
-    let _serial = GLOBAL_APP_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _serial = GLOBAL_APP_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     let host = Host::new();
     let receiver = Receiver::new();
-    host.post("/api/cast/connect", json!({"purek_qr":receiver.qr()})).unwrap();
+    host.post("/api/cast/connect", json!({"purek_qr":receiver.qr()}))
+        .unwrap();
     host.wait(|s| s["cast"]["phase"] == "active");
     let lease = with_app(|app| Ok(app.native().cast.platform_output_id.unwrap())).unwrap();
     platform_stopped(lease + 1, 1);
