@@ -7,6 +7,10 @@ use crate::experimental_libav::{
 };
 use std::path::Component;
 
+#[cfg(test)]
+#[path = "media/android_tests.rs"]
+mod android_tests;
+
 pub(super) struct Inputs {
     pub(super) video: PathBuf,
     pub(super) audio: PathBuf,

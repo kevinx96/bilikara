@@ -88,11 +88,16 @@ pub(super) fn start(context: Arc<HostContext>) -> Result<(), ApiError> {
             let enabled = with_app(|app| Ok(app.native_core_snapshot()?.automatic_volume.enabled)).unwrap_or(false);
             if !enabled { continue; }
             if probe.is_none() {
-                probe = crate::media_routing::loudness_companion().and_then(|path| {
-                    // SAFETY: existing trusted Host/package configuration.
-                    unsafe { LibavMetadataProbe::load(path) }.ok().filter(LibavMetadataProbe::loudness_available)
+                let result = load_scanner(crate::media_routing::loudness_companion());
+                let reason = result.as_ref().err().copied();
+                probe = result.ok();
+                let _ = with_app(|app| {
+                    app.set_scanner_available(probe.is_some());
+                    if let Some(reason) = reason {
+                        app.native_diagnostic(&json!({"event":"automatic-volume-unavailable","reason":reason}), now());
+                    }
+                    Ok(())
                 });
-                let _ = with_app(|app| { app.set_scanner_available(probe.is_some()); Ok(()) });
             }
             let Some(probe) = &probe else { continue; };
             loop {
@@ -115,12 +120,36 @@ pub(super) fn start(context: Arc<HostContext>) -> Result<(), ApiError> {
     }).map_err(|_| ApiError::new(503,"scanner_start","无法启动音频分析服务"))
 }
 
+fn load_scanner(path: Option<&Path>) -> Result<LibavMetadataProbe, &'static str> {
+    let path = path.ok_or("companion_not_provisioned")?;
+    // SAFETY: existing trusted Host/package configuration.
+    let probe = unsafe { LibavMetadataProbe::load(path) }.map_err(|_| "companion_unavailable")?;
+    if !probe.loudness_available() {
+        return Err("companion_pcm_unavailable");
+    }
+    Ok(probe)
+}
+
 pub(super) fn configure_capability() {
-    // Do not load a library at startup. These are trusted backend provisioning
-    // facts; symbol/build negotiation still runs on the first explicit enable.
+    // Desktop keeps lazy negotiation. Android has already negotiated once,
+    // before Host startup; publish the actual capability rather than a path.
     let available = crate::media_routing::loudness_companion().is_some();
+    #[cfg(any(target_os = "android", test))]
+    let available = super::android_media::capability().map_or(available, |c| c.loudness);
     let _ = with_app(|app| {
         app.set_scanner_available(available);
+        #[cfg(any(target_os = "android", test))]
+        if let Some(capability) = super::android_media::capability() {
+            app.native_diagnostic(
+                &json!({"event":"android-media-capability","reason":capability.reason,
+                "companion_metadata":capability.metadata, "companion_packet_scan":capability.packet_scan,
+                "companion_remux":capability.remux, "companion_loudness":capability.loudness, "companion_cast":capability.cast}),
+                now(),
+            );
+            if !capability.loudness {
+                app.native_diagnostic(&json!({"event":"automatic-volume-unavailable","reason":capability.reason.unwrap_or("companion_pcm_unavailable")}), now());
+            }
+        }
         Ok(())
     });
 }
