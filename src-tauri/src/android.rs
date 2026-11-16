@@ -8,6 +8,8 @@ use serde::Serialize;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::Manager;
+#[path = "android_cast.rs"]
+mod android_cast;
 
 // Operational startup result, not a second application-state authority.
 struct AndroidBootstrap {
@@ -231,6 +233,7 @@ fn initialize_platform_tls(app: &tauri::App) -> Result<(), String> {
 fn initialize(app: &tauri::App) -> Result<NativeHost, String> {
     // Reqwest's platform verifier must be ready before any Host worker can use HTTPS.
     initialize_platform_tls(app)?;
+    android_cast::initialize(app);
     let directory = app
         .path()
         .app_data_dir()

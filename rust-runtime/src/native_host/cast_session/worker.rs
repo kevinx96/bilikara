@@ -154,7 +154,9 @@ pub(super) fn run(context: Arc<HostContext>) {
                             result.result.map_err(|e| error(e.code.as_str()))
                         };
                         trace.finish(cancel.is_cancelled());
+                        let facts = crate::cast_platform::network_facts();
                         update(id, |s| {
+                            s.network_facts = facts;
                             s.phase = Phase::Idle;
                             match result {
                                 Ok(r) => s.renderers = r,
@@ -164,6 +166,7 @@ pub(super) fn run(context: Arc<HostContext>) {
                     }
                 }
                 Request::Connect {
+                    output: _output,
                     renderer,
                     qr,
                     confirmed,
@@ -185,6 +188,16 @@ pub(super) fn run(context: Arc<HostContext>) {
             stop.store(true, Ordering::Release);
             let _ = watch.await;
         }
+        // Host shutdown can win before the worker takes an admitted request.
+        // Drop its foreground lease even though AppState outlives NativeHost.
+        if let Ok(id) = with_app(|app| {
+            let state = &mut app.native().cast;
+            state.pending = None;
+            state.worker_started = false;
+            Ok(state.operation)
+        }) {
+            restore(id, None);
+        }
     });
 }
 
@@ -205,8 +218,14 @@ pub(super) fn restore(id: u64, failure: Option<String>) {
         }
         if state.operation == id || matches!(state.pending, Some(Request::Disconnect)) {
             state.owns_playback = false;
+            state.platform_output_id = None;
             state.phase = Phase::Idle;
-            state.error_code = failure;
+            state.error_code = state.platform_stop_error.map(str::to_owned).or(failure);
+            // A superseded worker drains before the queued disconnect. Keep
+            // its platform failure until that final operation publishes it.
+            if state.operation == id {
+                state.platform_stop_error = None;
+            }
             state.control_busy = false;
             state.receiver_state = None;
         }

@@ -21,7 +21,7 @@ pub(crate) struct State {
     registered: bool,
     registration_attempted: bool,
     preferences_persisted: bool,
-    cancel: CancellationToken,
+    pub(super) cancel: CancellationToken,
     answers: Option<mpsc::Sender<AnswerEnvelope>>,
     handoff: Option<tokio::sync::oneshot::Sender<bool>>,
     #[cfg(test)]
@@ -191,6 +191,38 @@ pub(super) fn route(
                 })?,
             );
             let (sender, receiver) = mpsc::channel(1);
+            let output = match crate::cast_platform::OutputLease::acquire() {
+                Ok(output) => output,
+                Err(error) => {
+                    if crate::cast_platform::initialization_failure().is_some() {
+                        // A failed optional bridge still yields an honest S0 report.
+                        // Do not start discovery/media or pretend to own a service.
+                        let facts = crate::cast_platform::network_facts();
+                        trace.environment(diag::Environment {
+                            network_hint: facts.network_hint(),
+                            android_network: Some(facts.clone()),
+                            ..Default::default()
+                        });
+                        trace.self_test_step(diag::SelfTestStep {
+                            stage: diag::SelfTestStage::S0,
+                            outcome: diag::StageOutcome::Failed,
+                            elapsed_ms: 0,
+                        });
+                        trace.finish(false);
+                        cast.network_facts = facts;
+                        cast.error_code = Some(error.code().into());
+                        cast.self_test = State {
+                            generation: cast.self_test.generation + 1,
+                            trace: Some(trace),
+                            ..Default::default()
+                        };
+                        app.native().revision += 1;
+                    }
+                    return Err(ApiError::new(409, error.code(), error.code()));
+                }
+            };
+            cast.platform_output_id = Some(output.id());
+            cast.platform_stop_error = None;
             let generation = cast.self_test.generation + 1;
             let cancel = CancellationToken::new();
             cast.self_test = State {
@@ -223,6 +255,8 @@ pub(super) fn route(
             };
             if context
                 .spawn("dlna-self-test", move || {
+                    // Keep the same foreground lease through the T5 handoff.
+                    let _output = output;
                     run(ctx, generation, operation, request, trace, cancel, receiver)
                 })
                 .is_err()
@@ -230,6 +264,7 @@ pub(super) fn route(
                 cast.self_test.running = false;
                 cast.self_test.answers = None;
                 cast.owns_playback = false;
+                cast.platform_output_id = None;
                 cast.phase = Phase::Idle;
                 return Err(ApiError::new(
                     503,

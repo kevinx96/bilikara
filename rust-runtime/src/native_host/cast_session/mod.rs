@@ -23,6 +23,7 @@ pub(crate) enum Phase {
 pub(crate) enum Request {
     Discover(Option<String>),
     Connect {
+        output: crate::cast_platform::OutputLease,
         renderer: Option<Box<Renderer>>,
         qr: Option<String>,
         confirmed: bool,
@@ -41,6 +42,9 @@ pub(crate) enum Control {
 
 #[derive(Default)]
 pub(crate) struct State {
+    pub network_facts: crate::cast_platform::NetworkFacts,
+    pub platform_output_id: Option<u64>,
+    pub platform_stop_error: Option<&'static str>,
     pub self_test: self_test::State,
     pub phase: Phase,
     pub owns_playback: bool,
@@ -84,6 +88,7 @@ impl State {
             .cloned()
             .unwrap_or_default();
         json!({"phase":self.phase,"owns_playback":self.owns_playback,"self_test":self.self_test.snapshot(),
+            "network_hint":self.network_facts.network_hint(),"network_facts":self.network_facts,
             "operation_id":self.operation,"generation":self.generation,
             "renderers":self.renderers.iter().map(|r| json!({"device_key":renderer_key(r),"preferences_persisted":preference_key(r).is_some(),"label":r.description.name.chars().take(100).collect::<String>()})).collect::<Vec<_>>(),
             "devices":preferences.devices.iter().chain(self.session_devices.iter()).map(|(key,d)|(key.clone(),json!({"mode":d.mode,"learned_mode":d.learned_mode}))).collect::<serde_json::Map<_,_>>(),
@@ -281,6 +286,7 @@ pub(super) fn route(
                 app.native()
                     .cast
                     .replace(Request::Discover(location), Phase::Discovering);
+                app.native().cast.network_facts = crate::cast_platform::network_facts();
             }
             "/api/cast/connect" => {
                 let qr = body
@@ -315,6 +321,11 @@ pub(super) fn route(
                     ));
                 }
                 let snapshot = app.native_snapshot(true)?;
+                let output = crate::cast_platform::OutputLease::acquire()
+                    .map_err(|error| ApiError::new(409, error.code(), error.code()))?;
+                app.native().cast.platform_output_id = Some(output.id());
+                app.native().cast.platform_stop_error = None;
+                app.native().cast.network_facts = crate::cast_platform::network_facts();
                 if !app.native().cast.owns_playback {
                     app.native().cast.position = snapshot["player_status"]["current_time"]
                         .as_f64()
@@ -327,6 +338,7 @@ pub(super) fn route(
                     snapshot["playback_generation"].as_u64().unwrap_or(0);
                 app.native().cast.replace(
                     Request::Connect {
+                        output,
                         renderer,
                         qr,
                         confirmed: body["address_confirmed"] == true,
@@ -357,6 +369,7 @@ pub(super) fn route(
                 state.pending = None;
                 state.phase = Phase::Idle;
                 state.owns_playback = false;
+                state.platform_output_id = None;
                 state.error_code = Some("cast_worker_unavailable".into());
                 state.resume = Some(
                     json!({"item_id":input.current_item.as_ref().map(|i|&i.id),"playback_generation":input.playback_generation,"position":state.position,"is_paused":state.paused,"operation_id":state.operation}),
@@ -371,6 +384,29 @@ pub(super) fn route(
         }
         Ok(json!({"accepted":true,"operation_id":app.native().cast.operation}))
     })
+}
+
+/// Fixed native callback. Never trust a stale service/notification to stop a
+/// newer output. Both paths retain the existing awaited Pure K cleanup.
+pub fn platform_stopped(lease_id: u64, reason: i32) {
+    if !matches!(reason, 1..=3) {
+        return;
+    }
+    let _ = with_app(|app| {
+        let cast = &mut app.native().cast;
+        if cast.platform_output_id != Some(lease_id) {
+            return Ok(());
+        }
+        cast.platform_output_id = None;
+        cast.platform_stop_error = (reason == 3).then_some("cast_platform_unavailable");
+        if cast.self_test.running {
+            cast.self_test.cancel.cancel();
+        } else {
+            cast.replace(Request::Disconnect, Phase::Recovering);
+        }
+        app.native().revision += 1;
+        Ok(())
+    });
 }
 
 pub(crate) fn enqueue(app: &mut crate::app_state::AppState, body: &Value) -> Result<(), ApiError> {

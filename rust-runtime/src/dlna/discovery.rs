@@ -55,14 +55,21 @@ pub async fn discover(
     cancel: &CancellationToken,
     publish: impl FnMut(DiscoveryUpdate),
 ) -> Operation<Vec<Renderer>> {
-    discover_on(
+    let _multicast = crate::cast_platform::DiscoveryLease::acquire();
+    let (interfaces, policy, options) = discovery_setup();
+    discover_on(interfaces, policy, options, cancel, publish).await
+}
+
+fn discovery_setup() -> (Vec<Ipv4Addr>, NetworkPolicy, Options) {
+    #[cfg(test)]
+    if let Some(setup) = lease_tests::setup() {
+        return setup;
+    }
+    (
         local_ipv4(NetworkPolicy::Lan),
         NetworkPolicy::Lan,
         Options::default(),
-        cancel,
-        publish,
     )
-    .await
 }
 
 pub fn route_source(target: Ipv4Addr) -> Result<Ipv4Addr, DlnaError> {
@@ -248,6 +255,7 @@ async fn load_description(
     }
 }
 
+#[derive(Clone)]
 struct Options {
     window: Duration,
     destination: SocketAddr,
@@ -827,5 +835,7 @@ async fn collect_renderers(
     Ok(snapshot(&candidates))
 }
 
+#[cfg(test)]
+pub(crate) mod lease_tests;
 #[cfg(test)]
 mod tests;
