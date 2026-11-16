@@ -638,14 +638,29 @@ fn receiver_lifecycle_pause_seek_next_natural_end_disconnect_and_cancellation() 
     .unwrap();
     host.wait(|s| s["cast"]["busy"] == false);
     assert_eq!(receiver.state.lock().unwrap().position, 15);
+    // The app selects the next item before the worker replaces the output; the
+    // previous output stays "active" (with the same duration) until
+    // start_output bumps the output generation. Wait for the new output,
+    // otherwise its SetAVTransportURI can reset receiver state set below.
+    let established = |previous: u64| {
+        move |s: &Value| {
+            s["cast"]["generation"].as_u64().unwrap() > previous
+                && s["cast"]["phase"] == "active"
+                && s["cast"]["duration"] == 120.0
+        }
+    };
+    let first = host.snapshot()["cast"]["generation"].as_u64().unwrap();
     assert_eq!(host.command("next")["current_item"]["id"], "song-two");
-    host.wait(|s| s["cast"]["duration"] == 120.0);
+    let second = host.wait(established(first))["cast"]["generation"]
+        .as_u64()
+        .unwrap();
     {
         let mut s = receiver.state.lock().unwrap();
         s.position = 119;
         s.state = "STOPPED";
     }
-    host.wait(|s| s["current_item"]["id"] == "song-three" && s["cast"]["phase"] == "active");
+    let third = host.wait(established(second));
+    assert_eq!(third["current_item"]["id"], "song-three");
     receiver.state.lock().unwrap().position = 37;
     host.wait(|s| s["cast"]["position"] == 37.0);
     let began = Instant::now();
