@@ -2,6 +2,29 @@ use super::*;
 
 #[test]
 fn android_output_requires_a_live_connection_and_pipeline_is_host_only() {
+    // This boundary case intentionally exercises an unavailable companion.
+    // Isolate the inherited integration-test override without mutating the
+    // environment of concurrent tests or weakening the expected error.
+    if std::env::var_os("BILIKARA_TEST_CAST_COMPANION").is_some() {
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "native_host::cast_session::tests::android_output::android_output_requires_a_live_connection_and_pipeline_is_host_only",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env_remove("BILIKARA_TEST_CAST_COMPANION")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&result.stdout);
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(result.status.success(), "{stdout}\n{stderr}");
+        assert!(
+            stdout.contains("1 passed"),
+            "isolated test did not run: {stdout}"
+        );
+        return;
+    }
     let _serial = GLOBAL_APP_TEST_LOCK
         .lock()
         .unwrap_or_else(|p| p.into_inner());
