@@ -1,5 +1,6 @@
 //! Independent desktop construction and prerequisite tool;
 //! neither links the application Runtime nor executes project Python.
+mod android_libav;
 mod bbdown;
 mod compliance;
 mod config;
@@ -23,7 +24,15 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 fn main() {
     if let Err(error) = run() {
-        eprintln!("Desktop task failed: {error}");
+        let task = if env::args_os()
+            .nth(1)
+            .is_some_and(|action| action == "android-libav")
+        {
+            "Android libav task"
+        } else {
+            "Desktop task"
+        };
+        eprintln!("{task} failed: {error}");
         std::process::exit(1);
     }
 }
@@ -34,6 +43,9 @@ fn run() -> Result<()> {
         .next()
         .ok_or("expected prepare-desktop, build-backend, build-desktop or assemble-desktop")?;
     let action = action.to_str().ok_or("invalid desktop command")?;
+    if action == "android-libav" {
+        return android_libav::run(args.collect());
+    }
     if action == "verify-native-desktop" {
         let executable = args
             .next()

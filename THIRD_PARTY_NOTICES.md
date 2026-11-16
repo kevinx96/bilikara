@@ -165,6 +165,17 @@ It does not apply to third-party tools, platform content, downloaded media, cach
 Legacy source-mode CLI helpers are retained for compatibility tests. Their
 presence in this repository does not make them native product dependencies.
 
+Android uses the same signed FFmpeg 9.0.1 source with a smaller LGPL-only
+library profile. `xtask android-libav` is adapted from bilikara-next's MIT
+build tooling (same author family). Its default output contains four FFmpeg
+shared libraries and the C companion, with no Signalsmith or C++ runtime.
+The APK's `assets/bilikara-media/<abi>/licenses/libav-source.txt` records the
+exact configuration, source hash, signing fingerprint and source-kit filename.
+Distribute `bilikara-android-libav-9.0.1-<abi>-source-kit.zip` alongside the
+corresponding APK at the same download location. The separate kit contains
+the unmodified signed upstream archive, license texts, companion source,
+configuration records and rebuild tooling; it is not embedded in the APK.
+
 ## 4. aria2c
 
 - Project: aria2

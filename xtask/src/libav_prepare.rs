@@ -329,7 +329,7 @@ unsafe fn bounded_string(pointer: *const std::ffi::c_char, bound: usize) -> Resu
     for index in 0..=bound {
         // ABI functions return NUL-terminated static strings. Do not let an
         // unexpected configuration grow beyond the existing companion bound.
-        let byte = unsafe { *pointer.add(index) } as u8;
+        let byte = unsafe { *pointer.cast::<u8>().add(index) };
         if byte == 0 {
             return Ok(String::from_utf8(bytes)?);
         }
