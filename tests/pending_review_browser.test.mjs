@@ -10,6 +10,16 @@ const items = Array.from({ length: 12 }, (_, index) => ({
   title: `Pending ${index} — 日本語 / 中文 / English`,
   url: `https://www.bilibili.com/video/BV${String(index).padStart(10, '0')}`,
 }));
+const snapshot = {
+  state_revision: 1, revision: 1, playback_generation: 1, playback_mode: 'local',
+  playback_program: null, current_item: null, playlist: [], history: [], session_history: [],
+  session_users: [], session_user_entries: [], session_flags: { startup_choice_pending: false },
+  player_settings: { volume_percent: 100, is_muted: false, song_advance_delay_seconds: 0, key_shift: 0, av_offset_ms: 0 },
+};
+
+async function assertNoErrorToast(page) {
+  assert.deepEqual(await page.locator('#app-toast.is-error:not(.hidden)').allTextContents(), [], 'Healthy review flow must not show an error toast');
+}
 
 async function open(t, width, language) {
   const browser = await chromium.launch({ headless: true,
@@ -21,17 +31,29 @@ async function open(t, width, language) {
   });
   const page = await browser.newPage({ viewport: { width, height: 900 }, reducedMotion: 'reduce' });
   page.setDefaultTimeout(7000);
-  const errors = [], calls = [];
+  const errors = [], calls = [], unexpectedRequests = [];
   page.on('pageerror', error => errors.push(error.message));
-  t.after(() => assert.deepEqual(errors, []));
+  t.after(() => {
+    assert.deepEqual(unexpectedRequests, [], 'Every browser request must have an explicit fixture response');
+    assert.deepEqual(errors, []);
+  });
+  await page.addInitScript(() => localStorage.setItem('bilikara.update.automatic', 'false'));
   const fulfill = (route, data, status = 200) => route.fulfill({ status, contentType: 'application/json',
     body: JSON.stringify(status === 200 ? { ok: true, data } : { ok: false, error: 'Offline review failure' }) });
   // The existing offline review fixture's seam, with the complete production
   // scripts, result cards and event bindings. No native Host build or D1 traffic.
   await page.route('**/*', async route => {
-    const url = new URL(route.request().url());
-    if (url.origin !== 'http://review.test') return route.abort();
-    if (url.pathname.startsWith('/api/admin-review/')) {
+    const request = route.request(), url = new URL(request.url());
+    const key = `${request.method()} ${url.pathname}`;
+    const unexpected = async () => {
+      unexpectedRequests.push(`${request.method()} ${url.href}`);
+      await route.fulfill({ status: 500, json: { ok: false, error: `Unexpected fixture request: ${key}` } });
+    };
+    if (url.origin !== 'http://review.test') return unexpected();
+    if (key === 'GET /api/state') return fulfill(route, snapshot);
+    if (key === 'GET /api/events') return route.fulfill({ contentType: 'text/event-stream', body: `event: state\ndata: ${JSON.stringify(snapshot)}\n\n` });
+    if (key === 'POST /api/client/media-capabilities') return fulfill(route, {});
+    if (['POST /api/admin-review/pending', 'POST /api/admin-review/approve', 'POST /api/admin-review/reject'].includes(key)) {
       calls.push({ url: url.pathname, body: route.request().postDataJSON() });
       if (url.pathname.endsWith('/pending')) return fulfill(route, { items, total_pending: 12, export_count: 100 });
       await new Promise(resolve => {
@@ -39,14 +61,16 @@ async function open(t, width, language) {
       });
       return;
     }
-    // Unrelated bootstrap reads are unavailable in this offline fixture.
-    if (url.pathname.startsWith('/api/')) return route.abort();
+    if (url.pathname.startsWith('/api/')) return unexpected();
     const filename = path.resolve(staticRoot, `.${url.pathname === '/' ? '/index.html' : url.pathname}`);
-    if (!filename.startsWith(staticRoot + path.sep) || !existsSync(filename) || !statSync(filename).isFile()) return route.abort();
+    if (request.method() !== 'GET' || !filename.startsWith(staticRoot + path.sep) || !existsSync(filename) || !statSync(filename).isFile()) return unexpected();
     return route.fulfill({ path: filename });
   });
   await page.goto('http://review.test/');
-  await page.waitForFunction(() => typeof state !== 'undefined' && Object.keys(state.translations || {}).length);
+  // Translation loading precedes fetchState and capability reporting. Waiting
+  // only for translations races bootstrap errors and initializeHostShell.
+  await page.waitForFunction(() => typeof state !== 'undefined' && state.hasValidStateResponse && !state.hostPlaybackBootstrapRestartPending);
+  await assertNoErrorToast(page);
   await page.evaluate(language => {
     state.language = language;
     setDeveloperMode(true);
@@ -103,6 +127,7 @@ for (const [width, language] of [[1440, 'zh'], [700, 'en'], [700, 'ja']]) {
         .filter(animation => animation.effect?.getTiming().iterations !== Infinity)
         .map(animation => animation.finished.catch(() => {}))));
       await scrollToActions(page);
+      await assertNoErrorToast(page);
       await center(page, '[data-pending-review-approve]');
       const reject = await center(page, '[data-pending-review-reject]');
       await page.mouse.click(reject.x, reject.y);
@@ -113,6 +138,7 @@ for (const [width, language] of [[1440, 'zh'], [700, 'en'], [700, 'ja']]) {
       await page.locator('#developer-tag-reset-cancel').click();
       await page.locator('#developer-tag-reset-modal').waitFor({ state: 'hidden' });
 
+      await assertNoErrorToast(page);
       const rejectAgain = await center(page, '[data-pending-review-reject]');
       await page.mouse.click(rejectAgain.x, rejectAgain.y);
       const rejection = page.waitForRequest('**/api/admin-review/reject');
@@ -133,6 +159,7 @@ for (const [width, language] of [[1440, 'zh'], [700, 'en'], [700, 'ja']]) {
       assert.equal(await confirm.isDisabled(), false);
       assert.equal(await confirm.getAttribute('aria-busy'), null);
       assert.equal(await page.locator('#developer-tag-reset-error').isVisible(), true);
+      assert.equal(await page.locator('#app-toast.is-error:not(.hidden)').textContent(), 'Offline review failure', 'Only the deliberately injected failure may show an error toast');
       await page.locator('#developer-tag-reset-cancel').click();
 
       for (const fail of [true, false]) {
