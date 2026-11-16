@@ -9907,6 +9907,19 @@ body[data-tauri-platform="linux"] .app-shell {
   overflow: hidden;
 }
 
+/* Advanced tools scroll as one page; unlike category/tag browsers, they do
+   not have an inner scroll owner. Keep their review actions reachable. */
+.request-discover-view > .catalog-advanced-view {
+  overflow-y: auto;
+}
+
+/* The shared result-grid rule uses an ID selector and would otherwise create
+   a nested scroll container that traps wheel input before the page actions. */
+#host-workspace-request .pending-review-results {
+  height: auto;
+  overflow: visible;
+}
+
 .request-discover-view .category-browser,
 .request-discover-view .tag-browser {
   height: 100%;

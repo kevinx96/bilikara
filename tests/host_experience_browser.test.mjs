@@ -7,6 +7,7 @@ import { chromium, webkit } from 'playwright';
 import { root, runNative } from './desktop_construction_support.mjs';
 import { buildNativeAlpha, buildNativeHost } from './native_runtime_artifacts.mjs';
 import { RunningHost, isolatedEnvironment } from './native_host_support.mjs';
+import './pending_review_browser.test.mjs';
 
 const require = createRequire(import.meta.url);
 const ratingDialog = require('./browser/remote_rating_dialog.cjs');
