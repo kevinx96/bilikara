@@ -30,6 +30,7 @@ pub enum WifiLockMode {
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct NetworkFacts {
+    pub platform_unavailable_reason: Option<InitializationFailure>,
     pub default_network: DefaultNetwork,
     pub wifi_connected: Option<bool>,
     pub wifi_validated: Option<bool>,
@@ -37,6 +38,15 @@ pub struct NetworkFacts {
     pub battery_optimization_ignored: Option<bool>,
     pub multicast_acquired: Option<bool>,
     pub wifi_lock_mode: Option<WifiLockMode>,
+}
+
+/// Closed startup categories; never retain JNI exceptions or platform paths.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InitializationFailure {
+    InitializationFailed,
+    InitializationTimedOut,
+    NotInitialized,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
@@ -94,25 +104,67 @@ pub trait CastPlatform: Send + Sync {
     fn network_facts(&self) -> NetworkFacts;
 }
 
-static PLATFORM: OnceLock<Arc<dyn CastPlatform>> = OnceLock::new();
+type Installed = Result<Arc<dyn CastPlatform>, InitializationFailure>;
+static PLATFORM: OnceLock<Installed> = OnceLock::new();
 static NEXT_LEASE: AtomicU64 = AtomicU64::new(1);
 
 pub fn install(platform: Arc<dyn CastPlatform>) -> Result<(), PlatformError> {
-    install_into(&PLATFORM, platform)
+    with_registry(|slot| install_into(slot, platform))
 }
 fn install_into(
-    slot: &OnceLock<Arc<dyn CastPlatform>>,
+    slot: &OnceLock<Installed>,
     platform: Arc<dyn CastPlatform>,
 ) -> Result<(), PlatformError> {
-    slot.set(platform)
+    slot.set(Ok(platform))
         .map_err(|_| PlatformError::AlreadyInstalled)
 }
 
+fn with_registry<T>(action: impl FnOnce(&OnceLock<Installed>) -> T) -> T {
+    #[cfg(test)]
+    if let Some(slot) = test_support::registry() {
+        return action(&slot);
+    }
+    action(&PLATFORM)
+}
+
+fn installed() -> Option<Installed> {
+    with_registry(|slot| slot.get().cloned())
+}
+
+pub(crate) fn has_platform_state() -> bool {
+    installed().is_some()
+}
+
+/// Cast is optional. Publish success OR failure once, then continue Host startup.
+/// The JNI callback only returns its candidate; a late reply cannot install it.
+pub fn initialize_optional(initialize: impl FnOnce() -> Installed) {
+    let result = initialize();
+    if result.is_err() {
+        eprintln!("cast_platform_unavailable");
+    }
+    with_registry(|slot| {
+        if slot.set(result).is_err() {
+            eprintln!("cast_platform_already_installed");
+        }
+    });
+}
+
+pub fn initialization_failure() -> Option<InitializationFailure> {
+    match installed() {
+        Some(Err(reason)) => Some(reason),
+        None if cfg!(target_os = "android") => Some(InitializationFailure::NotInitialized),
+        _ => None,
+    }
+}
+
 pub fn network_facts() -> NetworkFacts {
-    PLATFORM
-        .get()
-        .map(|p| p.network_facts())
-        .unwrap_or_default()
+    match installed() {
+        Some(Ok(platform)) => platform.network_facts(),
+        _ => NetworkFacts {
+            platform_unavailable_reason: initialization_failure(),
+            ..Default::default()
+        },
+    }
 }
 
 pub struct DiscoveryLease {
@@ -122,7 +174,7 @@ pub struct DiscoveryLease {
 }
 impl DiscoveryLease {
     pub fn acquire() -> Self {
-        Self::with_platform(PLATFORM.get().cloned())
+        Self::with_platform(installed().and_then(Result::ok))
     }
     fn with_platform(platform: Option<Arc<dyn CastPlatform>>) -> Self {
         let id = NEXT_LEASE.fetch_add(1, Ordering::Relaxed);
@@ -149,11 +201,10 @@ pub struct OutputLease {
 }
 impl OutputLease {
     pub fn acquire() -> Result<Self, PlatformError> {
-        #[cfg(target_os = "android")]
-        if PLATFORM.get().is_none() {
+        if initialization_failure().is_some() {
             return Err(PlatformError::Unavailable);
         }
-        Self::with_platform(PLATFORM.get().cloned())
+        Self::with_platform(installed().and_then(Result::ok))
     }
     fn with_platform(platform: Option<Arc<dyn CastPlatform>>) -> Result<Self, PlatformError> {
         let id = NEXT_LEASE.fetch_add(1, Ordering::Relaxed);
@@ -177,5 +228,7 @@ impl Drop for OutputLease {
     }
 }
 
+#[cfg(test)]
+pub(crate) mod test_support;
 #[cfg(test)]
 mod tests;

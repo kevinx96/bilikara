@@ -1,6 +1,8 @@
 //! JNI-only cast resource bridge. Retain the packaged class and JVM, never an
 //! Activity/WebView. HostCastPlatform retains only the Application and weak UI.
-use bilikara_runtime::cast_platform::{self, CastPlatform, NetworkFacts, PlatformError};
+use bilikara_runtime::cast_platform::{
+    self, CastPlatform, InitializationFailure, NetworkFacts, PlatformError,
+};
 use jni::{
     JNIEnv, JavaVM,
     objects::{GlobalRef, JClass, JObject, JValue},
@@ -85,15 +87,19 @@ impl CastPlatform for AndroidCast {
     }
 }
 
-pub(super) fn initialize(app: &tauri::App) -> Result<(), String> {
+pub(super) fn initialize(app: &tauri::App) {
+    cast_platform::initialize_optional(|| initialize_candidate(app));
+}
+
+fn initialize_candidate(app: &tauri::App) -> Result<Arc<dyn CastPlatform>, InitializationFailure> {
     let window = app
         .get_webview_window("main")
-        .ok_or("Android main WebView is unavailable")?;
+        .ok_or(InitializationFailure::InitializationFailed)?;
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
     window
         .with_webview(move |webview| {
             webview.jni_handle().exec(move |env, activity, _| {
-                let result = (|| -> jni::errors::Result<()> {
+                let result = (|| -> jni::errors::Result<Arc<dyn CastPlatform>> {
                     // Resolve with the Activity's app class loader on its JNI thread;
                     // FindClass on a later attached Rust worker cannot find app classes.
                     let activity_class = env.get_object_class(activity)?;
@@ -132,24 +138,26 @@ pub(super) fn initialize(app: &tauri::App) -> Result<(), String> {
                         vm: env.get_java_vm()?,
                         class: env.new_global_ref(class)?,
                     };
-                    cast_platform::install(Arc::new(platform))
-                        .map_err(|_| jni::errors::Error::NullPtr("cast platform already installed"))
+                    Ok(Arc::new(platform))
                 })();
                 if result.is_err() {
                     let _ = env.exception_clear();
                 }
-                let _ = sender.send(result.is_ok());
+                let _ =
+                    sender.send(result.map_err(|_| InitializationFailure::InitializationFailed));
             });
         })
-        .map_err(|_| "Cannot initialize Android cast platform")?;
-    if receiver
+        .map_err(|_| InitializationFailure::InitializationFailed)?;
+    receiver
         .recv_timeout(std::time::Duration::from_secs(5))
-        .unwrap_or(false)
-    {
-        Ok(())
-    } else {
-        Err("Cannot initialize Android cast platform".into())
-    }
+        .map_err(|error| match error {
+            std::sync::mpsc::RecvTimeoutError::Timeout => {
+                InitializationFailure::InitializationTimedOut
+            }
+            std::sync::mpsc::RecvTimeoutError::Disconnected => {
+                InitializationFailure::InitializationFailed
+            }
+        })?
 }
 
 /// Fixed reason codes: 1 notification, 2 task/activity removal, 3 service failure.

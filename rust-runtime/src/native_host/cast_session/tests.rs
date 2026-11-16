@@ -952,5 +952,7 @@ fn learned_live_mode_pause_resume_mode_switch_and_connect_cancellation() {
     assert_eq!(receiver.state.lock().unwrap().actions.len(), count);
 }
 
+#[path = "platform_tests.rs"]
+mod platform_tests;
 #[path = "tests_round1.rs"]
 mod round1;

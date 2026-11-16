@@ -64,7 +64,7 @@ fn refresh_android_network(
     trace: &SessionTrace,
     environment: &mut diag::Environment,
 ) {
-    if !cfg!(target_os = "android") {
+    if !cfg!(target_os = "android") && !crate::cast_platform::has_platform_state() {
         return;
     }
     let facts = crate::cast_platform::network_facts();
@@ -137,20 +137,21 @@ pub(super) async fn run(
     let since = begin(generation, Stage::S0);
     // S0 only observes. S1/S3 fill in this run's actual multicast result;
     // acquiring a diagnostic-only lock here would extend the lease boundary.
-    let android_network = if cfg!(target_os = "android") {
-        let mut facts = crate::cast_platform::network_facts();
-        facts.multicast_acquired = None;
-        let _ = with_app(|app| {
-            if app.native().cast.self_test.generation == generation {
-                app.native().cast.network_facts = facts.clone();
-                app.native().revision += 1;
-            }
-            Ok(())
-        });
-        Some(facts)
-    } else {
-        None
-    };
+    let android_network =
+        if cfg!(target_os = "android") || crate::cast_platform::has_platform_state() {
+            let mut facts = crate::cast_platform::network_facts();
+            facts.multicast_acquired = None;
+            let _ = with_app(|app| {
+                if app.native().cast.self_test.generation == generation {
+                    app.native().cast.network_facts = facts.clone();
+                    app.native().revision += 1;
+                }
+                Ok(())
+            });
+            Some(facts)
+        } else {
+            None
+        };
     let sample_b = samples::read_uniform(&context);
     let companion =
         tokio::task::spawn_blocking(|| media::probe().is_ok_and(|p| p.cast_mux_available()))
