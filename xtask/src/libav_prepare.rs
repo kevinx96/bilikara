@@ -492,9 +492,14 @@ pub fn companion_commands(
             "-lavcodec".into(),
             "-lavutil".into(),
             "-lswresample".into(),
-            "-o".into(),
-            output.clone().into(),
         ]);
+        if platform.os == Os::Linux {
+            // glibc keeps libm separate and `-z defs` rejects any unresolved
+            // reference (test_shim.c generates its tone with sin()). Libraries
+            // must follow the source that uses them.
+            result.push("-lm".into());
+        }
+        result.extend(["-o".into(), output.clone().into()]);
         if platform.os == Os::Macos {
             result.extend([
                 arg("-Wl,-rpath,", &prefix.join("lib")),

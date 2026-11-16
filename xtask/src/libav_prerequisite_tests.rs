@@ -317,6 +317,14 @@ fn all_native_companion_commands_preserve_flags_paths_and_private_outputs() {
                     );
                 } else {
                     assert!(commands[0].contains(&OsString::from("-Wl,-z,defs")));
+                    for command in [&commands[0], &commands[1], &commands[3]] {
+                        let source = command
+                            .iter()
+                            .position(|arg| arg.to_string_lossy().ends_with(".c"))
+                            .unwrap();
+                        let libm = command.iter().position(|arg| arg == "-lm").unwrap();
+                        assert!(source < libm, "libm must follow the C source");
+                    }
                 }
             }
         }
