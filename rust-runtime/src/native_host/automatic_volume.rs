@@ -4,7 +4,11 @@ use super::*;
 use crate::app_state::automatic_volume::AnalysisSignal;
 use crate::experimental_libav::{LibavMetadataProbe, LoudnessMeasurement, ProbeError};
 use serde::{Deserialize, Serialize};
-use std::fs;
+use std::{fs, sync::Mutex};
+
+#[cfg(test)]
+pub(super) static TEST_SCANNER_WAKES: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -91,13 +95,16 @@ pub(super) fn start(context: Arc<HostContext>) -> Result<(), ApiError> {
                 let result = load_scanner(crate::media_routing::loudness_companion());
                 let reason = result.as_ref().err().copied();
                 probe = result.ok();
+                let report = reason.is_some() && report_unavailable(crate::media_routing::loudness_companion());
                 let _ = with_app(|app| {
                     app.set_scanner_available(probe.is_some());
-                    if let Some(reason) = reason {
+                    if let Some(reason) = reason && report {
                         app.native_diagnostic(&json!({"event":"automatic-volume-unavailable","reason":reason}), now());
                     }
                     Ok(())
                 });
+                #[cfg(test)]
+                TEST_SCANNER_WAKES.fetch_add(1, Ordering::Release);
             }
             let Some(probe) = &probe else { continue; };
             loop {
@@ -120,6 +127,16 @@ pub(super) fn start(context: Arc<HostContext>) -> Result<(), ApiError> {
     }).map_err(|_| ApiError::new(503,"scanner_start","无法启动音频分析服务"))
 }
 
+fn report_unavailable(path: Option<&Path>) -> bool {
+    use crate::experimental_libav::load_cache::FailureNotices;
+    static NOTICES: std::sync::OnceLock<Mutex<FailureNotices>> = std::sync::OnceLock::new();
+    NOTICES
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .changed(path)
+}
+
 fn load_scanner(path: Option<&Path>) -> Result<LibavMetadataProbe, &'static str> {
     let path = path.ok_or("companion_not_provisioned")?;
     // SAFETY: existing trusted Host/package configuration.
@@ -136,6 +153,9 @@ pub(super) fn configure_capability() {
     let available = crate::media_routing::loudness_companion().is_some();
     #[cfg(any(target_os = "android", test))]
     let available = super::android_media::capability().map_or(available, |c| c.loudness);
+    #[cfg(any(target_os = "android", test))]
+    let report = super::android_media::capability().is_some_and(|c| !c.loudness)
+        && report_unavailable(crate::media_routing::loudness_companion());
     let _ = with_app(|app| {
         app.set_scanner_available(available);
         #[cfg(any(target_os = "android", test))]
@@ -146,7 +166,7 @@ pub(super) fn configure_capability() {
                 "companion_remux":capability.remux, "companion_loudness":capability.loudness, "companion_cast":capability.cast}),
                 now(),
             );
-            if !capability.loudness {
+            if report {
                 app.native_diagnostic(&json!({"event":"automatic-volume-unavailable","reason":capability.reason.unwrap_or("companion_pcm_unavailable")}), now());
             }
         }

@@ -73,7 +73,7 @@ fn android_media_startup_child() {
         _ => None,
     };
     assert_eq!(status.reason, expected_reason);
-    let seed = serde_json::from_value(json!({"session_users":["Alice"],"session_started_at":1,"session_played_file":"session.json","updated_at":1})).unwrap();
+    let seed = serde_json::from_value(json!({"session_users":["Alice"],"session_started_at":1,"session_played_file":"session.json","updated_at":1,"automatic_volume":{"enabled":!available}})).unwrap();
     assert!(crate::initialize_native_host(&root, seed).error().is_none());
     let host = NativeHost::start(&root, Arc::new(|_| None))
         .expect("media failure must not block real Host startup");
@@ -86,6 +86,35 @@ fn android_media_startup_child() {
         assert!(cast.unwrap().cast_mux_available());
     } else {
         assert_eq!(cast.err().unwrap().code, "cast_backend_unavailable");
+    }
+    let failure_loads = crate::experimental_libav::TEST_LOADS.load(Ordering::Acquire);
+    let wake_scanner = || {
+        use crate::native_host::automatic_volume::TEST_SCANNER_WAKES;
+        let before = TEST_SCANNER_WAKES.load(Ordering::Acquire);
+        with_app(|app| {
+            app.notify_analysis(false);
+            Ok(())
+        })
+        .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while TEST_SCANNER_WAKES.load(Ordering::Acquire) == before {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "scanner did not process wake"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    };
+    if !available {
+        for _ in 0..3 {
+            wake_scanner();
+            assert_eq!(probe().err().unwrap().code, "cast_backend_unavailable");
+        }
+        assert_eq!(
+            crate::experimental_libav::TEST_LOADS.load(Ordering::Acquire),
+            failure_loads,
+            "startup/automatic volume/cast must share the failed load"
+        );
     }
     let diagnostics = with_app(|app| Ok(app.native_diagnostics())).unwrap();
     let events = diagnostics["events"].as_array().unwrap();
@@ -101,6 +130,13 @@ fn android_media_startup_child() {
             events
                 .iter()
                 .any(|e| e["event"] == "automatic-volume-unavailable" && e["reason"] == reason)
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| e["event"] == "automatic-volume-unavailable")
+                .count(),
+            1
         );
     }
     let prepared = root.join("prepared");
@@ -238,6 +274,34 @@ fn android_media_startup_child() {
             .unwrap();
         assert_eq!(body.as_ref(), before);
         assert_eq!(fs::read(&path).unwrap(), before);
+    }
+    if !available {
+        assert_eq!(
+            crate::experimental_libav::TEST_LOADS.load(Ordering::Acquire),
+            failure_loads,
+            "normalization must also reuse the failed load"
+        );
+    }
+    if matches!(case.as_str(), "missing" | "invalid") {
+        fs::write(&path, b"a changed, still invalid companion file").unwrap();
+        for _ in 0..3 {
+            wake_scanner();
+            assert_eq!(probe().err().unwrap().code, "cast_backend_unavailable");
+        }
+        assert_eq!(
+            crate::experimental_libav::TEST_LOADS.load(Ordering::Acquire),
+            failure_loads + 1
+        );
+        let diagnostics = with_app(|app| Ok(app.native_diagnostics())).unwrap();
+        assert_eq!(
+            diagnostics["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|e| e["event"] == "automatic-volume-unavailable")
+                .count(),
+            2
+        );
     }
     drop(host);
     execute_app_state(AppStateRequest::Shutdown { schema_version: 1 });

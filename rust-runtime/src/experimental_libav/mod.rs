@@ -16,6 +16,7 @@ mod wire;
 pub mod cast_mux;
 /// Pure developer comparison semantics; never consulted by normal media work.
 pub mod comparison;
+pub(crate) mod load_cache;
 mod pcm;
 mod scan;
 pub use pcm::LoudnessMeasurement;
@@ -42,12 +43,21 @@ pub(crate) static TEST_LOADS: std::sync::atomic::AtomicU32 = std::sync::atomic::
 #[serde(tag = "kind", content = "detail", rename_all = "snake_case")]
 pub enum ProbeError {
     Unavailable(String),
+    NegotiationFailed(NegotiationFailure),
     Media(MediaError),
     /// A recognized demuxer outside this metadata preview's MOV/FLAC scope.
     /// Detection does not certify that the input is valid in that format.
     UnsupportedFormat(String),
     Cancelled,
     BackendFailure(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NegotiationFailure {
+    Abi,
+    RuntimeConfiguration,
+    LayoutOrBuild,
 }
 
 impl std::fmt::Display for ProbeError {
@@ -171,7 +181,8 @@ pub struct LibavMetadataProbe {
 
 impl LibavMetadataProbe {
     /// Load one trusted absolute companion path; never scan PATH/CWD.
-    /// Missing dependencies and incompatible ABI/build report `Unavailable`.
+    /// Missing dependencies report `Unavailable`; ABI/build failures are typed.
+    /// Failed loads are cached until the companion's file identity changes.
     ///
     /// # Safety
     /// The caller must trust the artifact and its dependency location. Loading
@@ -179,6 +190,11 @@ impl LibavMetadataProbe {
     /// negotiation checks compatibility, not malicious-library safety or crash
     /// containment. Do not replace artifacts while loading/using this handle.
     pub unsafe fn load(companion: &Path) -> Result<Self, ProbeError> {
+        // SAFETY: the cached wrapper preserves the caller's trust precondition.
+        load_cache::load(companion, || unsafe { Self::load_uncached(companion) })
+    }
+
+    unsafe fn load_uncached(companion: &Path) -> Result<Self, ProbeError> {
         #[cfg(test)]
         TEST_LOADS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         #[cfg(any(
@@ -198,7 +214,7 @@ impl LibavMetadataProbe {
             let library = unsafe { wire::Library::open(companion)? };
             let abi: wire::Abi = unsafe { std::mem::transmute(library.symbol(c"bm_abi_version")?) };
             if unsafe { abi() } != wire::ABI {
-                return Err(ProbeError::Unavailable("incompatible companion ABI".into()));
+                return Err(ProbeError::NegotiationFailed(NegotiationFailure::Abi));
             }
             let get_info: wire::GetInfo =
                 unsafe { std::mem::transmute(library.symbol(c"bm_get_info")?) };
@@ -206,8 +222,8 @@ impl LibavMetadataProbe {
             let status =
                 unsafe { get_info(std::mem::size_of::<wire::Info>() as u32, raw.as_mut_ptr()) };
             if status != 0 {
-                return Err(ProbeError::Unavailable(
-                    "companion runtime build/configuration negotiation failed".into(),
+                return Err(ProbeError::NegotiationFailed(
+                    NegotiationFailure::RuntimeConfiguration,
                 ));
             }
             let raw = unsafe { raw.assume_init() };
@@ -565,7 +581,7 @@ fn convert_info(i: &wire::Info) -> Result<BackendInfo, ProbeError> {
         }
         Ok(info)
     };
-    convert().map_err(|error| ProbeError::Unavailable(error.to_string()))
+    convert().map_err(|_| ProbeError::NegotiationFailed(NegotiationFailure::LayoutOrBuild))
 }
 
 #[cfg(any(
@@ -724,3 +740,14 @@ fn convert_metadata(r: &wire::ProbeResult, backend: &str) -> Result<Metadata, Pr
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests;
+
+#[cfg(all(
+    test,
+    any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "windows",
+        target_os = "android"
+    )
+))]
+mod negotiation_tests;

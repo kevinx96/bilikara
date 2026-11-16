@@ -48,17 +48,11 @@ fn negotiate(companion: &Path) -> Capability {
         },
         Err(error) => {
             // Keep loader paths and arbitrary loader text out of diagnostics.
-            Capability::unavailable(
-                if matches!(&error, ProbeError::Unavailable(message) if matches!(message.as_str(),
-                    "incompatible companion ABI"
-                    | "companion runtime build/configuration negotiation failed"
-                    | "BackendFailure(\"incompatible companion layout/build/runtime configuration\")"))
-                {
-                    "companion_negotiation_failed"
-                } else {
-                    "companion_load_failed"
-                },
-            )
+            Capability::unavailable(if matches!(error, ProbeError::NegotiationFailed(_)) {
+                "companion_negotiation_failed"
+            } else {
+                "companion_load_failed"
+            })
         }
     }
 }

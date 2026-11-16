@@ -92,6 +92,12 @@ fn rust_and_libav_normalization_inspection_and_loudness_comparison() {
             ExpectedMediaKind::Video,
             "mp4",
         ),
+        (
+            "fragmented",
+            "../tests/fixtures/bbdown/video-reordered-start.mp4",
+            ExpectedMediaKind::Video,
+            "mp4",
+        ),
     ] {
         let source = fixture(source);
         let rust_path = root.join(format!("{name}-rust.{extension}"));
@@ -121,7 +127,7 @@ fn rust_and_libav_normalization_inspection_and_loudness_comparison() {
         // One AAC access unit (<=23.22 ms here), or one 30fps frame, plus
         // integer timescale rounding fits 50ms. No percentage-of-length slack.
         if name == "h264" {
-            // This historical M6 fixture has inconsistent timing:
+            // This historical synthetic M6 fixture has a corrupt timescale:
             // mdhd timescale 256, stts 599998 ticks, mvhd timescale 1200000,
             // elst presentation duration 399999 ticks. Rust ignores the edit;
             // libav input honors it. Neither normalized duration is equivalent
@@ -172,6 +178,40 @@ fn rust_and_libav_normalization_inspection_and_loudness_comparison() {
         let right = probe.probe_metadata(&libav_path, &flag).unwrap();
         let a = &left.streams[0];
         let b = &right.streams[0];
+        let source_metadata = probe.probe_metadata(&source, &flag).unwrap();
+        if matches!(name, "h26430" | "fragmented" | "aac" | "aac30") {
+            // Presentation start, not just duration: Rust drops edit lists;
+            // libav preserves B-frame offsets and AAC priming edits.
+            let (source_start, rust_start) = match name {
+                "h26430" => (0, 66_667),
+                "fragmented" => (21_000, 166_875),
+                "aac" | "aac30" => (0, 0),
+                _ => unreachable!(),
+            };
+            assert_eq!(
+                source_metadata.start_time_us,
+                Some(source_start),
+                "{name} source"
+            );
+            assert_eq!(
+                source_metadata.streams[0].start_time_us,
+                Some(source_start),
+                "{name} source stream"
+            );
+            assert_eq!(left.start_time_us, Some(rust_start), "{name} Rust");
+            assert_eq!(a.start_time_us, Some(rust_start), "{name} Rust stream");
+            assert_eq!(right.start_time_us, Some(source_start), "{name} libav");
+            assert_eq!(b.start_time_us, Some(source_start), "{name} libav stream");
+            if matches!(name, "aac" | "aac30") {
+                // Both report start=0, but Rust retains 1024 leading samples.
+                let seconds = if name == "aac" { 1.0 } else { 30.0 };
+                assert_eq!(
+                    rust.media.output.duration_seconds,
+                    seconds + 1024.0 / 48_000.0
+                );
+                assert_eq!(libav.media.output.duration_seconds, seconds);
+            }
+        }
         assert_eq!(
             (
                 a.media_type,
@@ -232,7 +272,7 @@ fn rust_and_libav_normalization_inspection_and_loudness_comparison() {
         };
         println!(
             "A2_COMPARISON {}",
-            serde_json::json!({"fixture":name,"rust_seconds":rust.media.output.duration_seconds,"libav_seconds":libav.media.output.duration_seconds,"rust_bytes":rust.media.output.file_bytes,"libav_bytes":libav.media.output.file_bytes,"packets":a_packets.packet_count,"payload_bytes":a_packets.payload_bytes,"codec":a.codec_name,"rate":a.sample_rate_hz,"channels":a.channel_count,"width":a.width_px,"height":a.height_px,"lufs":loudness})
+            serde_json::json!({"fixture":name,"source_start_us":source_metadata.start_time_us,"rust_start_us":left.start_time_us,"libav_start_us":right.start_time_us,"rust_seconds":rust.media.output.duration_seconds,"libav_seconds":libav.media.output.duration_seconds,"rust_bytes":rust.media.output.file_bytes,"libav_bytes":libav.media.output.file_bytes,"packets":a_packets.packet_count,"payload_bytes":a_packets.payload_bytes,"codec":a.codec_name,"rate":a.sample_rate_hz,"channels":a.channel_count,"width":a.width_px,"height":a.height_px,"lufs":loudness})
         );
         // Existing Rust output is readable by the new route without mutation.
         let before = fs::read(&rust_path).unwrap();

@@ -145,8 +145,24 @@ the scanner remains unavailable, with an `automatic-volume-unavailable` event.
 code without loader paths. S0 independently checks the shared cast probe;
 unavailable casting returns `cast_backend_unavailable`.
 
+Negotiation failures use structured ABI, runtime-configuration and layout/build
+reason codes. The process caches failed companion loads until the installed
+file's size, modification/creation time or availability changes. Repeated
+normalization, inspection and casting attempts reuse that failure; automatic
+volume reports unavailability once per file identity, including its startup
+report. A changed file permits another load and another failure report. Media
+errors are not cached, and successful handles keep their normal lifetime.
+
 Existing cache keys, filenames, reuse checks and immutable media serving do not
 change. Switching to libav does not by itself re-download or re-normalize cache.
+Existing caches are deliberately retained without re-normalization. New libav
+outputs preserve source presentation offsets and AAC priming edits that the
+former Rust normalization omitted. Android local audio/video alignment can
+therefore shift by approximately **45–67 ms for B-frame content**, or about
+**146 ms for the fragmented sample**. These are fixture-specific differences,
+not a universal correction. Old and newly cached songs can differ by tens of
+milliseconds; testers who previously calibrated audio/video delay may need to
+adjust it when comparing these songs.
 
 ### Runtime regression checks
 
@@ -187,8 +203,11 @@ the 30-second cast samples. Ordinary duration differences are bounded to 50 ms
 (one AAC access unit/video frame plus timescale rounding); loudness is bounded
 to 0.1 LU (priming/edit boundaries and histogram quantization). Codec, dimensions,
 rate, channels, packet counts and payload sizes must match. A historical short
-H.264 fixture has inconsistent sample/edit timing; the test pins its exact
+H.264 fixture has a corrupt timescale; the test pins its exact
 out-of-tolerance values separately instead of relaxing ordinary tolerances.
+The comparison also pins source/Rust/libav presentation starts for B-frame,
+fragmented and AAC priming samples. AAC start metadata is zero on both paths;
+the extra 1024 samples in the Rust output are asserted separately.
 These checks demonstrate demux/PCM and cache-serving compatibility, not actual
 Android WebView or television playback. Test processes use the same production
 configuration entry point, with independent processes for available, missing,
