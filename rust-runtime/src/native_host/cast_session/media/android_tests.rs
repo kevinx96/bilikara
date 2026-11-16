@@ -4,14 +4,95 @@ use crate::native_host::{NativeHost, android_media};
 use crate::{AppStateRequest, execute_app_state};
 use std::{fs, process::Command};
 
+struct IncompatibleCompanion {
+    directory: PathBuf,
+    library: PathBuf,
+}
+
+impl IncompatibleCompanion {
+    fn build() -> Self {
+        let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../.tmp")
+            .join(format!("a2-abi-{}", token().unwrap()));
+        fs::create_dir_all(&directory).unwrap();
+        let name = if cfg!(target_os = "windows") {
+            "incompatible.dll"
+        } else if cfg!(target_os = "macos") {
+            "libincompatible.dylib"
+        } else {
+            "libincompatible.so"
+        };
+        let fixture = Self {
+            library: directory.join(name),
+            directory,
+        };
+        fs::write(
+            fixture.directory.join("fixture.c"),
+            include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../tests/fixtures/libav_incompatible.c"
+            )),
+        )
+        .unwrap();
+        // Use the native compiler already required by this Cargo test build.
+        // Relative arguments avoid passing Windows verbatim paths to MSVC.
+        let mut compiler = if cfg!(target_os = "windows") {
+            let mut command = Command::new("cl.exe");
+            command.args([
+                "/nologo",
+                "/LD",
+                "/W4",
+                "/WX",
+                "fixture.c",
+                "/Fofixture.obj",
+                "/link",
+                "/OUT:incompatible.dll",
+                "/IMPLIB:fixture.lib",
+            ]);
+            command
+        } else {
+            let mut command = Command::new("cc");
+            command.args([
+                if cfg!(target_os = "macos") {
+                    "-dynamiclib"
+                } else {
+                    "-shared"
+                },
+                "-fPIC",
+                "-Wall",
+                "-Wextra",
+                "-Werror",
+                "fixture.c",
+                "-o",
+                name,
+            ]);
+            command
+        };
+        let status = compiler
+            .current_dir(&fixture.directory)
+            .status()
+            .expect("native C compiler required to build the incompatible ABI fixture");
+        assert!(
+            status.success(),
+            "incompatible ABI fixture compilation failed: {status}"
+        );
+        assert!(fixture.library.is_file());
+        fixture
+    }
+}
+
+impl Drop for IncompatibleCompanion {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.directory);
+    }
+}
+
 #[test]
-#[ignore = "requires freshly built BILIKARA_TEST_CAST_COMPANION and BILIKARA_TEST_INCOMPATIBLE_COMPANION"]
+#[ignore = "requires freshly built BILIKARA_TEST_CAST_COMPANION and a native C compiler"]
 fn android_media_startup_cache_and_failure_matrix() {
     let valid = PathBuf::from(std::env::var_os("BILIKARA_TEST_CAST_COMPANION").expect("companion"));
-    let incompatible = PathBuf::from(
-        std::env::var_os("BILIKARA_TEST_INCOMPATIBLE_COMPANION").expect("incompatible ABI fixture"),
-    );
-    assert!(valid.is_file() && incompatible.is_file());
+    assert!(valid.is_file());
+    let incompatible = IncompatibleCompanion::build();
     for case in ["available", "missing", "invalid", "abi", "jni"] {
         let output = Command::new(std::env::current_exe().unwrap())
             .args([
@@ -22,7 +103,7 @@ fn android_media_startup_cache_and_failure_matrix() {
             ])
             .env("BILIKARA_A2_CASE", case)
             .env("BILIKARA_A2_VALID", &valid)
-            .env("BILIKARA_A2_INCOMPATIBLE", &incompatible)
+            .env("BILIKARA_A2_INCOMPATIBLE", &incompatible.library)
             // Use production shared routing, never cast's test-only override.
             .env_remove("BILIKARA_TEST_CAST_COMPANION")
             .output()

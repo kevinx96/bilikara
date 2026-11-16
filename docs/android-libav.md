@@ -177,14 +177,12 @@ cargo run --manifest-path xtask/Cargo.toml --locked --target x86_64-pc-windows-m
 Copy that prefix's `avcodec-63.dll`, `avformat-63.dll`, `avutil-61.dll` and
 `swresample-7.dll` beside `bilikara_media_libav_test.dll`. Remove the prefix from
 PATH for the tests, and set `BILIKARA_TEST_CAST_COMPANION` to the test DLL.
-Build the negative ABI fixture with MSVC (outputs in the owned directory):
-
-```text
-cl /nologo /LD /W4 /WX tests/fixtures/libav_incompatible.c /Fo<owned>/abi.obj /link /OUT:<owned>/incompatible.dll /IMPLIB:<owned>/abi.lib
-```
-
-On POSIX, build the same fixture with `cc -shared -fPIC` (`-dynamiclib` on macOS).
-Set `BILIKARA_TEST_INCOMPATIBLE_COMPANION` to its absolute path. Then run:
+The startup matrix compiles `tests/fixtures/libav_incompatible.c` into an owned
+temporary directory and removes it afterward. It uses the native `cl.exe` on
+Windows or `cc` on POSIX (`.dll`, `.so` or `.dylib` as appropriate). This fixture
+exports ABI version 0, including the required Windows file-descriptor bridge,
+so it tests actual ABI rejection rather than a missing symbol or dependency.
+No additional fixture environment variable is required. Then run:
 
 ```text
 cargo test --manifest-path rust-runtime/Cargo.toml --lib --features native-host --locked media_routing::android_tests:: -- --include-ignored --nocapture
