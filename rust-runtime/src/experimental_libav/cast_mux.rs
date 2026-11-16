@@ -82,11 +82,21 @@ pub struct CastSummary {
 }
 impl LibavMetadataProbe {
     pub fn cast_mux_available(&self) -> bool {
-        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+        #[cfg(any(
+            target_os = "linux",
+            target_os = "macos",
+            target_os = "windows",
+            target_os = "android"
+        ))]
         {
             native::Capability::load(&self._library).is_ok()
         }
-        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+        #[cfg(not(any(
+            target_os = "linux",
+            target_os = "macos",
+            target_os = "windows",
+            target_os = "android"
+        )))]
         {
             false
         }
@@ -97,11 +107,21 @@ impl LibavMetadataProbe {
         video: &Path,
         stop: &AtomicBool,
     ) -> Result<CastSummary, ProbeError> {
-        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+        #[cfg(any(
+            target_os = "linux",
+            target_os = "macos",
+            target_os = "windows",
+            target_os = "android"
+        ))]
         {
             native::preflight(self, video, stop)
         }
-        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+        #[cfg(not(any(
+            target_os = "linux",
+            target_os = "macos",
+            target_os = "windows",
+            target_os = "android"
+        )))]
         {
             let _ = (video, stop);
             Err(ProbeError::Unavailable(
@@ -158,11 +178,21 @@ impl LibavMetadataProbe {
         stop: &AtomicBool,
         callback: &mut dyn FnMut(CastEvent<'_>) -> bool,
     ) -> Result<CastSummary, ProbeError> {
-        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+        #[cfg(any(
+            target_os = "linux",
+            target_os = "macos",
+            target_os = "windows",
+            target_os = "android"
+        ))]
         {
             native::run(self, inputs, output, pacing, max_bytes, stop, callback)
         }
-        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+        #[cfg(not(any(
+            target_os = "linux",
+            target_os = "macos",
+            target_os = "windows",
+            target_os = "android"
+        )))]
         {
             let _ = (inputs, output.path(), pacing, max_bytes, stop, callback);
             Err(ProbeError::Unavailable(
@@ -171,7 +201,12 @@ impl LibavMetadataProbe {
         }
     }
 }
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "windows",
+    target_os = "android"
+))]
 mod native {
     use super::*;
     use crate::experimental_libav::{backend_error, open_input, status_error, wire};

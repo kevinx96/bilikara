@@ -1182,6 +1182,11 @@ impl AppState {
             "sync_force_correction",
             "local_video_held_for_audio",
             "local_video_deferred_recovery",
+            "companion_metadata",
+            "companion_packet_scan",
+            "companion_remux",
+            "companion_loudness",
+            "companion_cast",
         ] {
             if let Some(value) = body.get(key).filter(|v| v.is_boolean()) {
                 safe[key] = value.clone();

@@ -4197,8 +4197,19 @@ pathlib.Path(name).write_bytes(b'truncated' if n == 1 else (root/'valid.mp4').re
         ));
         let item_dir = root.join("song-a");
         fs::create_dir_all(&item_dir).expect("create cache fixture");
-        fs::write(item_dir.join("video-p1.mp4"), b"video").expect("write video fixture");
-        fs::write(item_dir.join("audio-p1.m4a"), b"audio").expect("write audio fixture");
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/fixtures/bbdown");
+        for (source, destination, kind) in [
+            ("video.mp4", "video-p1.mp4", ExpectedMediaKind::Video),
+            ("audio.m4a", "audio-p1.m4a", ExpectedMediaKind::Audio),
+        ] {
+            crate::media_backend::normalize_media(&MediaNormalizeRequest {
+                schema_version: 1,
+                source: fixtures.join(source),
+                destination: item_dir.join(destination),
+                expected_kind: kind,
+            })
+            .expect("existing pure Rust cache");
+        }
         let mut ready_job = job(&root);
         ready_job.reported_ready = true;
         ready_job.existing_video_relative_path = "song-a/video-p1.mp4".to_owned();

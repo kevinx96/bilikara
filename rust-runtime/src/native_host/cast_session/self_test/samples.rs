@@ -8,13 +8,34 @@ mod transport;
 pub(super) const SAMPLE_HASH: &str =
     "8624fbee0c7f4653e6f1c7c2f7a6de9aca5d2b3a3a729a218d7f740b9417aef3";
 const SAMPLE_BYTES: usize = 12_079_564;
-pub(super) fn read_uniform(context: &HostContext) -> Result<Vec<u8>, SkipReason> {
-    if cfg!(target_os = "android") {
-        return Err(SkipReason::PlatformUnavailable);
+pub(in crate::native_host::cast_session) fn read_uniform(
+    context: &HostContext,
+    lease: &Result<Option<crate::cast_samples::SampleLease>, SkipReason>,
+) -> Result<Vec<u8>, SkipReason> {
+    if let Err(reason) = lease {
+        return Err(*reason);
     }
-    let path = context
-        .sample_root
-        .as_ref()
+    read_path(context.sample_root.as_deref())
+}
+pub(in crate::native_host::cast_session) async fn load_uniform(
+    context: Arc<HostContext>,
+) -> (
+    Result<Option<crate::cast_samples::SampleLease>, SkipReason>,
+    Result<Vec<u8>, SkipReason>,
+) {
+    tokio::task::spawn_blocking(move || {
+        let lease = crate::cast_samples::acquire();
+        let bytes = read_uniform(&context, &lease);
+        (lease, bytes)
+    })
+    .await
+    .unwrap_or((
+        Err(SkipReason::SampleCopyFailed),
+        Err(SkipReason::SampleCopyFailed),
+    ))
+}
+fn read_path(root: Option<&std::path::Path>) -> Result<Vec<u8>, SkipReason> {
+    let path = root
         .ok_or(SkipReason::SampleUnavailable)?
         .join("sample-b.ts");
     let file = std::fs::File::open(path).map_err(|_| SkipReason::SampleUnavailable)?;
@@ -212,12 +233,12 @@ fn record_ts(
         summary,
     })
 }
-pub(super) struct Sample {
+pub(in crate::native_host::cast_session) struct Sample {
     source: Source,
     summary: CastSummary,
     pub facts: diag::MediaPreflight,
 }
-pub(super) async fn prepare(
+pub(in crate::native_host::cast_session) async fn prepare(
     context: Arc<HostContext>,
     _session: Arc<CastSession>,
     uniform: Option<Vec<u8>>,
@@ -329,7 +350,7 @@ pub(super) async fn prepare(
         result=&mut task=>result.unwrap_or(Err(SkipReason::SamplePreparationFailed)),
     }
 }
-pub(super) async fn remux(
+pub(in crate::native_host::cast_session) async fn remux(
     session: Arc<CastSession>,
     sample: Arc<Sample>,
     format: CastFormat,
@@ -447,3 +468,6 @@ pub(super) async fn live(
         tokio::select! {_=cancel.cancelled()=>{},_=tokio::time::sleep(Duration::from_millis(10))=>{}}
     }
 }
+
+#[cfg(test)]
+mod asset_tests;

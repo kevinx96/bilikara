@@ -555,6 +555,12 @@
             <section class="android-my-card" id="android-settings-slot" aria-labelledby="android-download-settings-title">
                 <h3 id="android-download-settings-title" data-i18n="mobile.downloadSettings">播放与下载</h3>
             </section>
+            <section class="android-my-card cast-output-group" data-media-output="settings" aria-labelledby="android-cast-title">
+              <h3 id="android-cast-title" data-i18n="cast.title">DLNA 投屏</h3>
+              <div class="cast-output-row"><button type="button" class="toolbar-button" data-media-output-add-device data-i18n="cast.android.add">添加设备</button><button type="button" class="presentation-output-switch cast-output-switch" role="switch" aria-checked="false" data-media-output-toggle disabled><span class="presentation-output-switch-thumb" aria-hidden="true"></span></button></div>
+              <p data-output-status role="status"></p><p data-output-error role="alert" hidden></p>
+              <button type="button" class="toolbar-button media-output-pipeline-test" hidden data-i18n="cast.android.pipeline">管线测试</button>
+            </section>
             <button type="button" class="android-menu-row" id="android-open-settings">
               <span data-i18n="shell.settings">设置</span>
               <span aria-hidden="true">›</span>
@@ -1977,6 +1983,7 @@
   <script src="/desktop-platform.js" defer></script>
   <script src="/android-platform.js" defer></script>
   <script src="/host-updates.js" defer></script>
+  <script src="/cast-android.js" defer></script>
   <script src="/cast.js" defer></script>
   <script src="/cast-self-test.js" defer></script>
   <script src="/app.js" defer></script>

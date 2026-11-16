@@ -178,6 +178,8 @@ Immediate UI actions (open/close, expand/collapse, tabs, fullscreen, mute and lo
 
 ### 5.3 Component geometry and control roles
 
+- Android's DLNA output switch only changes local/receiver output. Keep it off and disabled when disconnected, with the translated not-connected state in its accessible label. Provide separate `data-media-output-add-device` and `.media-output-pipeline-test` actions; the latter needs no receiver or room authorization. Suspending output keeps the connection and Pure K registration; explicit Disconnect releases them. Clear transient output errors/results when the group is hidden or its device/connection changes. R2 captures QR images through the system camera or gallery and decodes them locally; desktop keeps its existing cast entry.
+
 Choose a component by role, then reuse its shared definition. This table describes approved styles; it does not require every control to have one shape or every secondary action to acquire an outline.
 
 | Role | Height / typography | Shape / surface |

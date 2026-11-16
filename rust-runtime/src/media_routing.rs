@@ -1,6 +1,11 @@
 //! Application media routing. The optional backend is a capability, independent
 //! of mandatory AppState. No source selection, cache ownership, or retry loop.
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "windows",
+    target_os = "android"
+))]
 use crate::MediaProbe;
 use crate::experimental_libav::{CopyProfile, ProbeError};
 use crate::media_backend::{self, MediaNormalizeRequest, MediaNormalizeResult, MediaPathRequest};
@@ -97,7 +102,7 @@ impl From<ProbeError> for RouteError {
         match e {
             ProbeError::Media(e) => e.into(),
             ProbeError::Cancelled => error("cancelled"),
-            ProbeError::Unavailable(_) => error("unavailable"),
+            ProbeError::Unavailable(_) | ProbeError::NegotiationFailed(_) => error("unavailable"),
             ProbeError::UnsupportedFormat(_) => error("unsupported_format"),
             ProbeError::BackendFailure(_) => error("backend_failure"),
         }
@@ -107,7 +112,7 @@ impl From<ProbeError> for RouteError {
 /// Capability fallback and S3 re-download classification remain independent.
 fn fallback_reason(e: &ProbeError) -> Option<Reason> {
     match e {
-        ProbeError::Unavailable(_) => Some(Reason::Unavailable),
+        ProbeError::Unavailable(_) | ProbeError::NegotiationFailed(_) => Some(Reason::Unavailable),
         ProbeError::UnsupportedFormat(_) => Some(Reason::UnsupportedFormat),
         ProbeError::Media(e) if e.kind.allows_backend_fallback() => match e.kind {
             MediaErrorKind::UnsupportedCodec => Some(Reason::UnsupportedCodec),
@@ -125,7 +130,8 @@ fn capability(config: &Configuration) -> Result<&Path, Reason> {
     if !cfg!(any(
         target_os = "linux",
         target_os = "macos",
-        target_os = "windows"
+        target_os = "windows",
+        target_os = "android"
     )) {
         return Err(Reason::NotProvisioned);
     }
@@ -226,7 +232,12 @@ fn finish_cli(
     {
         return Err(failed(error("invalid_request"), d));
     }
-    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "windows",
+        target_os = "android"
+    ))]
     if q.operation == Operation::Validate
         && matches!(e.container.as_str(), "mp4" | "mov,mp4,m4a,3gp,3g2,mj2")
     {
@@ -339,7 +350,12 @@ fn inspect_with_config(
                     .and_then(|s| s.to_str())
                     .is_some_and(|s| ["mp4", "m4a"].iter().any(|ext| s.eq_ignore_ascii_case(ext)));
             if q.operation == Operation::PacketScan {
-                #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+                #[cfg(any(
+                    target_os = "linux",
+                    target_os = "macos",
+                    target_os = "windows",
+                    target_os = "android"
+                ))]
                 if mp4 {
                     validate_mp4(&q.source, None, flag).map_err(|e| {
                         failed(
@@ -362,7 +378,12 @@ fn inspect_with_config(
             // The retained MP4 implementation already supplies stricter sample
             // traversal. Do it once; its own failure cannot launch a third backend.
             let d = diagnostic(q.operation.name(), Backend::PureRust, Some(reason));
-            #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+            #[cfg(any(
+                target_os = "linux",
+                target_os = "macos",
+                target_os = "windows",
+                target_os = "android"
+            ))]
             if q.operation == Operation::Validate {
                 // The historical probe can enumerate samples without mdat.
                 // Strict validation still requires the accepted S3 envelope;
@@ -396,7 +417,12 @@ fn inspect_with_config(
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "windows",
+    target_os = "android"
+))]
 fn inspect_libav(
     q: &InspectRequest,
     path: &Path,
@@ -465,7 +491,12 @@ fn inspect_libav(
         }],
     })
 }
-#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "windows",
+    target_os = "android"
+)))]
 fn inspect_libav(
     _: &InspectRequest,
     _: &Path,
@@ -475,7 +506,12 @@ fn inspect_libav(
     Err(ProbeError::Unavailable("platform not packaged".into()))
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "windows",
+    target_os = "android"
+))]
 fn validate_mp4(
     path: &Path,
     codec: Option<&str>,
@@ -581,7 +617,12 @@ fn normalize_with_config(
         .map_err(|e| failed(e.into(), d))
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "windows",
+    target_os = "android"
+))]
 fn normalize_libav(
     q: &MediaNormalizeRequest,
     profile: CopyProfile,
@@ -672,7 +713,12 @@ fn normalize_libav(
         )?,
     })
 }
-#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "windows",
+    target_os = "android"
+)))]
 fn normalize_libav(
     _: &MediaNormalizeRequest,
     _: CopyProfile,
@@ -682,6 +728,10 @@ fn normalize_libav(
 ) -> Result<MediaNormalizeResult, ProbeError> {
     Err(ProbeError::Unavailable("platform not packaged".into()))
 }
+
+#[cfg(test)]
+#[path = "media_routing_android_tests.rs"]
+mod android_tests;
 
 #[cfg(test)]
 mod tests {
