@@ -17,7 +17,7 @@
     "prepare:desktop": "cargo run --manifest-path xtask/Cargo.toml --locked --target host-tuple -- prepare-desktop",
     "test:desktop-build": "node --test tests/desktop_prepare_entry.test.mjs tests/bbdown_prepare_entry.test.mjs tests/msvc_bash_env.test.mjs tests/native_package_entry.test.mjs tests/desktop_construction_contract.test.mjs",
     "test:libav-wrapper": "node --test tests/libav_xtask_wrapper.test.mjs tests/libav_prerequisite_entry.test.mjs",
-    "test:android-libav": "node --test tests/android_libav.test.mjs",
+    "test:android-libav": "node --test tests/android_libav.test.mjs tests/android_cast_samples.test.mjs",
     "test:libav-prerequisites": "node --test tests/libav_prerequisite_contract.test.mjs",
     "test:media-entry": "node --test tests/media_driver_entry.test.mjs",
     "test:media-fixtures": "node --test tests/media_fixture_contract.test.mjs",

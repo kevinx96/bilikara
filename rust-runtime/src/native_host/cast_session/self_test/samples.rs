@@ -10,13 +10,32 @@ pub(super) const SAMPLE_HASH: &str =
 const SAMPLE_BYTES: usize = 12_079_564;
 pub(in crate::native_host::cast_session) fn read_uniform(
     context: &HostContext,
+    lease: &Result<Option<crate::cast_samples::SampleLease>, SkipReason>,
 ) -> Result<Vec<u8>, SkipReason> {
-    if cfg!(target_os = "android") {
-        return Err(SkipReason::PlatformUnavailable);
+    if let Err(reason) = lease {
+        return Err(*reason);
     }
-    let path = context
-        .sample_root
-        .as_ref()
+    read_path(context.sample_root.as_deref())
+}
+pub(in crate::native_host::cast_session) async fn load_uniform(
+    context: Arc<HostContext>,
+) -> (
+    Result<Option<crate::cast_samples::SampleLease>, SkipReason>,
+    Result<Vec<u8>, SkipReason>,
+) {
+    tokio::task::spawn_blocking(move || {
+        let lease = crate::cast_samples::acquire();
+        let bytes = read_uniform(&context, &lease);
+        (lease, bytes)
+    })
+    .await
+    .unwrap_or((
+        Err(SkipReason::SampleCopyFailed),
+        Err(SkipReason::SampleCopyFailed),
+    ))
+}
+fn read_path(root: Option<&std::path::Path>) -> Result<Vec<u8>, SkipReason> {
+    let path = root
         .ok_or(SkipReason::SampleUnavailable)?
         .join("sample-b.ts");
     let file = std::fs::File::open(path).map_err(|_| SkipReason::SampleUnavailable)?;
@@ -449,3 +468,6 @@ pub(super) async fn live(
         tokio::select! {_=cancel.cancelled()=>{},_=tokio::time::sleep(Duration::from_millis(10))=>{}}
     }
 }
+
+#[cfg(test)]
+mod asset_tests;

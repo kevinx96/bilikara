@@ -59,6 +59,9 @@ fn scenario(name: &str) -> Value {
         "Set BILIKARA_TEST_CAST_COMPANION to the same-build test companion"
     );
     let mut host = Host::new();
+    if let Some(root) = crate::cast_samples::root() {
+        Arc::get_mut(&mut host.context).unwrap().sample_root = Some(root);
+    }
     if name == "long_a" {
         host.use_long_media();
     }
@@ -303,7 +306,16 @@ fn scenario(name: &str) -> Value {
             "{name}: A must actually synthesize"
         );
     }
-    if !matches!(name, "bad_b" | "no_sample_root" | "missing_b") {
+    let platform_sample_failure =
+        std::env::var("BILIKARA_TEST_SAMPLE_ASSET_CASE").is_ok_and(|case| {
+            matches!(
+                case.as_str(),
+                "no_space" | "copy_failed" | "absent" | "corrupt"
+            )
+        });
+    if platform_sample_failure {
+        assert!(result["preflight"]["sample_b"].is_null());
+    } else if !matches!(name, "bad_b" | "no_sample_root" | "missing_b") {
         assert!(
             result["preflight"]["sample_b"].is_object(),
             "{name}: B must actually prepare"
@@ -523,6 +535,132 @@ fn self_test_missing_bad_samples_and_unanswered_continue() {
             assert!(report["cast_self_test"]["conclusion"]["learned_mode"].is_null());
         }
     }
+}
+
+#[test]
+#[ignore = "requires trusted BILIKARA_TEST_CAST_COMPANION; real mux and simulated receiver"]
+fn android_sample_assets_lifecycle_and_b_only_failures() {
+    use crate::cast_samples::{self, SamplePlatform};
+    use crate::dlna::diagnostics::SkipReason;
+    use std::sync::atomic::AtomicUsize;
+    const CASE: &str = "BILIKARA_TEST_SAMPLE_ASSET_CASE";
+    let Ok(case) = std::env::var(CASE) else {
+        for case in [
+            "ready",
+            "no_space",
+            "copy_failed",
+            "absent",
+            "corrupt",
+            "cancel",
+        ] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    &format!(
+                        "{}::android_sample_assets_lifecycle_and_b_only_failures",
+                        module_path!().split_once("::").unwrap().1
+                    ),
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env(CASE, case)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{case}: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+                "child test must execute: {case}"
+            );
+        }
+        return;
+    };
+    struct Assets {
+        root: PathBuf,
+        case: String,
+        cleaned: AtomicUsize,
+    }
+    impl SamplePlatform for Assets {
+        fn root(&self) -> PathBuf {
+            self.root.clone()
+        }
+        fn prepare(&self) -> Result<(), SkipReason> {
+            match self.case.as_str() {
+                "no_space" => return Err(SkipReason::SampleStorageInsufficient),
+                "copy_failed" => {
+                    std::fs::write(self.root.join("sample-b.ts.part"), b"partial").unwrap();
+                    return Err(SkipReason::SampleCopyFailed);
+                }
+                "absent" => return Err(SkipReason::PlatformUnavailable),
+                _ => {}
+            }
+            let mut bytes =
+                include_bytes!("../../../../../resources/cast-samples/sample-b.ts").to_vec();
+            if self.case == "corrupt" {
+                bytes[100] ^= 1;
+            }
+            std::fs::write(self.root.join("sample-b.ts"), bytes).unwrap();
+            Ok(())
+        }
+        fn cleanup(&self) {
+            for name in ["sample-b.ts", "sample-b.ts.part"] {
+                let _ = std::fs::remove_file(self.root.join(name));
+            }
+            self.cleaned.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../.tmp")
+        .join(format!("android-sample-{}", token().unwrap()));
+    std::fs::create_dir_all(&root).unwrap();
+    let assets = Arc::new(Assets {
+        root: root.clone(),
+        case: case.clone(),
+        cleaned: AtomicUsize::new(0),
+    });
+    cast_samples::configure(assets.clone());
+    let report = scenario(if case == "cancel" {
+        "cancel"
+    } else {
+        "success"
+    });
+    let cells = report["cast_self_test"]["cells"].as_array().unwrap();
+    let reason = match case.as_str() {
+        "no_space" => Some("sample_storage_insufficient"),
+        "copy_failed" => Some("sample_copy_failed"),
+        "absent" => Some("platform_unavailable"),
+        "corrupt" => Some("sample_integrity_failed"),
+        _ => None,
+    };
+    if case != "cancel" {
+        for (index, cell) in cells.iter().take(4).enumerate() {
+            if let Some(reason) = reason.filter(|_| index % 2 == 1) {
+                assert_eq!(cell["skip_reason"], reason);
+            } else {
+                assert!(
+                    cell["skip_reason"].is_null(),
+                    "A must remain available: {cell}"
+                );
+                assert!(cell["http"]["get"].as_u64().unwrap() > 0);
+            }
+        }
+    }
+    assert_eq!(assets.cleaned.load(Ordering::SeqCst), 1);
+    assert!(std::fs::read_dir(&root).unwrap().next().is_none());
+    if case == "absent" {
+        let host = Host::new();
+        let result = runtime().block_on(super::pipeline::run(
+            host.context.clone(),
+            &CancellationToken::new(),
+        ));
+        assert_eq!(result["code"], "cast_sample_not_integrated");
+        assert_eq!(assets.cleaned.load(Ordering::SeqCst), 2);
+    }
+    std::fs::remove_dir(root).unwrap();
 }
 #[test]
 #[ignore = "requires trusted BILIKARA_TEST_CAST_COMPANION; real T3 mux + loopback receiver"]

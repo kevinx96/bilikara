@@ -152,7 +152,7 @@ pub(super) async fn run(
         } else {
             None
         };
-    let sample_b = samples::read_uniform(&context);
+    let (_sample_lease, sample_b) = samples::load_uniform(context.clone()).await;
     let companion =
         tokio::task::spawn_blocking(|| media::probe().is_ok_and(|p| p.cast_mux_available()))
             .await
@@ -472,6 +472,10 @@ pub(super) async fn run(
             Some(SkipReason::Cancelled)
         } else if cell == Cell::FileMp4A && visible {
             Some(SkipReason::NotNeeded)
+        } else if matches!(cell, Cell::FileB | Cell::LiveB) && sample.is_err() {
+            // Preserve the offline sample failure even without a receiver. A
+            // storage/copy failure must explain only B; A keeps its own result.
+            sample.as_ref().err().copied()
         } else if control.is_none() {
             Some(SkipReason::NoReceiver)
         } else {
