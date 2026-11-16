@@ -1,5 +1,12 @@
 import com.android.build.api.dsl.ApplicationExtension
 import com.android.build.api.variant.ApplicationAndroidComponentsExtension
+import org.gradle.process.ExecOperations
+import javax.inject.Inject
+
+abstract class MediaProcessServices {
+    @get:Inject abstract val execOperations: ExecOperations
+}
+val mediaProcesses = objects.newInstance<MediaProcessServices>()
 
 // Tauri supplies abiList for its selected APK target. No desktop preparation or
 // application Runtime is linked into the host-native construction tool.
@@ -36,7 +43,7 @@ val prepareMedia = tasks.register("prepareBilikaraMedia") {
     outputs.dir(mediaOutput)
     doLast {
         for (abi in mediaAbis) {
-            project.exec {
+            mediaProcesses.execOperations.exec {
                 workingDir(mediaRoot)
                 commandLine("cargo", "run", "--manifest-path", "xtask/Cargo.toml", "--locked",
                     "--target", "host-tuple", "--", "android-libav", "--ndk", mediaNdk.get().asFile.absolutePath,

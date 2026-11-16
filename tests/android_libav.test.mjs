@@ -4,6 +4,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
+import { userInfo } from 'node:os';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const scratch = path.join(root, '.tmp');
@@ -90,5 +91,29 @@ test('Gradle packages only verified JNI/assets and leaves source kit beside the 
   assert.match(media, /"--target", "host-tuple"/);
   assert.match(media, /BILIKARA_ANDROID_LIBAV_CACHE/);
   assert.match(media, /BILIKARA_LIBAV_SOURCE_DIR/);
+  assert.match(media, /@get:Inject abstract val execOperations: ExecOperations/);
+  assert.match(media, /mediaProcesses\.execOperations\.exec/);
+  assert.doesNotMatch(media, /project\.exec/);
   assert.match(build, /targetSdk = 36/);
+});
+
+test('real Android libraries contain no build-machine paths or username', {
+  skip: !process.env.BILIKARA_TEST_ANDROID_LIBAV_DIR && 'Set BILIKARA_TEST_ANDROID_LIBAV_DIR to real NDK-built jniLibs/<abi> to qualify binary strings',
+}, () => {
+  const directory = process.env.BILIKARA_TEST_ANDROID_LIBAV_DIR;
+  const names = ['libavcodec.so', 'libavformat.so', 'libavutil.so', 'libswresample.so', 'libbilikara_media_libav.so'];
+  assert.deepEqual(readdirSync(directory).sort(), [...names].sort());
+  const user = userInfo().username.toLowerCase();
+  for (const name of names) {
+    const bytes = readFileSync(path.join(directory, name));
+    assert.equal(bytes.subarray(0, 4).toString('hex'), '7f454c46', name);
+    // Scan printable strings rather than interpreting arbitrary binary bytes as UTF-8.
+    const strings = bytes.toString('latin1').match(/[\x20-\x7e]{4,}/g).join('\n').toLowerCase();
+    for (const marker of ['/users/', '\\users\\', '/home/', '.android-libav-build-', '.android-libav-output-',
+      root.toLowerCase(), root.toLowerCase().replaceAll('\\', '/')]) {
+      assert.ok(!strings.includes(marker), `${name} contains a build path marker: ${marker}`);
+    }
+    assert.ok(!strings.includes(user), `${name} contains the build username`);
+    assert.ok(strings.includes('--prefix=/bilikara-android-libav'), `${name} lacks fixed FFmpeg prefix`);
+  }
 });

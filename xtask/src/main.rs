@@ -24,7 +24,15 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 fn main() {
     if let Err(error) = run() {
-        eprintln!("Desktop task failed: {error}");
+        let task = if env::args_os()
+            .nth(1)
+            .is_some_and(|action| action == "android-libav")
+        {
+            "Android libav task"
+        } else {
+            "Desktop task"
+        };
+        eprintln!("{task} failed: {error}");
         std::process::exit(1);
     }
 }

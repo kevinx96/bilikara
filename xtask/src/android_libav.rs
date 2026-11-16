@@ -21,6 +21,7 @@ const NDK: &str = "27.0.12077973";
 const VERSION: &str = "9.0.1";
 const SOURCE_SHA: &str = "cf38e0e28c7e5605942c4a77755349b0145804a397af37eb1fb4c77cb237f635";
 const FINGERPRINT: &str = "FCF986EA15E6E293A5644F10B4322F04D67658D8";
+const INSTALL_PREFIX: &str = "/bilikara-android-libav";
 const LIBRARIES: &[&str] = &[
     "libavformat.so",
     "libavcodec.so",
@@ -462,10 +463,11 @@ fn upstream(o: &Options, tc: &Path, key: &str) -> Result<PathBuf> {
     execute(tar, &prefix.join("records/extract.log"), 60)?;
     let source = work.path().join(format!("ffmpeg-{VERSION}"));
     let mut build = Command::new("bash");
-    // Resolve the prefix inside MSYS/POSIX from the owned source cwd. No
-    // canonical Windows path is passed to configure, cygpath, or the compiler.
+    // FFmpeg embeds its configure arguments in every library. Keep the logical
+    // prefix machine independent; only installation sees the physical DESTDIR.
     build.current_dir(&source)
-        .args(["-c", "prefix=$(cd ../prefix && pwd -P) || exit; exec bash ./configure \"--prefix=$prefix\" \"$@\"", "--"])
+        .arg("./configure")
+        .arg(format!("--prefix={INSTALL_PREFIX}"))
         .args(CONFIGURE)
         .arg(format!("--arch={}", o.abi.arch))
         .arg(format!("--extra-cflags=--target={}24", o.abi.triple))
@@ -490,11 +492,19 @@ fn upstream(o: &Options, tc: &Path, key: &str) -> Result<PathBuf> {
         .env("PATH", &path)
         .arg(format!("-j{jobs}"));
     execute(make, &prefix.join("records/build.log"), 1200)?;
-    let mut make = Command::new("make");
+    fs::create_dir(work.path().join("install"))?;
+    let mut make = Command::new("bash");
     make.current_dir(&source)
         .env("PATH", &path)
-        .args(["install-libs", "install-headers"]);
+        .args(["-c", "dest=$(cd ../install && pwd -P) || exit; exec make install-libs install-headers \"DESTDIR=$dest\""]);
     execute(make, &prefix.join("records/install.log"), 120)?;
+    let installed = work
+        .path()
+        .join("install")
+        .join(INSTALL_PREFIX.trim_start_matches('/'));
+    for name in ["lib", "include"] {
+        files::tree(&installed.join(name), &prefix.join(name), false)?;
+    }
     for name in ["config.h", "config_components.h"] {
         files::copy(&source.join(name), &prefix.join("records").join(name))?;
     }
@@ -572,6 +582,15 @@ fn verify_cache(prefix: &Path, abi: Abi, key: &str) -> Result<()> {
         paths::safe_file(prefix, &prefix.join(name))?;
     }
     let cfg = fs::read_to_string(prefix.join("records/config.h"))?;
+    verify_configuration(&cfg).map_err(|error| {
+        format!(
+            "Cannot reuse Android C cache {}: {error}; select a fresh --cache directory to rebuild",
+            prefix.display()
+        )
+    })?;
+    for name in &LIBRARIES[..4] {
+        verify_binary_privacy(&prefix.join("lib").join(name))?;
+    }
     for flag in [
         "CONFIG_GPL",
         "CONFIG_NONFREE",
@@ -593,6 +612,63 @@ fn verify_cache(prefix: &Path, abi: Abi, key: &str) -> Result<()> {
         if !components.lines().any(|l| l == format!("#define {flag} 1")) {
             return Err("Android libav is missing a required component".into());
         }
+    }
+    Ok(())
+}
+
+fn verify_configuration(cfg: &str) -> Result<()> {
+    let config = cfg
+        .lines()
+        .find_map(|line| line.strip_prefix("#define FFMPEG_CONFIGURATION "))
+        .ok_or("Missing FFmpeg configuration")?;
+    let prefixes: Vec<_> = config
+        .trim_matches('"')
+        .split_whitespace()
+        .filter(|part| part.starts_with("--prefix="))
+        .collect();
+    if prefixes != [format!("--prefix={INSTALL_PREFIX}")] {
+        return Err(
+            "FFmpeg configuration must use the fixed, machine-independent installation prefix"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+// Inspect the actual bytes, not build-info claims. This also rejects a restored
+// pre-fix C cache whose configuration still embeds another builder's home path.
+fn verify_binary_privacy(path: &Path) -> Result<()> {
+    let bytes = fs::read(path)?;
+    for marker in [
+        b"/users/".as_slice(),
+        b"\\users\\",
+        b"/home/",
+        b"\\home\\",
+        b".android-libav-build-",
+        b".android-libav-output-",
+    ] {
+        if bytes
+            .windows(marker.len())
+            .any(|window| window.eq_ignore_ascii_case(marker))
+        {
+            return Err(format!(
+                "Android library {} contains a build-machine path; rebuild with a fresh C cache",
+                path.display()
+            )
+            .into());
+        }
+    }
+    let prefix = format!("--prefix={INSTALL_PREFIX}");
+    if path.file_name() != Some(OsStr::new("libc++_shared.so"))
+        && !bytes
+            .windows(prefix.len())
+            .any(|window| window == prefix.as_bytes())
+    {
+        return Err(format!(
+            "Android library {} lacks the fixed installation prefix; rebuild with a fresh C cache",
+            path.display()
+        )
+        .into());
     }
     Ok(())
 }
@@ -972,6 +1048,7 @@ fn companion(root: &Path, o: &Options, tc: &Path, prefix: &Path, key: &str) -> R
             .arg("--strip-unneeded")
             .arg(name);
         execute(strip, &stage.path().join("strip.log"), 30)?;
+        verify_binary_privacy(&libraries.join(name))?;
         facts.insert(
             name,
             inspect(
@@ -1023,7 +1100,7 @@ fn companion(root: &Path, o: &Options, tc: &Path, prefix: &Path, key: &str) -> R
     fs::write(
         assets.join("licenses/libav-source.txt"),
         format!(
-            "FFmpeg {VERSION} (LGPL-2.1-or-later), dynamically linked; original source is unmodified.\nSource SHA-256: {SOURCE_SHA}\nSigning fingerprint: {FINGERPRINT}\nConfiguration: {config}\nCorresponding source and rebuild kit: {kit_name}\nDistributed separately alongside this APK at the same download location.\nProject downloads: https://github.com/kevinx96/bilikara/releases\nUpstream archive: https://ffmpeg.org/releases/ffmpeg-{VERSION}.tar.xz\n"
+            "FFmpeg {VERSION} (LGPL-2.1-or-later), dynamically linked; original source is unmodified.\nSource SHA-256: {SOURCE_SHA}\nSigning fingerprint: {FINGERPRINT}\nConfiguration: {config}\nCorresponding source and rebuild kit: {kit_name}\nDistributed separately alongside this APK at the same download location.\nUpstream archive: https://ffmpeg.org/releases/ffmpeg-{VERSION}.tar.xz\n"
         ),
     )?;
     files::write_json(
@@ -1039,7 +1116,7 @@ fn companion(root: &Path, o: &Options, tc: &Path, prefix: &Path, key: &str) -> R
     // compiler, dependency, source-kit or final rename check.
     if o.out.exists() {
         validate_output(&o.out)?;
-        fs::rename(&o.out, stage.path().join("previous"))?;
+        replace_output_directory(&o.out, &stage.path().join("previous"))?;
     }
     if let Err(error) = fs::rename(&payload, &o.out) {
         if stage.path().join("previous").exists()
@@ -1047,15 +1124,21 @@ fn companion(root: &Path, o: &Options, tc: &Path, prefix: &Path, key: &str) -> R
         {
             let recovery = stage.keep();
             return Err(format!(
-                "Android publication failed; previous output retained at {}",
-                recovery.join("previous").display()
+                "Cannot publish Android output {} to {}: {error}; rollback also failed; previous output retained at {}",
+                payload.display(), o.out.display(), recovery.join("previous").display()
             )
             .into());
         }
-        return Err(error.into());
+        return Err(format!("Cannot publish Android output {} to {}: {error}; the destination may be in use by another process", payload.display(), o.out.display()).into());
     }
     println!("Android media complete: {}", o.out.display());
     Ok(())
+}
+fn replace_output_directory(from: &Path, to: &Path) -> Result<()> {
+    fs::rename(from, to).map_err(|error| format!(
+        "Cannot move existing Android output {} to {} while replacing the output directory: {error}; it may be in use by another process; leave that directory and retry (existing output preserved)",
+        from.display(), to.display()
+    ).into())
 }
 pub fn run(args: Vec<OsString>) -> Result<()> {
     let mut o = options(args)?;
@@ -1099,6 +1182,7 @@ pub fn run(args: Vec<OsString>) -> Result<()> {
             .tempdir_in(o.out.parent().ok_or("Missing output parent")?)?;
         let directory = o.out.join("jniLibs").join(o.abi.name);
         for name in library_names(o.signalsmith) {
+            verify_binary_privacy(&directory.join(name))?;
             inspect(
                 &tc,
                 &directory,
@@ -1139,6 +1223,70 @@ pub fn run(args: Vec<OsString>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fixed_prefix_and_binary_scan_reject_build_machine_paths() {
+        assert!(verify_configuration("#define FFMPEG_CONFIGURATION \"--prefix=/bilikara-android-libav --target-os=android\"\n").is_ok());
+        for prefix in [
+            "/home/private-builder/cache",
+            "/c/Users/private-builder/cache",
+            "/bilikara-android-libav --prefix=/tmp/second",
+        ] {
+            assert!(
+                verify_configuration(&format!(
+                    "#define FFMPEG_CONFIGURATION \"--prefix={prefix}\"\n"
+                ))
+                .is_err()
+            );
+        }
+        let temp = temporary();
+        let library = temp.path().join("libavutil.so");
+        fs::write(&library, b"\x7fELF\0--prefix=/bilikara-android-libav\0").unwrap();
+        assert!(verify_binary_privacy(&library).is_ok());
+        fs::write(&library, b"\x7fELF\0--prefix=/tmp/old-build\0").unwrap();
+        assert!(
+            verify_binary_privacy(&library)
+                .unwrap_err()
+                .to_string()
+                .contains("lacks the fixed installation prefix")
+        );
+        for path in [
+            "/c/Users/private-builder/cache",
+            "C:\\Users\\private-builder\\cache",
+            "/home/private-builder/cache",
+            "/Users/private-builder/cache",
+            "/tmp/.android-libav-build-random",
+        ] {
+            fs::write(&library, format!("\x7fELF\0{path}\0")).unwrap();
+            let error = verify_binary_privacy(&library).unwrap_err().to_string();
+            assert!(error.contains("build-machine path"));
+            assert!(error.contains("libavutil.so"));
+        }
+    }
+    #[test]
+    fn replacement_failure_identifies_operation_and_both_paths() {
+        let temp = temporary();
+        let old = temp.path().join("old-output");
+        let backup = temp.path().join("occupied-backup");
+        fs::create_dir(&old).unwrap();
+        fs::create_dir(&backup).unwrap();
+        fs::write(old.join("preserve"), "old library").unwrap();
+        fs::write(backup.join("occupied"), "unrelated").unwrap();
+        let error = replace_output_directory(&old, &backup)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(&old.display().to_string()));
+        assert!(error.contains(&backup.display().to_string()));
+        assert!(error.contains("replacing the output directory"));
+        assert!(error.contains("in use by another process"));
+        assert_eq!(
+            fs::read_to_string(old.join("preserve")).unwrap(),
+            "old library"
+        );
+        assert_eq!(
+            fs::read_to_string(backup.join("occupied")).unwrap(),
+            "unrelated"
+        );
+    }
     fn temporary() -> tempfile::TempDir {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()

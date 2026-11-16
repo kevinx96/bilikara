@@ -16,6 +16,10 @@ cache and optional source paths. Use the NDK's normal native path spelling;
 the compiler discovers its own sysroot from its executable path. The tool keeps
 canonical paths for validation and uses relative compiler inputs and outputs
 under its owned build directory, without stripping Windows verbatim prefixes.
+FFmpeg's embedded configure string uses the fixed logical prefix
+`/bilikara-android-libav`; installation uses a separate temporary `DESTDIR`.
+The temporary directory therefore does not become part of the library's
+configuration or the companion's configuration handshake.
 
 ```text
 cargo run --manifest-path xtask/Cargo.toml --locked --target host-tuple -- android-libav --ndk <absolute-ndk> --abi arm64-v8a --out <absolute-output> --cache <absolute-cache>
@@ -73,6 +77,10 @@ use the actual emitted key, not a guessed cross-host key.
 Cache `<cache>/<key>/` contains only upstream C libraries, headers, signed
 source, licenses and build records plus `cache-manifest.json`. Cache hits check
 inventory, hashes, source identity and configuration and skip FFmpeg compilation.
+The fixed-prefix and binary-path checks also run on cache hits. Older caches
+with a machine-specific prefix are rejected with their path and instructions
+to select a fresh `--cache` directory. The cache key format is unchanged; an
+old cache is never silently reused or overwritten to bypass these checks.
 The companion, licenses and source kit are rebuilt after a hit. Never cache
 `jniLibs` or an application binary as part of this C cache.
 
@@ -102,6 +110,13 @@ npm run test:android-libav
 npm run test:desktop-build
 npm run tauri -- android build --debug --apk --target aarch64
 ```
+
+Set `BILIKARA_TEST_ANDROID_LIBAV_DIR` to the absolute real-built
+`<output>/jniLibs/<abi>` directory when running `npm run test:android-libav`.
+This enables the binary-string acceptance test for the five real libraries:
+it rejects build-directory/home paths and the current builder's username,
+and requires the fixed FFmpeg prefix. Without that input the real-library
+test explicitly skips; synthetic ELF tests alone do not qualify this check.
 
 After a real NDK build, repeat the xtask command with `--verify-only`; rerun
 without that flag and confirm `Android libav C cache hit` with no FFmpeg rebuild.
