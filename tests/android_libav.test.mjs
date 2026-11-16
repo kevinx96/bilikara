@@ -5,6 +5,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { userInfo } from 'node:os';
+import './android_media_check.test.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const scratch = path.join(root, '.tmp');

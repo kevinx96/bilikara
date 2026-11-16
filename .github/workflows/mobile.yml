@@ -19,6 +19,7 @@ permissions:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  CARGO_BUILD_JOBS: "8"
 
 jobs:
   test:
@@ -59,11 +60,24 @@ jobs:
         with:
           packages: platform-tools
 
-      - name: Install pinned Android signing tools
-        run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
+      - name: Install pinned Android signing tools and target compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libclang-dev
+          sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;27.0.12077973"
+          ndk="$ANDROID_HOME/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
+          echo "CC_aarch64_linux_android=$ndk/bin/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
+          echo "CXX_aarch64_linux_android=$ndk/bin/aarch64-linux-android24-clang++" >> "$GITHUB_ENV"
+          echo "AR_aarch64_linux_android=$ndk/bin/llvm-ar" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$ndk/bin/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
+          echo "BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android=--target=aarch64-linux-android24 --sysroot=$ndk/sysroot -resource-dir=$ndk/lib/clang/18" >> "$GITHUB_ENV"
 
       - name: Setup repository Rust toolchain
         uses: ./.github/actions/rust-toolchain
+
+      - name: Install Android Rust target
+        run: rustup target add aarch64-linux-android
 
       - name: Cache Rust test builds
         id: rust-cache
@@ -72,6 +86,8 @@ jobs:
           workspaces: |
             ./rust -> target
             ./rust-runtime -> target
+            ./src-tauri -> target
+            ./xtask -> target
           cache-workspace-crates: true
           shared-key: android-test-workspace-v1
 
@@ -85,6 +101,13 @@ jobs:
           cargo test --manifest-path rust-runtime/Cargo.toml --features native-host --locked
           BILIKARA_REQUIRE_ANDROID_SIGNING_TESTS=1 node --test tests/android_release.test.mjs
           npm run test:frontend
+          npm run test:android-libav
+
+      - name: Compile Android Runtime feature groups and shell with clippy
+        run: |
+          cargo clippy --manifest-path rust-runtime/Cargo.toml --target aarch64-linux-android --lib --locked -- -D warnings
+          cargo clippy --manifest-path rust-runtime/Cargo.toml --target aarch64-linux-android --lib --features native-host --locked -- -D warnings
+          cargo clippy --manifest-path src-tauri/Cargo.toml --target aarch64-linux-android --lib --locked -- -D warnings
 
       - name: Summarize Rust test cache
         if: always()
@@ -108,6 +131,8 @@ jobs:
             tauri_target: aarch64
     permissions:
       contents: write
+    env:
+      BILIKARA_ANDROID_LIBAV_CACHE: ${{ github.workspace }}/.tmp/android-libav-cache
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -136,7 +161,7 @@ jobs:
       - name: Prepare native YouTube binding generator
         run: |
           sudo apt-get update
-          sudo apt-get install -y libclang-dev
+          sudo apt-get install -y libclang-dev build-essential curl gnupg xz-utils
 
       - name: Install pinned Android tools
         run: |
@@ -159,6 +184,7 @@ jobs:
             ./rust -> target
             ./rust-runtime -> target
             ./src-tauri -> target
+            ./xtask -> target
           cache-workspace-crates: true
           shared-key: android-apk-workspace-v1
           key: android-36-ndk-27.0.12077973
@@ -168,6 +194,59 @@ jobs:
         with:
           add-job-summary: never
           cache-read-only: ${{ github.event_name == 'pull_request' }}
+
+      - name: Resolve upstream Android libav C cache key
+        id: libav-key
+        run: |
+          cargo run --manifest-path xtask/Cargo.toml --locked --target host-tuple -- android-libav \
+            --ndk "$NDK_HOME" --abi arm64-v8a \
+            --out "$GITHUB_WORKSPACE/src-tauri/gen/android/app/build/generated/bilikara-media/arm64-v8a" \
+            --cache "$BILIKARA_ANDROID_LIBAV_CACHE" --cache-key >> "$GITHUB_OUTPUT"
+
+      - name: Restore upstream Android libav C cache
+        id: libav-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.BILIKARA_ANDROID_LIBAV_CACHE }}/${{ steps.libav-key.outputs.key }}
+          key: ${{ steps.libav-key.outputs.key }}
+
+      - name: Build verified Android libav and fresh companion
+        run: |
+          cargo run --manifest-path xtask/Cargo.toml --locked --target host-tuple -- android-libav \
+            --ndk "$NDK_HOME" --abi arm64-v8a \
+            --out "$GITHUB_WORKSPACE/src-tauri/gen/android/app/build/generated/bilikara-media/arm64-v8a" \
+            --cache "$BILIKARA_ANDROID_LIBAV_CACHE"
+          BILIKARA_TEST_ANDROID_LIBAV_DIR="$GITHUB_WORKSPACE/src-tauri/gen/android/app/build/generated/bilikara-media/arm64-v8a/jniLibs/arm64-v8a" npm run test:android-libav
+
+      - name: Verify generated Android media before signing
+        run: |
+          node scripts/android_media_check.mjs \
+            --media-output "$GITHUB_WORKSPACE/src-tauri/gen/android/app/build/generated/bilikara-media/arm64-v8a" \
+            --readelf "$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" \
+            --source-kit "$GITHUB_WORKSPACE/src-tauri/gen/android/app/build/generated/bilikara-media/arm64-v8a/sources/bilikara-android-libav-9.0.1-arm64-v8a-source-kit.zip"
+
+      # Save/upload before signing: dispatch may lack its persistent beta secret.
+      - name: Save upstream Android libav C cache
+        if: steps.libav-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.BILIKARA_ANDROID_LIBAV_CACHE }}/${{ steps.libav-key.outputs.key }}
+          key: ${{ steps.libav-key.outputs.key }}
+
+      - name: Upload corresponding Android libav source kit
+        uses: actions/upload-artifact@v7
+        with:
+          path: src-tauri/gen/android/app/build/generated/bilikara-media/arm64-v8a/sources/bilikara-android-libav-9.0.1-arm64-v8a-source-kit.zip
+          archive: false
+          if-no-files-found: error
+
+      - name: Explain Android media distribution
+        run: |
+          printf '%s\n' '### Android media' \
+            'Five media libraries: LOAD >=16 KiB, GNU_RELRO, SONAME, NEEDED closure and build-path scans verified.' \
+            'APK licenses/source notice: assets/bilikara-media/arm64-v8a/licenses/.' \
+            'Corresponding source: bilikara-android-libav-9.0.1-arm64-v8a-source-kit.zip, a separate artifact in this same run. Distribute it alongside the APK.' \
+            'Sample B: checked by SHA-256 when present in the APK; absence is explicitly reported until A4 integration.' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Resolve APK and prepare signing
         id: android
@@ -204,6 +283,9 @@ jobs:
           if [ "$RELEASE_APK" = "true" ]; then variant=release; fi
           mapfile -t apks < <(find src-tauri/gen/android/app/build/outputs/apk -type f -name "*${variant}.apk")
           test "${#apks[@]}" = 1
+          node scripts/android_media_check.mjs --apk "${apks[0]}" \
+            --readelf "$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" \
+            --source-kit "$GITHUB_WORKSPACE/src-tauri/gen/android/app/build/generated/bilikara-media/arm64-v8a/sources/bilikara-android-libav-9.0.1-arm64-v8a-source-kit.zip"
           "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs "${apks[0]}" > "$RUNNER_TEMP/android-apk-signature.txt"
           cat "$RUNNER_TEMP/android-apk-signature.txt"
           node scripts/android_release.mjs --verify-signature "$RUNNER_TEMP/android-apk-signature.txt" "$APK_SIGNING_MODE"
@@ -221,7 +303,9 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v3
         with:
-          files: ${{ steps.android.outputs.apk }}
+          files: |
+            ${{ steps.android.outputs.apk }}
+            src-tauri/gen/android/app/build/generated/bilikara-media/arm64-v8a/sources/bilikara-android-libav-9.0.1-arm64-v8a-source-kit.zip
           generate_release_notes: ${{ contains(github.ref_name, '-preview.') }}
           prerelease: ${{ contains(github.ref_name, '-preview.') }}
           draft: true
