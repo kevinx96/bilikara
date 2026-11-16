@@ -104,18 +104,44 @@ export function verifyPrivacy(bytes, name, { paths = [], username = '' } = {}) {
   if (bytes.subarray(0, 4).toString('hex') !== '7f454c46') fail(`${name}: missing ELF magic`);
   // libavutil's av_tempfile embeds this generic runtime mkstemp template.
   // Exempt only that complete C string, never arbitrary /tmp build paths.
-  const text = bytes.toString('latin1').toLowerCase().replaceAll('\0/tmp/%sxxxxxx\0', '\0');
-  const markers = ['/users/', '\\users\\', '/home/', '\\home\\', '/root/', '/tmp/', '/private/var/',
-    '/__w/', '/runner/_work/', '.android-libav-build-', '.android-libav-output-', ...paths, username];
-  for (const marker of markers.filter(Boolean)) {
-    if ([marker, marker.replaceAll('\\', '/')].some(value => text.includes(value.toLowerCase()))) fail(`${name}: contains build-machine path/username`);
+  const text = bytes.toString('latin1').toLowerCase().replaceAll('\0/tmp/%sxxxxxx\0', '\0').replaceAll('\\', '/');
+  const reject = () => fail(`${name}: contains build-machine path/username`);
+  const markers = ['/users/', '/home/', '/root/', '/tmp/', '/private/var/', '/var/folders/',
+    '/cygdrive/', '/opt/hostedtoolcache/', '/__w/', '/runner/_work/', '.android-libav-build-', '.android-libav-output-'];
+  if (markers.some(marker => text.includes(marker)) || /\/(?:mnt\/[a-z]|[a-z]\/users)\//.test(text)) reject();
+  const containsDirectory = directory => {
+    let at = -1;
+    while ((at = text.indexOf(directory, at + 1)) !== -1) {
+      const next = text[at + directory.length];
+      if (next === undefined || /[\s\0/'"`]/.test(next)) return true;
+    }
+    return false;
+  };
+  // A username is meaningful only in a home-path segment. Words such as root,
+  // user, build, dev, ci and runner are ordinary symbols in valid libraries.
+  if (username && ['/home/', '/users/'].some(base => containsDirectory(base + username.toLowerCase()))) reject();
+  for (const value of paths.filter(Boolean)) {
+    const portable = value.replaceAll('\\', '/').toLowerCase().replace(/\/+$/, '');
+    if (!portable) continue;
+    const forms = [portable], drive = /^([a-z]):(\/.*)$/.exec(portable);
+    if (drive) forms.push(`/${drive[1]}${drive[2]}`, `/cygdrive/${drive[1]}${drive[2]}`, `/mnt/${drive[1]}${drive[2]}`);
+    if (forms.some(containsDirectory)) reject();
   }
   if (!text.includes('--prefix=/bilikara-android-libav')) fail(`${name}: missing fixed FFmpeg prefix`);
 }
 
-export function verifySample(reader) {
+export function castSamplesIncluded(property = 'bilikara.includeCastSamples=true') {
+  const value = /^bilikara\.includeCastSamples=(true|false)$/.exec(property);
+  if (!value) fail('Expected Gradle property bilikara.includeCastSamples=true or false');
+  return value[1] === 'true';
+}
+
+export function verifySample(reader, required = true) {
   const samples = reader.names.filter(name => name.startsWith('assets/') && path.posix.basename(name) === 'sample-b.ts');
-  if (!samples.length) return 'absent (A4 optional hook; not qualified)';
+  if (!samples.length) {
+    if (required) fail('Required sample B asset is missing (bilikara.includeCastSamples=true)');
+    return 'absent (not required for this input)';
+  }
   if (samples.length !== 1) fail('Duplicate sample B assets');
   const bytes = reader.read(samples[0]);
   if (bytes.length !== 12_079_564 || createHash('sha256').update(bytes).digest('hex') !== sampleHash) fail('Sample B size/SHA-256 mismatch');
@@ -165,9 +191,10 @@ export function verifyLicenses(reader, abi, kit) {
   return `${base}licenses/; separate source kit: ${kit}`;
 }
 
-export function checkMedia({ apk, mediaOutput, abi = 'arm64-v8a', readelf, sourceKit: kit, scratch, privacy = {} }) {
+export function checkMedia({ apk, mediaOutput, abi = 'arm64-v8a', readelf, sourceKit: kit, scratch, privacy = {}, gradleProperty }) {
   if (Boolean(apk) === Boolean(mediaOutput)) fail('Select exactly one of --apk or --media-output');
   if (!['arm64-v8a', 'x86_64'].includes(abi)) fail('Unsupported Android ABI');
+  const requireSample = Boolean(apk) && castSamplesIncluded(gradleProperty);
   const source = apk ? zipReader(readFileSync(apk)) : directoryReader(mediaOutput);
   // Source kits belong beside the generated assets/JNI tree, never in APK.
   const reader = mediaOutput ? { ...source, names: source.names.filter(name => !name.startsWith('sources/')) } : source;
@@ -189,7 +216,7 @@ export function checkMedia({ apk, mediaOutput, abi = 'arm64-v8a', readelf, sourc
       });
       libraries[name] = verifyElf(text, name, abi);
     }
-    return { abi, input: apk || mediaOutput, libraries, licenses: verifyLicenses(reader, abi, kit), sample: verifySample(reader) };
+    return { abi, input: apk || mediaOutput, libraries, licenses: verifyLicenses(reader, abi, kit), sample: verifySample(reader, requireSample) };
   } finally {
     rmSync(temporary, { recursive: true, force: true });
   }
@@ -197,7 +224,7 @@ export function checkMedia({ apk, mediaOutput, abi = 'arm64-v8a', readelf, sourc
 
 function main() {
   const options = {};
-  const keys = { '--apk': 'apk', '--media-output': 'mediaOutput', '--abi': 'abi', '--readelf': 'readelf', '--source-kit': 'sourceKit', '--scratch': 'scratch' };
+  const keys = { '--apk': 'apk', '--media-output': 'mediaOutput', '--abi': 'abi', '--readelf': 'readelf', '--source-kit': 'sourceKit', '--scratch': 'scratch', '--gradle-property': 'gradleProperty' };
   for (let i = 2; i < process.argv.length; i += 2) {
     const key = keys[process.argv[i]], value = process.argv[i + 1];
     if (!key || !value || options[key]) fail('Invalid/duplicate package gate argument');
@@ -205,6 +232,10 @@ function main() {
   }
   for (const key of ['readelf', 'sourceKit']) if (!options[key] || !existsSync(options[key]) || !statSync(options[key]).isFile()) fail(`Missing ${key}`);
   options.scratch ||= path.resolve('.tmp');
+  // Match Gradle's environment property and -P precedence; callers using -P
+  // pass the same named property with --gradle-property to this verifier.
+  const includeSamples = process.env['ORG_GRADLE_PROJECT_bilikara.includeCastSamples'];
+  if (options.gradleProperty === undefined && includeSamples !== undefined) options.gradleProperty = `bilikara.includeCastSamples=${includeSamples}`;
   options.privacy = { paths: [process.cwd(), process.env.GITHUB_WORKSPACE, process.env.RUNNER_TEMP, process.env.HOME, process.env.NDK_HOME], username: userInfo().username };
   console.log(JSON.stringify(checkMedia(options), null, 2));
 }

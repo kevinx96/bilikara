@@ -19,7 +19,6 @@ permissions:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
-  CARGO_BUILD_JOBS: "8"
 
 jobs:
   test:
@@ -39,6 +38,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+
+      - name: Use runner CPU count for Cargo
+        run: echo "CARGO_BUILD_JOBS=$(nproc)" >> "$GITHUB_ENV"
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
@@ -137,6 +139,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
+      - name: Use runner CPU count for Cargo
+        run: echo "CARGO_BUILD_JOBS=$(nproc)" >> "$GITHUB_ENV"
+
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
@@ -205,7 +210,7 @@ jobs:
 
       - name: Restore upstream Android libav C cache
         id: libav-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: ${{ env.BILIKARA_ANDROID_LIBAV_CACHE }}/${{ steps.libav-key.outputs.key }}
           key: ${{ steps.libav-key.outputs.key }}
@@ -228,7 +233,7 @@ jobs:
       # Save/upload before signing: dispatch may lack its persistent beta secret.
       - name: Save upstream Android libav C cache
         if: steps.libav-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: ${{ env.BILIKARA_ANDROID_LIBAV_CACHE }}/${{ steps.libav-key.outputs.key }}
           key: ${{ steps.libav-key.outputs.key }}
@@ -246,7 +251,7 @@ jobs:
             'Five media libraries: LOAD >=16 KiB, GNU_RELRO, SONAME, NEEDED closure and build-path scans verified.' \
             'APK licenses/source notice: assets/bilikara-media/arm64-v8a/licenses/.' \
             'Corresponding source: bilikara-android-libav-9.0.1-arm64-v8a-source-kit.zip, a separate artifact in this same run. Distribute it alongside the APK.' \
-            'Sample B: checked by SHA-256 when present in the APK; absence is explicitly reported until A4 integration.' >> "$GITHUB_STEP_SUMMARY"
+            'Sample B: the APK must include the fixed-size, SHA-256-pinned asset unless bilikara.includeCastSamples=false explicitly disables it.' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Resolve APK and prepare signing
         id: android

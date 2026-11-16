@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { checkMedia, mediaLibraries, verifyElf, verifyLicenses, verifyPrivacy, verifySample, zipReader } from '../scripts/android_media_check.mjs';
+import { castSamplesIncluded, checkMedia, mediaLibraries, sampleHash, verifyElf, verifyLicenses, verifyPrivacy, verifySample, zipReader } from '../scripts/android_media_check.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const scratch = path.join(root, '.tmp');
@@ -77,11 +77,36 @@ test('binary privacy checks actual bytes, fixed prefix, home/build paths and use
   verifyPrivacy(bytes('safe'), 'libavcodec.so');
   verifyPrivacy(bytes('/tmp/%sXXXXXX\0'), 'libavutil.so');
   for (const marker of ['/home/runner/work/repo', 'C:\\Users\\builder\\repo', '/Users/builder/repo', '/root/repo',
-    '/tmp/build', '/tmp/%sXXXXXX/private/path', '.android-libav-output-123', '/opt/build/repo', 'unique-builder']) {
+    '/tmp/build', '/tmp/%sXXXXXX/private/path', '.android-libav-output-123', '/opt/build/repo', '/home/unique-builder/']) {
     assert.throws(() => verifyPrivacy(bytes(marker), 'libavcodec.so', { paths: ['/opt/build/repo'], username: 'unique-builder' }), /build-machine/);
   }
   assert.throws(() => verifyPrivacy(Buffer.from('\x7fELF bad prefix'), 'libavcodec.so'), /fixed FFmpeg prefix/);
   assert.throws(() => verifyPrivacy(Buffer.from('not ELF'), 'libavcodec.so'), /ELF magic/);
+});
+
+test('usernames match home-path segments, never ordinary library strings', () => {
+  const bytes = value => Buffer.from(`\x7fELF\0--prefix=/bilikara-android-libav\0${value}\0`, 'latin1');
+  for (const username of ['root', 'user', 'build', 'dev', 'ci', 'runner', 'unique-builder']) {
+    verifyPrivacy(bytes(`root user build dev ci runner unique-builder /dev/urandom ${username}`), 'libavutil.so', { username });
+    for (const value of [`/home/${username}/work`, `/Users/${username}/work`, `C:\\Users\\${username}\\work`]) {
+      assert.throws(() => verifyPrivacy(bytes(value), 'libavutil.so', { username }), /build-machine/);
+    }
+  }
+});
+
+test('privacy detects MSYS/Cygwin/WSL paths and macOS/hosted toolchain paths', () => {
+  const bytes = value => Buffer.from(`\x7fELF\0--prefix=/bilikara-android-libav\0${value}\0`, 'latin1');
+  for (const value of ['/c/Users/runner/work', '/cygdrive/d/repo/target', '/var/folders/ab/build',
+    '/private/var/folders/ab/build', '/opt/hostedtoolcache/ndk/lib', '/mnt/d/repo/target']) {
+    assert.throws(() => verifyPrivacy(bytes(value), 'libavutil.so'), /build-machine/, value);
+  }
+  for (const value of ['D:\\bilikara\\ws\\target', 'd:/bilikara/ws/target', '/d/bilikara/ws/target',
+    '/cygdrive/d/bilikara/ws/target', '/mnt/d/bilikara/ws/target', '/d/bilikara/ws']) {
+    assert.throws(() => verifyPrivacy(bytes(value), 'libavutil.so', { paths: ['D:\\bilikara\\ws'] }), /build-machine/, value);
+  }
+  for (const value of ['/d/bilikara/ws-other/target', 'D:/bilikara/ws_other/target']) {
+    verifyPrivacy(bytes(value), 'libavutil.so', { paths: ['D:\\bilikara\\ws'] });
+  }
 });
 
 test('APK ZIP reader verifies compressed/stored payloads and rejects corruption/unsafe names', () => {
@@ -102,9 +127,20 @@ test('APK ZIP reader verifies compressed/stored payloads and rejects corruption/
   assert.throws(() => zipReader(Buffer.from('not ZIP')), /end record/);
 });
 
-test('sample B absence is explicit; present or duplicate corrupt samples fail', () => {
-  assert.match(verifySample(zipReader(zip({ 'assets/other': 'x' }))), /absent.*A4/);
+test('APK sample B is required by default; the exact A4 Gradle property permits opt-out', () => {
+  const absent = zipReader(zip({ 'assets/other': 'x' }));
+  assert.equal(castSamplesIncluded(), true);
+  assert.equal(castSamplesIncluded('bilikara.includeCastSamples=true'), true);
+  assert.equal(castSamplesIncluded('bilikara.includeCastSamples=false'), false);
+  for (const property of ['includeCastSamples=false', 'bilikara.includeCastSample=false', 'bilikara.includeCastSamples=FALSE', 'bilikara.includeCastSamples=']) {
+    assert.throws(() => castSamplesIncluded(property), /Expected Gradle property/);
+  }
+  assert.throws(() => verifySample(absent), /Required sample B asset is missing/);
+  assert.match(verifySample(absent, castSamplesIncluded('bilikara.includeCastSamples=false')), /absent/);
+  const sample = readFileSync(path.join(root, 'resources/cast-samples/sample-b.ts'));
+  assert.match(verifySample(zipReader(zip({ 'assets/cast-samples/sample-b.ts': sample }))), new RegExp(sampleHash));
   assert.throws(() => verifySample(zipReader(zip({ 'assets/cast/sample-b.ts': 'corrupt' }))), /SHA-256 mismatch/);
+  assert.throws(() => verifySample(zipReader(zip({ 'assets/cast/sample-b.ts': 'corrupt' })), false), /SHA-256 mismatch/);
   assert.throws(() => verifySample(zipReader(zip({ 'assets/a/sample-b.ts': 'a', 'assets/b/sample-b.ts': 'b' }))), /Duplicate/);
   const runtime = readFileSync(path.join(root, 'rust-runtime/src/native_host/cast_session/self_test/samples.rs'), 'utf8');
   assert.match(runtime, /8624fbee0c7f4653e6f1c7c2f7a6de9aca5d2b3a3a729a218d7f740b9417aef3/);

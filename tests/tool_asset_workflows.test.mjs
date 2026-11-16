@@ -309,6 +309,8 @@ test('Android media cache/package gates run before signing and cross-clippy cove
   assert.ok(checks.indexOf('libclang-dev') < checks.indexOf('Compile Android Runtime'));
   const restore = step(packages, 'Restore upstream Android libav C cache');
   const save = step(packages, 'Save upstream Android libav C cache');
+  includes(restore, ['uses: actions/cache/restore@v5']);
+  includes(save, ['uses: actions/cache/save@v5']);
   for (const cache of [restore, save]) {
     includes(cache, ['path: ${{ env.BILIKARA_ANDROID_LIBAV_CACHE }}/${{ steps.libav-key.outputs.key }}', 'key: ${{ steps.libav-key.outputs.key }}']);
     excludes(cache, ['restore-keys:', 'jniLibs', 'generated/', 'hashFiles', 'github.sha']);
@@ -325,7 +327,13 @@ test('Android media cache/package gates run before signing and cross-clippy cove
   includes(step(packages, 'Upload corresponding Android libav source kit'), ['actions/upload-artifact@v7', 'source-kit.zip', 'if-no-files-found: error']);
   const verify = step(packages, 'Stage and verify APK');
   includes(verify, ['node scripts/android_media_check.mjs --apk', '--readelf "$NDK_HOME/', '--source-kit']);
+  excludes(verify, ['bilikara.includeCastSamples=false']); // CI test APKs require the default A4 sample.
+  includes(step(packages, 'Explain Android media distribution'), ['APK must include', 'bilikara.includeCastSamples=false']);
   assert.ok(verify.indexOf('android_media_check.mjs') < verify.indexOf('apksigner'));
   includes(step(packages, 'Upload signed APK to GitHub Release'), ['source-kit.zip', '${{ steps.android.outputs.apk }}']);
-  includes(android, ['CARGO_BUILD_JOBS: "8"']);
+  for (const job of [checks, packages]) {
+    includes(step(job, 'Use runner CPU count for Cargo'), ['CARGO_BUILD_JOBS=$(nproc)', '>> "$GITHUB_ENV"']);
+    assert.ok(job.indexOf('Use runner CPU count for Cargo') < job.indexOf('Setup repository Rust toolchain'));
+  }
+  excludes(android, ['CARGO_BUILD_JOBS: "8"']);
 });

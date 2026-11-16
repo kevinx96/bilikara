@@ -114,7 +114,9 @@ test('real Android libraries contain no build-machine paths or username', {
       root.toLowerCase(), root.toLowerCase().replaceAll('\\', '/')]) {
       assert.ok(!strings.includes(marker), `${name} contains a build path marker: ${marker}`);
     }
-    assert.ok(!strings.includes(user), `${name} contains the build username`);
+    for (const home of [`/home/${user}/`, `/users/${user}/`, `\\users\\${user}\\`]) {
+      assert.ok(!strings.includes(home), `${name} contains the build user's home path`);
+    }
     assert.ok(strings.includes('--prefix=/bilikara-android-libav'), `${name} lacks fixed FFmpeg prefix`);
   }
 });
