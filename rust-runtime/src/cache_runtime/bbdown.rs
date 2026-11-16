@@ -396,11 +396,30 @@ pub(super) fn run_track(
     )
     .map_err(|e| CacheRuntimeError::new(e.kind, e.message))?;
     let codec = match inspection {
-        crate::media_routing::Inspection::Completed { metadata, .. } => metadata
-            .streams
-            .first()
-            .and_then(|stream| stream.codec.clone()),
-        crate::media_routing::Inspection::Compatibility { .. } => {
+        crate::media_routing::Inspection::Completed {
+            metadata,
+            diagnostic,
+        } => {
+            append_log(
+                &job.spec.log_file,
+                &format!("media_diagnostic: {}", json!(diagnostic)),
+            );
+            metadata
+                .streams
+                .first()
+                .and_then(|stream| stream.codec.clone())
+        }
+        crate::media_routing::Inspection::Compatibility { reason, .. } => {
+            append_log(
+                &job.spec.log_file,
+                &format!(
+                    "media_diagnostic: {}",
+                    json!({
+                        "operation": "metadata", "backend": "pure_rust", "outcome": "fallback",
+                        "compatibility_reason": reason
+                    })
+                ),
+            );
             // The same retained Rust MP4 probe used by Native normalization.
             // There is no CLI compatibility execution in this Host.
             Some(

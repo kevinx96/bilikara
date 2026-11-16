@@ -235,6 +235,7 @@ fn initialize_platform_tls(app: &tauri::App) -> Result<(), String> {
 fn initialize(app: &tauri::App) -> Result<NativeHost, String> {
     // Reqwest's platform verifier must be ready before any Host worker can use HTTPS.
     initialize_platform_tls(app)?;
+    crate::android_media::initialize(app);
     android_cast::initialize(app);
     let directory = app
         .path()
