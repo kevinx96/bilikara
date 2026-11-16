@@ -7,7 +7,8 @@ pub(super) async fn run(context: Arc<HostContext>, cancel: &CancellationToken) -
     if !media::probe().is_ok_and(|probe| probe.cast_mux_available()) {
         return json!({"ok":false,"code":"cast_backend_unavailable"});
     }
-    let sample_b = match self_test::samples::read_uniform(&context) {
+    let (_sample_lease, uniform) = self_test::samples::load_uniform(context.clone()).await;
+    let sample_b = match uniform {
         Ok(_) => "verified",
         Err(crate::dlna::diagnostics::SkipReason::PlatformUnavailable) => {
             return json!({"ok":false,"code":"cast_sample_not_integrated"});

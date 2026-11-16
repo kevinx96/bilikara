@@ -122,6 +122,8 @@ choices!(SkipReason {
     SamplePreparationFailed,
     SampleUnavailable,
     SampleIntegrityFailed,
+    SampleStorageInsufficient,
+    SampleCopyFailed,
     NoReceiver,
     Cancelled,
     NotNeeded,

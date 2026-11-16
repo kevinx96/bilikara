@@ -35,6 +35,8 @@ mod windows_fullscreen;
 mod android;
 #[cfg(target_os = "android")]
 mod android_media;
+#[cfg(target_os = "android")]
+mod android_samples;
 
 #[cfg(target_os = "ios")]
 compile_error!("iOS Host startup is not implemented; use the Android Alpha target");

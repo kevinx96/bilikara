@@ -433,7 +433,7 @@ fn start_with_resources(
         directory,
         cache_root,
         assets,
-        sample_root,
+        sample_root: sample_root.or_else(crate::cast_samples::root),
         stop: Arc::new(AtomicBool::new(false)),
         api_slots: Arc::new(Semaphore::new(32)),
         export_slots: Arc::new(Semaphore::new(1)),
